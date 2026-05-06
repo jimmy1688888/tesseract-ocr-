@@ -1,365 +1,466 @@
 """
-批次處理 Word 檔 → 擷取圖片 → OCR 辨識許可證號 → 上傳 Google Sheets
+docx_ocr_to_sheets.py
+=====================
+完整整合版流程:
+  1. 批次掃描資料夾內所有 .docx,解壓 word/media/ 中的圖片
+  2. ★ 進階影像前處理:
+       ① 紅通道萃取  (移除紅色印章)
+       ② 過取樣 2x   (放大細節)
+       ③ 對比拉伸    (黑字更黑、白底更白)
+       ④ 中值去雜訊  (清除胡椒鹽雜訊)
+  3. 將處理後的圖片轉為 PDF
+  4. 用 OCRmyPDF 對 PDF 加上文字層(中文+印尼文)
+  5. 讀取文字層,篩選含「許可證號」或「No ijin」的頁面
+  6. 用正則擷取編號,寫入 Google Sheets
 
-使用方式:
-    python docx_ocr_to_sheets.py \
-        --input-dir ./word_files \
-        --sheet-id 1aBcDeFgHiJkLmN... \
-        --creds ./service_account.json \
-        --worksheet "Sheet1"
-
-需求套件:
-    pip install opencv-python numpy gspread google-auth
-
-需求系統工具:
-    tesseract-ocr 與語言包 chi_tra, eng, ind
-    Ubuntu/Debian: sudo apt install tesseract-ocr tesseract-ocr-chi-tra tesseract-ocr-ind
-    macOS:        brew install tesseract tesseract-lang
+使用前準備:
+  - pip install ocrmypdf pdfplumber Pillow gspread google-auth numpy
+  - 安裝 Tesseract(含 chi_tra、ind 語言包) + Ghostscript
+  - Google Cloud Console 建立 Service Account,下載金鑰 JSON
+  - Google Sheets 共用權限給 Service Account 的 email(編輯權限)
 """
 
-from __future__ import annotations
-
-import argparse
-import io
-import logging
 import re
-import subprocess
-import sys
-import tempfile
 import zipfile
-from dataclasses import dataclass
+import logging
+from io import BytesIO
 from pathlib import Path
-from typing import Iterator
+from dataclasses import dataclass, field
+from typing import Optional
 
-import cv2
 import numpy as np
-
-# -----------------------------------------------------------------------------
-# 設定區 — 主要可調參數集中在此
-# -----------------------------------------------------------------------------
-
-# DOCX 內圖片預設放置路徑(Word 規範)
-DOCX_MEDIA_PREFIX = "word/media/"
-ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif"}
-
-# OCR 設定
-TESSERACT_LANGS = "chi_tra+eng+ind"   # 繁中 + 英文 + 印尼文
-TESSERACT_PSM = "6"                   # 多行文字統一區塊
-TESSERACT_OEM = "1"                   # LSTM 引擎
-
-# 關鍵字 — 用來判斷一張圖是否為「含許可證號」的目標圖
-LICENSE_KEYWORDS = ["許可證號", "認可編號", "No ijin", "No.ijin", "Noijin"]
-
-# 許可證號擷取 regex
-# 支援:「3219」、「I-45」這類格式
-LICENSE_PATTERNS = [
-    r"許\s*可\s*證\s*號\s*[:：]?\s*([A-Z]?-?\d{2,6})",
-    r"認\s*可\s*編\s*號\s*[:：]?\s*([A-Z]?-?\d{2,6})",
-    r"No\s*\.?\s*ijin\s*[:：]?\s*([A-Z]?-?\d{2,6})",
-]
-
-logger = logging.getLogger("docx_ocr")
+from PIL import Image, ImageFilter
+import ocrmypdf
+import pdfplumber
+import gspread
+from google.oauth2.service_account import Credentials
 
 
-# -----------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+# 設定區(請依實際環境調整)
+# ═══════════════════════════════════════════════════════════════════════════
+
+INPUT_DOCX_DIR  = Path("./docs")
+WORK_DIR        = Path("./work")
+OUTPUT_DIR      = Path("./output")
+
+OCR_LANGUAGES   = "chi_tra+ind+eng"
+
+# ── 前處理參數 ─────────────────────────────────────────────────────────────
+ENABLE_PREPROCESS    = True
+UPSAMPLE_FACTOR      = 2.0     # 過取樣倍率(1.5~3.0,越大越慢但細節越清晰)
+DENOISE_KERNEL       = 3       # 中值濾波核大小(3 或 5,越大去雜訊越強但字會糊)
+CONTRAST_PERCENTILE  = (2, 98) # 對比拉伸百分位(避免極端值影響)
+
+# ── Google Sheets 設定 ─────────────────────────────────────────────────────
+SERVICE_ACCOUNT_JSON = "./credentials.json"
+SPREADSHEET_NAME     = "OCR辨識結果"
+WORKSHEET_NAME       = "工作表1"
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif"}
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 資料結構
-# -----------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 
 @dataclass
-class OcrResult:
-    """單一 docx 的處理結果"""
-    filename: str
-    license_no: str | None
-    note: str = ""        # 失敗時的說明文字
+class OCRResult:
+    source_docx: str
+    image_name: str
+    pdf_path: Path
+    permit_no_zh: Optional[str] = None
+    permit_no_id: Optional[str] = None
+    full_text: str = field(default="", repr=False)
+
+    @property
+    def is_match(self) -> bool:
+        return self.permit_no_zh is not None or self.permit_no_id is not None
 
 
-# -----------------------------------------------------------------------------
-# 步驟 1:從 docx 解出圖片
-# -----------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 1:從 docx 解壓圖片
+# ═══════════════════════════════════════════════════════════════════════════
 
-def extract_images_from_docx(docx_path: Path) -> Iterator[tuple[str, bytes]]:
-    """
-    Yield (image_name, image_bytes) for every embedded image.
-    docx 本質是 zip,圖片放在 word/media/ 下。
-    """
-    try:
-        with zipfile.ZipFile(docx_path, "r") as z:
-            for name in z.namelist():
-                if not name.startswith(DOCX_MEDIA_PREFIX):
-                    continue
-                ext = Path(name).suffix.lower()
-                if ext not in ALLOWED_IMAGE_EXT:
-                    continue
-                yield name, z.read(name)
-    except zipfile.BadZipFile:
-        logger.error("檔案不是有效的 docx (zip 格式損毀): %s", docx_path)
-
-
-# -----------------------------------------------------------------------------
-# 步驟 2:影像前處理 — 針對「紅章蓋黑字」場景
-# -----------------------------------------------------------------------------
-
-def preprocess_for_stamped_scan(img_bgr: np.ndarray) -> np.ndarray:
-    """
-    紅章覆蓋黑字的掃描圖前處理。流程:
-      紅色通道萃取 → 過取樣 3x → 對比拉伸 → 殘留淡紅置白 → 去雜訊
-
-    為何取紅色通道:
-      紅色印章在 R 通道呈高亮(接近白),黑字在三通道都呈暗。
-      所以只看 R 通道 ≒ 把紅章「物理性」消除。
-    """
-    if img_bgr is None or img_bgr.size == 0:
-        raise ValueError("空白影像")
-
-    # 若是灰階或單通道,先升成 3 通道
-    if len(img_bgr.shape) == 2:
-        img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
-
-    b, g, r = cv2.split(img_bgr)
-    h, w = r.shape
-
-    # 過取樣 3x — 對應 OCRmyPDF 的 --oversample,150 dpi 掃描檔特別需要
-    up = cv2.resize(r, (w * 3, h * 3), interpolation=cv2.INTER_CUBIC)
-
-    # 對比拉伸 + 殘留淡紅置白
-    up = cv2.normalize(up, None, 0, 255, cv2.NORM_MINMAX)
-    up[up > 180] = 255
-
-    # 去雜訊(對應 OCRmyPDF 的 --clean)
-    up = cv2.fastNlMeansDenoising(up, h=10)
-    return up
-
-
-def decode_image_bytes(data: bytes) -> np.ndarray | None:
-    """把 bytes 解成 OpenCV 影像。失敗回 None。"""
-    arr = np.frombuffer(data, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    return img
-
-
-# -----------------------------------------------------------------------------
-# 步驟 3:OCR
-# -----------------------------------------------------------------------------
-
-def ocr_image(img: np.ndarray) -> str:
-    """對前處理後的影像跑 Tesseract,回傳辨識文字。"""
-    # Tesseract 吃檔案路徑,所以寫入暫存檔
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        cv2.imwrite(tmp.name, img)
-        tmp_path = tmp.name
-
-    try:
-        result = subprocess.run(
-            [
-                "tesseract", tmp_path, "-",
-                "-l", TESSERACT_LANGS,
-                "--psm", TESSERACT_PSM,
-                "--oem", TESSERACT_OEM,
-            ],
-            capture_output=True, text=True, timeout=60,
+def extract_images_from_docx(docx_path: Path) -> list[tuple[str, bytes, str]]:
+    images = []
+    with zipfile.ZipFile(docx_path, "r") as z:
+        media_files = sorted(
+            f for f in z.namelist() if f.startswith("word/media/")
         )
-        return result.stdout
-    except subprocess.TimeoutExpired:
-        logger.warning("Tesseract 逾時")
-        return ""
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+        for fname in media_files:
+            suffix = Path(fname).suffix.lower()
+            if suffix in IMAGE_EXTENSIONS:
+                images.append((Path(fname).name, z.read(fname), suffix))
+    return images
 
 
-# -----------------------------------------------------------------------------
-# 步驟 4:從 OCR 文字擷取許可證號
-# -----------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 2:進階影像前處理
+# ═══════════════════════════════════════════════════════════════════════════
 
-def has_license_keyword(text: str) -> bool:
-    """判斷這張圖是否為「含許可證號」的目標圖。"""
-    return any(kw in text for kw in LICENSE_KEYWORDS)
-
-
-def find_license_number(text: str) -> str | None:
-    """從 OCR 文字擷取許可證號。回傳 '3219' 或 'I-45' 之類。"""
-    for pat in LICENSE_PATTERNS:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            return m.group(1).upper()
-    return None
-
-
-# -----------------------------------------------------------------------------
-# 步驟 5:處理單一 docx
-# -----------------------------------------------------------------------------
-
-def process_docx(docx_path: Path) -> OcrResult:
+def extract_red_channel(img: Image.Image) -> Image.Image:
     """
-    處理單一 docx:遍歷所有圖片,找出「含許可證號」的那張,回傳擷取結果。
+    ① 紅通道萃取
+    --------------
+    取 RGB 中的紅通道作為灰階圖。
+    紅色印章在紅通道接近白色(消失),黑字仍為黑色。
+    比 HSV 閾值法更乾淨、更不會誤傷淡色文字。
     """
-    images = list(extract_images_from_docx(docx_path))
-    if not images:
-        return OcrResult(docx_path.name, None, note="docx 中無圖片")
-
-    candidates: list[tuple[str, str, str]] = []  # (image_name, ocr_text, license)
-
-    for image_name, blob in images:
-        img = decode_image_bytes(blob)
-        if img is None:
-            logger.debug("  圖片解碼失敗: %s", image_name)
-            continue
-
-        try:
-            processed = preprocess_for_stamped_scan(img)
-        except ValueError as e:
-            logger.debug("  前處理失敗 %s: %s", image_name, e)
-            continue
-
-        text = ocr_image(processed)
-        if not has_license_keyword(text):
-            continue
-
-        license_no = find_license_number(text)
-        if license_no:
-            candidates.append((image_name, text, license_no))
-            logger.info("  ✓ %s → 許可證號: %s", image_name, license_no)
-
-    if not candidates:
-        return OcrResult(docx_path.name, None, note="未找到含許可證號的圖")
-
-    # 若多張圖都偵測到,取第一張(通常 docx 內圖片順序穩定)
-    _, _, license_no = candidates[0]
-    note = "" if len(candidates) == 1 else f"找到 {len(candidates)} 張候選圖,取第一張"
-    return OcrResult(docx_path.name, license_no, note=note)
+    rgb = np.array(img.convert("RGB"))
+    red_channel = rgb[:, :, 0]   # shape: (H, W),uint8
+    return Image.fromarray(red_channel, mode="L")
 
 
-# -----------------------------------------------------------------------------
-# 步驟 6:上傳 Google Sheets
-# -----------------------------------------------------------------------------
-
-def upload_to_sheets(
-    rows: list[OcrResult],
-    sheet_id: str,
-    creds_path: Path,
-    worksheet_name: str,
-    write_header: bool = True,
-) -> None:
+def upsample(img: Image.Image, factor: float = 2.0) -> Image.Image:
     """
-    用 Service Account 寫入 Google Sheets。
-    - 如果工作表是空的,先寫表頭
-    - 否則 append 到最後一列
+    ② 過取樣
+    --------
+    以 LANCZOS 演算法放大圖片,提升 OCR 對小字的辨識率。
+    LANCZOS 是 Pillow 中品質最好的縮放演算法。
     """
-    import gspread
-    from google.oauth2.service_account import Credentials
+    new_size = (int(img.width * factor), int(img.height * factor))
+    return img.resize(new_size, Image.Resampling.LANCZOS)
 
+
+def stretch_contrast(img: Image.Image, low_pct: float = 2, high_pct: float = 98) -> Image.Image:
+    """
+    ③ 對比拉伸
+    ----------
+    線性映射:把影像的 [low_pct%, high_pct%] 灰階值拉伸到 [0, 255]。
+    比起一般對比增強,這個方法對掃描文件特別有效:
+    - 紙張底色雜訊(暗灰)被推到 255(純白)
+    - 文字主體(亮灰)被推到 0(純黑)
+
+    Args:
+        low_pct:  低端百分位(預設 2,代表把最暗 2% 視為黑)
+        high_pct: 高端百分位(預設 98,代表把最亮 2% 視為白)
+    """
+    arr = np.array(img, dtype=np.uint8)
+
+    # 計算百分位作為映射端點
+    low  = np.percentile(arr, low_pct)
+    high = np.percentile(arr, high_pct)
+
+    if high <= low:
+        return img  # 影像為單色,直接回傳
+
+    # 線性映射 [low, high] → [0, 255]
+    stretched = np.clip((arr.astype(np.float32) - low) * 255.0 / (high - low), 0, 255)
+    return Image.fromarray(stretched.astype(np.uint8), mode="L")
+
+
+def denoise(img: Image.Image, kernel_size: int = 3) -> Image.Image:
+    """
+    ④ 中值濾波去雜訊
+    ----------------
+    對每個像素取鄰域中位數,有效移除胡椒鹽雜訊(黑白小點)
+    同時保留文字邊緣銳利度(這點比高斯模糊好)。
+
+    Args:
+        kernel_size: 必須為奇數,3 = 輕度,5 = 中度,7 = 強烈
+    """
+    return img.filter(ImageFilter.MedianFilter(size=kernel_size))
+
+
+def preprocess_image(image_bytes: bytes) -> bytes:
+    """
+    完整前處理流程
+    ================
+    紅通道 → 過取樣 → 對比拉伸 → 去雜訊 → PNG bytes
+    """
+    img = Image.open(BytesIO(image_bytes))
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    # ① 紅通道萃取(同時完成灰階化 + 印章移除)
+    img = extract_red_channel(img)
+
+    # ② 過取樣放大
+    img = upsample(img, factor=UPSAMPLE_FACTOR)
+
+    # ③ 對比拉伸
+    img = stretch_contrast(img, low_pct=CONTRAST_PERCENTILE[0], high_pct=CONTRAST_PERCENTILE[1])
+
+    # ④ 中值濾波去雜訊
+    img = denoise(img, kernel_size=DENOISE_KERNEL)
+
+    output = BytesIO()
+    img.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+def save_preprocess_comparison(image_bytes: bytes, output_path: Path) -> None:
+    """
+    除錯工具:產生「原圖 vs 各階段」對比圖,協助調參。
+    主程式不會呼叫,需要時手動呼叫即可。
+    """
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    stage1 = extract_red_channel(img)
+    stage2 = upsample(stage1, factor=UPSAMPLE_FACTOR)
+    stage3 = stretch_contrast(stage2, *CONTRAST_PERCENTILE)
+    stage4 = denoise(stage3, kernel_size=DENOISE_KERNEL)
+
+    # 統一尺寸後拼接
+    target_size = (img.width, img.height)
+    stages = [
+        ("0_original", img.convert("L")),
+        ("1_red_channel", stage1),
+        ("2_upsample", stage2.resize(target_size)),
+        ("3_contrast", stage3.resize(target_size)),
+        ("4_denoise", stage4.resize(target_size)),
+    ]
+
+    w, h = target_size
+    canvas = Image.new("L", (w * len(stages) + 20 * (len(stages) - 1), h), 255)
+    for i, (_, im) in enumerate(stages):
+        canvas.paste(im, (i * (w + 20), 0))
+    canvas.save(output_path)
+    logger.info(f"前處理對比圖已存:{output_path}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 3:圖片 → PDF
+# ═══════════════════════════════════════════════════════════════════════════
+
+def image_to_pdf(image_bytes: bytes, output_pdf: Path, dpi: int = 300) -> bool:
+    """將圖片 bytes 存為單頁 PDF。經過放大的圖建議用 300 DPI。"""
+    try:
+        img = Image.open(BytesIO(image_bytes))
+        if img.mode in ("RGBA", "P", "LA"):
+            img = img.convert("RGB")
+        img.save(str(output_pdf), "PDF", resolution=dpi)
+        return True
+    except Exception as e:
+        logger.error(f"圖片轉 PDF 失敗 ({output_pdf.name}):{e}")
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 4:OCRmyPDF
+# ═══════════════════════════════════════════════════════════════════════════
+
+def run_ocr(input_pdf: Path, output_pdf: Path) -> bool:
+    try:
+        ocrmypdf.ocr(
+            input_file=str(input_pdf),
+            output_file=str(output_pdf),
+            language=OCR_LANGUAGES,
+            deskew=True,
+            optimize=1,
+            progress_bar=False,
+        )
+        return True
+    except ocrmypdf.exceptions.PriorOcrFoundError:
+        ocrmypdf.ocr(
+            input_file=str(input_pdf),
+            output_file=str(output_pdf),
+            language=OCR_LANGUAGES,
+            redo_ocr=True,
+            deskew=True,
+            progress_bar=False,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"OCR 失敗 ({input_pdf.name}):{e}")
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 5:讀文字層 + 關鍵字擷取
+# ═══════════════════════════════════════════════════════════════════════════
+
+RE_PERMIT_ZH = re.compile(
+    r"許\s*可\s*證\s*號[\s::]*([A-Za-z0-9\-/.]+)",
+    re.IGNORECASE,
+)
+RE_PERMIT_ID = re.compile(
+    r"No\.?\s*[Ii]jin[\s::]*([A-Za-z0-9\-/.]+)",
+    re.IGNORECASE,
+)
+
+
+def extract_text_from_pdf(pdf_path: Path) -> str:
+    text_parts = []
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text() or ""
+            text_parts.append(page_text)
+    return "\n".join(text_parts)
+
+
+def find_permit_numbers(text: str) -> tuple[Optional[str], Optional[str]]:
+    zh_match = RE_PERMIT_ZH.search(text)
+    id_match = RE_PERMIT_ID.search(text)
+    return (
+        zh_match.group(1).strip() if zh_match else None,
+        id_match.group(1).strip() if id_match else None,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 6:Google Sheets
+# ═══════════════════════════════════════════════════════════════════════════
+
+def get_worksheet():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds = Credentials.from_service_account_file(str(creds_path), scopes=scopes)
+    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_JSON, scopes=scopes)
     client = gspread.authorize(creds)
-
-    sh = client.open_by_key(sheet_id)
-    try:
-        ws = sh.worksheet(worksheet_name)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=worksheet_name, rows=1000, cols=10)
-        logger.info("已建立新工作表: %s", worksheet_name)
-
-    # 準備資料列
-    data_rows = [[r.filename, r.license_no or ""] for r in rows]
-
-    # 表頭處理:若工作表是空的,加入表頭
-    if write_header and not ws.get_all_values():
-        ws.append_row(["檔名", "許可證號"])
-        logger.info("已寫入表頭")
-
-    # 一次性 batch 寫入,減少 API quota 消耗
-    if data_rows:
-        ws.append_rows(data_rows, value_input_option="USER_ENTERED")
-        logger.info("已寫入 %d 列至 Google Sheets", len(data_rows))
+    sheet = client.open(SPREADSHEET_NAME)
+    return sheet.worksheet(WORKSHEET_NAME)
 
 
-# -----------------------------------------------------------------------------
-# 主程式
-# -----------------------------------------------------------------------------
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="批次 OCR Word 檔內的許可證號圖片並上傳 Google Sheets",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("--input-dir", required=True, type=Path,
-                        help="放置 .docx 檔案的資料夾")
-    parser.add_argument("--sheet-id", required=True,
-                        help="Google Sheets 的 ID(URL 中 /d/ 後面那串)")
-    parser.add_argument("--creds", required=True, type=Path,
-                        help="Service Account JSON 檔路徑")
-    parser.add_argument("--worksheet", default="Sheet1",
-                        help="目標工作表名稱(預設 Sheet1)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="只跑 OCR 不上傳 Sheets,結果印到 stdout")
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="顯示詳細 log")
-    args = parser.parse_args()
-
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-    )
-
-    if not args.input_dir.is_dir():
-        logger.error("資料夾不存在: %s", args.input_dir)
-        sys.exit(1)
-
-    docx_files = sorted(args.input_dir.glob("*.docx"))
-    # 過濾掉 Word 暫存檔(以 ~$ 開頭)
-    docx_files = [f for f in docx_files if not f.name.startswith("~$")]
-
-    if not docx_files:
-        logger.error("找不到任何 .docx 檔案於 %s", args.input_dir)
-        sys.exit(1)
-
-    logger.info("找到 %d 個 docx 檔,開始處理", len(docx_files))
-
-    results: list[OcrResult] = []
-    for i, docx_path in enumerate(docx_files, 1):
-        logger.info("[%d/%d] %s", i, len(docx_files), docx_path.name)
-        try:
-            result = process_docx(docx_path)
-        except Exception as e:
-            logger.exception("處理失敗 %s", docx_path.name)
-            result = OcrResult(docx_path.name, None, note=f"例外: {e}")
-        results.append(result)
-
-    # 印出結果摘要
-    print("\n" + "=" * 60)
-    print(f"處理完成:{len(results)} 個檔案")
-    print("=" * 60)
-    success = sum(1 for r in results if r.license_no)
-    print(f"  成功擷取許可證號: {success}")
-    print(f"  未擷取到:        {len(results) - success}")
-    print()
-    for r in results:
-        status = "✓" if r.license_no else "✗"
-        line = f"  {status} {r.filename:<40} {r.license_no or '-'}"
-        if r.note:
-            line += f"  ({r.note})"
-        print(line)
-    print()
-
-    # 上傳 Sheets
-    if args.dry_run:
-        logger.info("--dry-run 模式,不上傳 Google Sheets")
+def write_results_to_sheet(results: list[OCRResult]) -> None:
+    matched = [r for r in results if r.is_match]
+    if not matched:
+        logger.warning("沒有任何符合條件的結果,跳過寫入 Google Sheets")
         return
 
-    if not args.creds.is_file():
-        logger.error("找不到認證檔: %s", args.creds)
-        sys.exit(1)
+    ws = get_worksheet()
+    if not ws.get_all_values():
+        ws.append_row(["來源檔案", "圖片名稱", "許可證號(中文)", "No ijin(印尼文)"])
+
+    rows = [
+        [r.source_docx, r.image_name, r.permit_no_zh or "", r.permit_no_id or ""]
+        for r in matched
+    ]
+    ws.append_rows(rows, value_input_option="RAW")
+    logger.info(f"已寫入 {len(rows)} 筆資料到 Google Sheets")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 主流程
+# ═══════════════════════════════════════════════════════════════════════════
+
+def process_single_image(
+    docx_name: str,
+    image_name: str,
+    image_bytes: bytes,
+    suffix: str,
+    index: int,
+) -> Optional[OCRResult]:
+    base_name = f"{Path(docx_name).stem}_{index:03d}_{Path(image_name).stem}"
+    raw_pdf = WORK_DIR / f"{base_name}_raw.pdf"
+    ocr_pdf = OUTPUT_DIR / f"{base_name}_ocr.pdf"
+
+    # ★ 進階前處理(紅通道 + 過取樣 + 對比拉伸 + 去雜訊)
+    if ENABLE_PREPROCESS:
+        try:
+            image_bytes = preprocess_image(image_bytes)
+        except Exception as e:
+            logger.warning(f"  前處理失敗,使用原圖:{e}")
+
+    if not image_to_pdf(image_bytes, raw_pdf):
+        return None
+
+    if not run_ocr(raw_pdf, ocr_pdf):
+        raw_pdf.unlink(missing_ok=True)
+        return None
 
     try:
-        upload_to_sheets(results, args.sheet_id, args.creds, args.worksheet)
-    except Exception:
-        logger.exception("上傳 Google Sheets 失敗")
-        sys.exit(1)
+        full_text = extract_text_from_pdf(ocr_pdf)
+    except Exception as e:
+        logger.error(f"讀取文字失敗 ({ocr_pdf.name}):{e}")
+        raw_pdf.unlink(missing_ok=True)
+        return None
 
-    logger.info("全部完成 ✓")
+    permit_zh, permit_id = find_permit_numbers(full_text)
+    raw_pdf.unlink(missing_ok=True)
+
+    result = OCRResult(
+        source_docx=docx_name,
+        image_name=image_name,
+        pdf_path=ocr_pdf,
+        permit_no_zh=permit_zh,
+        permit_no_id=permit_id,
+        full_text=full_text,
+    )
+
+    if not result.is_match:
+        ocr_pdf.unlink(missing_ok=True)
+
+    return result
+
+
+def main():
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    docx_files = sorted(INPUT_DOCX_DIR.glob("*.docx"))
+    if not docx_files:
+        logger.error(f"在 {INPUT_DOCX_DIR} 找不到 .docx 檔案")
+        return
+
+    logger.info(f"找到 {len(docx_files)} 個 .docx,開始處理")
+    logger.info(f"前處理:{'啟用' if ENABLE_PREPROCESS else '停用'} "
+                f"(放大={UPSAMPLE_FACTOR}x, 去雜訊核={DENOISE_KERNEL})")
+    logger.info(f"OCR 語言:{OCR_LANGUAGES}")
+
+    all_results: list[OCRResult] = []
+
+    for docx_path in docx_files:
+        logger.info(f"─── 處理 {docx_path.name} ───")
+
+        try:
+            images = extract_images_from_docx(docx_path)
+        except Exception as e:
+            logger.error(f"無法解壓 {docx_path.name}:{e}")
+            continue
+
+        if not images:
+            logger.warning(f"  {docx_path.name} 內沒有圖片")
+            continue
+
+        logger.info(f"  發現 {len(images)} 張圖片")
+
+        for idx, (img_name, img_bytes, suffix) in enumerate(images, start=1):
+            logger.info(f"  [{idx}/{len(images)}] 處理 {img_name}")
+            result = process_single_image(
+                docx_path.name, img_name, img_bytes, suffix, idx
+            )
+            if result is None:
+                continue
+
+            all_results.append(result)
+            if result.is_match:
+                logger.info(
+                    f"    ✓ 符合條件!"
+                    f"許可證號={result.permit_no_zh} / "
+                    f"No ijin={result.permit_no_id}"
+                )
+
+    matched_count = sum(1 for r in all_results if r.is_match)
+    logger.info(f"\n═══ 處理完成 ═══")
+    logger.info(f"總處理圖片:{len(all_results)}")
+    logger.info(f"符合條件:{matched_count}")
+
+    if matched_count > 0:
+        try:
+            write_results_to_sheet(all_results)
+        except Exception as e:
+            logger.error(f"寫入 Google Sheets 失敗:{e}")
+            backup_path = OUTPUT_DIR / "results_backup.csv"
+            import csv
+            with open(backup_path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["來源檔案", "圖片名稱", "許可證號(中文)", "No ijin(印尼文)"])
+                for r in all_results:
+                    if r.is_match:
+                        writer.writerow([
+                            r.source_docx, r.image_name,
+                            r.permit_no_zh or "", r.permit_no_id or ""
+                        ])
+            logger.info(f"已備份至 {backup_path}")
 
 
 if __name__ == "__main__":
