@@ -1,109 +1,106 @@
-# Google Service Account credentials — do NOT commit
+# ===========================================================================
+# .gitignore - DOCX OCR to Google Sheets
+# ===========================================================================
+
+# ── 敏感資訊（絕對不要提交！）──────────────────────────────────────────────
+credentials.json
+*-credentials.json
+service-account*.json
 service_account.json
+.env
+.env.local
+secrets/
 
-# Byte-compiled / optimized / DLL files
+# ── 專案資料夾（內容是個別使用者的資料，不適合上版控）─────────────────────
+docs/
+work/
+output/
+*.docx
+*.pdf
+!sample/*.docx              # 若有放範例,可保留 sample 資料夾下的檔案
+
+# ── Python 快取與虛擬環境 ─────────────────────────────────────────────────
 __pycache__/
-*.py[codz]
+*.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
+
+# 虛擬環境
+.venv/
+venv/
+env/
+ENV/
+.virtualenv/
+
+# 套件管理
 *.egg-info/
-.installed.cfg
 *.egg
-MANIFEST
-
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
+dist/
+build/
 pip-log.txt
 pip-delete-this-directory.txt
 
-# Unit test / coverage reports
+# ── 測試與覆蓋率 ──────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
 htmlcov/
 .tox/
 .nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
 coverage.xml
 *.cover
-*.py.cover
-.hypothesis/
-.pytest_cache/
-cover/
 
-# Translations
-*.mo
-*.pot
+# ── IDE / 編輯器 ──────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
 
-# Django stuff:
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# ── 作業系統 ──────────────────────────────────────────────────────────────
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# ── 日誌與暫存 ────────────────────────────────────────────────────────────
 *.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
+*.tmp
+*.bak
+*.backup
+logs/
 
-# Flask stuff:
-instance/
-.webassets-cache
+# ── OCR 中間產物 ──────────────────────────────────────────────────────────
+*.zip
+comparison.png              # 前處理對比圖（除錯用）
+*_raw.pdf                   # 中間 PDF
+*_ocr.pdf                   # OCR 後 PDF
+results_backup.csv
 
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-.pybuilder/
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# Environments
-.env
-.envrc
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# mypy
+# ── 其他 ──────────────────────────────────────────────────────────────────
 .mypy_cache/
 .dmypy.json
 dmypy.json
-
-# Ruff
-.ruff_cache/
-
-# PyCharm / JetBrains
-# .idea/
-
-# Visual Studio Code
-# .vscode/
-tempCodeRunnerFile.py
+.pyre/
+.pytype/
