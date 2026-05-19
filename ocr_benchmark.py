@@ -1,25 +1,24 @@
 """
 ocr_benchmark.py
 ================
-OCR 辨識率測試腳本
+Tesseract 前處理參數校正工具
 
 用途:
-  並排測試 Tesseract 與 PaddleOCR 在你實際文件上的表現,
-  輸出對照報告,協助決定是否升級引擎。
+  測試不同影像前處理組合對 Tesseract 辨識率的影響，
+  找出最佳前處理設定。
 
 測試方式:
   1. 從 ./docs 資料夾的 .docx 解出圖片
-  2. 同一張圖分別跑兩個引擎
-  3. 各自嘗試擷取「許可證號」與「No ijin」
-  4. 統計命中率、耗時、辨識文字內容
+  2. 同一張圖分別套用各前處理組合後跑 Tesseract
+  3. 嘗試擷取「許可證號」與「No ijin」
+  4. 統計各組合命中率與耗時
 
 輸出:
   - benchmark_report.csv  逐張對照表(可用 Excel 開啟)
-  - benchmark_summary.txt 統計摘要
+  - benchmark_summary.txt 各組合命中率排名
 
 安裝:
-  pip install -r requirements.txt
-  pip install paddlepaddle paddleocr   # 額外安裝 PaddleOCR
+  pip install pytesseract pillow numpy
 
 使用:
   python ocr_benchmark.py
@@ -32,20 +31,23 @@ import zipfile
 import logging
 from io import BytesIO
 from pathlib import Path
-from dataclasses import dataclass, asdict
-from typing import Optional
+from dataclasses import dataclass, field, asdict
 
 import numpy as np
 from PIL import Image, ImageFilter
+
+import pytesseract
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 設定
 # ═══════════════════════════════════════════════════════════════════════════
 
-INPUT_DIR    = Path("./docs")
-REPORT_DIR   = Path("./benchmark_results")
-MAX_SAMPLES  = 30                # 最多測試幾張圖片(設小一點先試)
+INPUT_DIR   = Path("./docs")
+REPORT_DIR  = Path("./benchmark_results")
+MAX_SAMPLES = 30
+TESS_LANG   = "chi_tra+ind+eng"
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
 
@@ -58,36 +60,47 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 前處理參數組合
+# ═══════════════════════════════════════════════════════════════════════════
+
+CONFIGS = [
+    {"name": "紅通道_2x_中值3",   "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98)},
+    {"name": "紅通道_2x_無濾波",  "channel": "R",    "scale": 2, "median": 0, "contrast": (2, 98)},
+    {"name": "紅通道_3x_中值3",   "channel": "R",    "scale": 3, "median": 3, "contrast": (2, 98)},
+    {"name": "灰階_2x_中值3",     "channel": "gray", "scale": 2, "median": 3, "contrast": (2, 98)},
+    {"name": "灰階_2x_無濾波",    "channel": "gray", "scale": 2, "median": 0, "contrast": (2, 98)},
+    {"name": "最小通道_2x_中值3", "channel": "min",  "scale": 2, "median": 3, "contrast": (2, 98)},
+    {"name": "紅通道_原尺寸",     "channel": "R",    "scale": 1, "median": 0, "contrast": (2, 98)},
+    {"name": "灰階_原尺寸",       "channel": "gray", "scale": 1, "median": 0, "contrast": (2, 98)},
+]
+
+CONFIG_NAMES = [c["name"] for c in CONFIGS]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 結果資料結構
 # ═══════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class BenchmarkRow:
-    """單張圖片的測試結果。"""
     source_docx: str
-    image_name: str
+    image_name:  str
+    results:     dict = field(default_factory=dict)  # name -> {time, len, zh, id, hit}
 
-    # Tesseract 結果
-    tess_time:        float = 0.0     # 耗時(秒)
-    tess_text_len:    int = 0          # 辨識文字總長度
-    tess_permit_zh:   str = ""         # 抓到的許可證號
-    tess_permit_id:   str = ""         # 抓到的 No ijin
-    tess_hit:         bool = False     # 是否命中任一關鍵字
-
-    # PaddleOCR 結果
-    paddle_time:      float = 0.0
-    paddle_text_len:  int = 0
-    paddle_permit_zh: str = ""
-    paddle_permit_id: str = ""
-    paddle_hit:       bool = False
-
-    # 一致性
-    zh_match:         bool = False     # 兩者抓到相同許可證號
-    id_match:         bool = False     # 兩者抓到相同 No ijin
+    def flat_dict(self) -> dict:
+        d = {"source_docx": self.source_docx, "image_name": self.image_name}
+        for name in CONFIG_NAMES:
+            r = self.results.get(name, {})
+            d[f"{name}_time"]  = r.get("time", "")
+            d[f"{name}_len"]   = r.get("len", "")
+            d[f"{name}_zh"]    = r.get("zh", "")
+            d[f"{name}_id"]    = r.get("id", "")
+            d[f"{name}_hit"]   = r.get("hit", "")
+        return d
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 共用:從 docx 解圖、前處理、正則
+# 共用：從 docx 解圖、正則
 # ═══════════════════════════════════════════════════════════════════════════
 
 def extract_images_from_docx(docx_path: Path) -> list[tuple[str, bytes]]:
@@ -99,91 +112,55 @@ def extract_images_from_docx(docx_path: Path) -> list[tuple[str, bytes]]:
     return images
 
 
-def preprocess_image(image_bytes: bytes) -> Image.Image:
-    """紅通道 + 對比拉伸 + 去雜訊(兩引擎共用相同前處理)。"""
-    img = Image.open(BytesIO(image_bytes)).convert("RGB")
-    rgb = np.array(img)
-
-    # ① 紅通道
-    gray = rgb[:, :, 0]
-
-    # ② 過取樣 2x
-    pil_gray = Image.fromarray(gray)
-    new_size = (pil_gray.width * 2, pil_gray.height * 2)
-    pil_gray = pil_gray.resize(new_size, Image.Resampling.LANCZOS)
-
-    # ③ 對比拉伸
-    arr = np.array(pil_gray)
-    low, high = np.percentile(arr, 2), np.percentile(arr, 98)
-    if high > low:
-        arr = np.clip((arr - low) * 255.0 / (high - low), 0, 255).astype(np.uint8)
-    pil_gray = Image.fromarray(arr)
-
-    # ④ 中值濾波
-    pil_gray = pil_gray.filter(ImageFilter.MedianFilter(size=3))
-
-    return pil_gray
-
-
 RE_PERMIT_ZH = re.compile(r"許\s*可\s*證\s*號[\s::]*([A-Za-z0-9\-/.]+)", re.IGNORECASE)
 RE_PERMIT_ID = re.compile(r"No\.?\s*[Ii]jin[\s::]*([A-Za-z0-9\-/.]+)", re.IGNORECASE)
 
 
 def find_permits(text: str) -> tuple[str, str]:
-    zh = RE_PERMIT_ZH.search(text)
+    zh  = RE_PERMIT_ZH.search(text)
     id_ = RE_PERMIT_ID.search(text)
     return (zh.group(1).strip() if zh else "", id_.group(1).strip() if id_ else "")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Tesseract 引擎
+# 前處理
 # ═══════════════════════════════════════════════════════════════════════════
 
-def ocr_with_tesseract(img: Image.Image) -> tuple[str, float]:
-    """用 pytesseract 跑 OCR,回傳 (文字, 耗時)。"""
-    import pytesseract
-    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    t0 = time.time()
-    try:
-        text = pytesseract.image_to_string(img, lang="chi_tra+ind+eng")
-    except Exception as e:
-        logger.error(f"  Tesseract 失敗:{e}")
-        text = ""
-    return text, time.time() - t0
+def preprocess(image_bytes: bytes, cfg: dict) -> Image.Image:
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    rgb = np.array(img)
 
+    # 色版選擇
+    ch = cfg["channel"]
+    if ch == "R":
+        arr = rgb[:, :, 0]
+    elif ch == "gray":
+        arr = np.mean(rgb, axis=2).astype(np.uint8)
+    elif ch == "min":
+        arr = rgb.min(axis=2)
+    else:
+        arr = rgb[:, :, 0]
 
-# ═══════════════════════════════════════════════════════════════════════════
-# EasyOCR 引擎(全域單例,避免每次重新載入模型)
-# ═══════════════════════════════════════════════════════════════════════════
+    pil = Image.fromarray(arr)
 
-_easy_ocr_instance = None
+    # 放大
+    scale = cfg["scale"]
+    if scale > 1:
+        pil = pil.resize((pil.width * scale, pil.height * scale), Image.Resampling.LANCZOS)
 
+    # 對比拉伸
+    lo, hi = cfg["contrast"]
+    a = np.array(pil)
+    low, high = np.percentile(a, lo), np.percentile(a, hi)
+    if high > low:
+        a = np.clip((a - low) * 255.0 / (high - low), 0, 255).astype(np.uint8)
+    pil = Image.fromarray(a)
 
-def get_easy_ocr():
-    """延遲初始化 EasyOCR(模型首次載入很慢)。"""
-    global _easy_ocr_instance
-    if _easy_ocr_instance is None:
-        import easyocr
-        logger.info("初始化 EasyOCR(首次會下載模型,可能需 1-2 分鐘)...")
-        _easy_ocr_instance = easyocr.Reader(["ch_tra", "en"], gpu=False)
-        logger.info("EasyOCR 載入完成")
-    return _easy_ocr_instance
+    # 中值濾波
+    if cfg["median"] > 0:
+        pil = pil.filter(ImageFilter.MedianFilter(size=cfg["median"]))
 
-
-def ocr_with_paddle(img: Image.Image) -> tuple[str, float]:
-    """用 EasyOCR 跑 OCR,回傳 (文字, 耗時)。"""
-    reader = get_easy_ocr()
-    t0 = time.time()
-
-    img_array = np.array(img.convert("RGB"))
-
-    try:
-        result = reader.readtext(img_array, detail=0)
-    except Exception as e:
-        logger.error(f"  EasyOCR 失敗:{e}")
-        return "", time.time() - t0
-
-    return "\n".join(result), time.time() - t0
+    return pil
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -191,114 +168,74 @@ def ocr_with_paddle(img: Image.Image) -> tuple[str, float]:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def benchmark_one(docx_name: str, img_name: str, image_bytes: bytes) -> BenchmarkRow:
-    """測試單一圖片。"""
     row = BenchmarkRow(source_docx=docx_name, image_name=img_name)
 
-    img = preprocess_image(image_bytes)
+    for cfg in CONFIGS:
+        name = cfg["name"]
+        t0 = time.time()
+        try:
+            img  = preprocess(image_bytes, cfg)
+            text = pytesseract.image_to_string(img, lang=TESS_LANG)
+        except Exception as e:
+            logger.error(f"  [{name}] 失敗:{e}")
+            row.results[name] = {"time": 0, "len": 0, "zh": "", "id": "", "hit": False}
+            continue
 
-    text_t, t_t = ocr_with_tesseract(img)
-    row.tess_time = round(t_t, 2)
-    row.tess_text_len = len(text_t)
-    row.tess_permit_zh, row.tess_permit_id = find_permits(text_t)
-    row.tess_hit = bool(row.tess_permit_zh or row.tess_permit_id)
-
-    text_p, t_p = ocr_with_paddle(img)
-    row.paddle_time = round(t_p, 2)
-    row.paddle_text_len = len(text_p)
-    row.paddle_permit_zh, row.paddle_permit_id = find_permits(text_p)
-    row.paddle_hit = bool(row.paddle_permit_zh or row.paddle_permit_id)
-
-    row.zh_match = (
-        bool(row.tess_permit_zh)
-        and bool(row.paddle_permit_zh)
-        and row.tess_permit_zh == row.paddle_permit_zh
-    )
-    row.id_match = (
-        bool(row.tess_permit_id)
-        and bool(row.paddle_permit_id)
-        and row.tess_permit_id == row.paddle_permit_id
-    )
+        elapsed   = round(time.time() - t0, 2)
+        zh, id_   = find_permits(text)
+        hit       = bool(zh or id_)
+        row.results[name] = {"time": elapsed, "len": len(text), "zh": zh, "id": id_, "hit": hit}
 
     return row
 
 
 def write_csv_report(rows: list[BenchmarkRow], output_path: Path):
-    """逐張詳細結果輸出為 CSV。"""
     if not rows:
         return
+    fieldnames = list(rows[0].flat_dict().keys())
     with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(asdict(rows[0]).keys()))
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for r in rows:
-            writer.writerow(asdict(r))
+            writer.writerow(r.flat_dict())
 
 
 def write_summary(rows: list[BenchmarkRow], output_path: Path):
-    """統計摘要輸出。"""
     n = len(rows)
     if n == 0:
         return
 
-    tess_hit       = sum(1 for r in rows if r.tess_hit)
-    paddle_hit     = sum(1 for r in rows if r.paddle_hit)
-    tess_zh_hit    = sum(1 for r in rows if r.tess_permit_zh)
-    paddle_zh_hit  = sum(1 for r in rows if r.paddle_permit_zh)
-    tess_id_hit    = sum(1 for r in rows if r.tess_permit_id)
-    paddle_id_hit  = sum(1 for r in rows if r.paddle_permit_id)
-    both_agree     = sum(1 for r in rows if r.zh_match or r.id_match)
+    ranking = []
+    for cfg in CONFIGS:
+        name     = cfg["name"]
+        hits     = sum(1 for r in rows if r.results.get(name, {}).get("hit"))
+        zh_hits  = sum(1 for r in rows if r.results.get(name, {}).get("zh"))
+        id_hits  = sum(1 for r in rows if r.results.get(name, {}).get("id"))
+        avg_time = sum(r.results.get(name, {}).get("time", 0) for r in rows) / n
+        ranking.append((name, hits, zh_hits, id_hits, avg_time))
 
-    tess_total_time   = sum(r.tess_time for r in rows)
-    paddle_total_time = sum(r.paddle_time for r in rows)
+    ranking.sort(key=lambda x: (-x[1], x[4]))
 
     lines = [
-        "═" * 60,
-        "  OCR 引擎辨識率對照報告",
-        "═" * 60,
-        f"  測試樣本數:{n} 張圖片",
+        "═" * 65,
+        "  Tesseract 前處理參數校正報告",
+        "═" * 65,
+        f"  測試樣本：{n} 張圖片",
         "",
-        "  ── 整體命中率(任一關鍵字)──",
-        f"    Tesseract  : {tess_hit:>3}/{n}  ({tess_hit/n*100:.1f}%)",
-        f"    PaddleOCR  : {paddle_hit:>3}/{n}  ({paddle_hit/n*100:.1f}%)",
-        "",
-        "  ── 「許可證號」中文擷取率 ──",
-        f"    Tesseract  : {tess_zh_hit:>3}/{n}  ({tess_zh_hit/n*100:.1f}%)",
-        f"    PaddleOCR  : {paddle_zh_hit:>3}/{n}  ({paddle_zh_hit/n*100:.1f}%)",
-        "",
-        "  ── 「No ijin」印尼文擷取率 ──",
-        f"    Tesseract  : {tess_id_hit:>3}/{n}  ({tess_id_hit/n*100:.1f}%)",
-        f"    PaddleOCR  : {paddle_id_hit:>3}/{n}  ({paddle_id_hit/n*100:.1f}%)",
-        "",
-        "  ── 兩引擎一致性 ──",
-        f"    結果完全一致:{both_agree}/{n}  ({both_agree/n*100:.1f}%)",
-        "",
-        "  ── 效能比較 ──",
-        f"    Tesseract  總時間:{tess_total_time:>6.1f} 秒  (平均 {tess_total_time/n:.2f} 秒/張)",
-        f"    PaddleOCR  總時間:{paddle_total_time:>6.1f} 秒  (平均 {paddle_total_time/n:.2f} 秒/張)",
-        f"    速度比:    Paddle 是 Tesseract 的 {tess_total_time/paddle_total_time:.2f}x" if paddle_total_time > 0 else "",
-        "",
-        "═" * 60,
-        "  建議",
-        "═" * 60,
+        f"  {'組合名稱':<18}  {'命中':>4}  {'許可證號':>6}  {'No ijin':>7}  {'平均秒':>6}",
+        "  " + "─" * 55,
     ]
 
-    tess_rate = tess_hit / n
-    paddle_rate = paddle_hit / n
-    diff = paddle_rate - tess_rate
+    for name, hits, zh, id_, avg_t in ranking:
+        lines.append(
+            f"  {name:<18}  {hits:>3}/{n}  {zh:>4}/{n}  {id_:>5}/{n}  {avg_t:>5.2f}s"
+        )
 
-    if tess_rate >= 0.85:
-        lines.append("  ✓ Tesseract 已達 85% 以上,維持現狀即可")
-    elif diff >= 0.15:
-        lines.append("  ⚡ PaddleOCR 顯著優於 Tesseract(差距 ≥ 15%),建議升級")
-    elif diff >= 0.05:
-        lines.append("  ↑ PaddleOCR 略優,可考慮升級")
-    elif diff <= -0.05:
-        lines.append("  ↓ Tesseract 表現較佳(可能是印尼文佔多數),維持現狀")
-    else:
-        lines.append("  ≈ 兩者表現接近,維持 Tesseract(部署較簡單)")
+    best = ranking[0][0]
+    lines += ["", f"  ★ 建議前處理：{best}", "═" * 65]
 
     summary = "\n".join(lines)
     print("\n" + summary)
-
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(summary)
 
@@ -311,7 +248,7 @@ def main():
         logger.error(f"在 {INPUT_DIR} 找不到 .docx 檔案")
         return
 
-    logger.info(f"找到 {len(docx_files)} 個 .docx")
+    logger.info(f"找到 {len(docx_files)} 個 .docx，前處理組合：{len(CONFIGS)} 種")
 
     samples = []
     for docx_path in docx_files:
@@ -332,7 +269,6 @@ def main():
         return
 
     logger.info(f"開始測試 {len(samples)} 張圖片...")
-    logger.info("(首次執行會下載 PaddleOCR 模型,請耐心等待)")
 
     results = []
     for i, (docx_name, img_name, img_bytes) in enumerate(samples, 1):
@@ -340,14 +276,8 @@ def main():
         try:
             row = benchmark_one(docx_name, img_name, img_bytes)
             results.append(row)
-            logger.info(
-                f"  Tess  ({row.tess_time:.1f}s): "
-                f"許可證號={row.tess_permit_zh or '✗'} / No ijin={row.tess_permit_id or '✗'}"
-            )
-            logger.info(
-                f"  Paddle({row.paddle_time:.1f}s): "
-                f"許可證號={row.paddle_permit_zh or '✗'} / No ijin={row.paddle_permit_id or '✗'}"
-            )
+            hits = [n for n in CONFIG_NAMES if row.results.get(n, {}).get("hit")]
+            logger.info(f"  命中組合：{hits if hits else '無'}")
         except Exception as e:
             logger.error(f"  測試失敗:{e}")
 
@@ -356,8 +286,8 @@ def main():
     write_csv_report(results, csv_path)
     write_summary(results, txt_path)
 
-    logger.info(f"\n詳細報告:{csv_path.resolve()}")
-    logger.info(f"統計摘要:{txt_path.resolve()}")
+    logger.info(f"\n詳細報告：{csv_path.resolve()}")
+    logger.info(f"統計摘要：{txt_path.resolve()}")
 
 
 if __name__ == "__main__":
