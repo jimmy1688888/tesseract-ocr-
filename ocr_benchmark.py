@@ -35,6 +35,11 @@ from dataclasses import dataclass, field, asdict
 
 import numpy as np
 from PIL import Image, ImageFilter
+try:
+    from scipy.ndimage import uniform_filter as _uniform_filter
+    _SCIPY_OK = True
+except ImportError:
+    _SCIPY_OK = False
 
 import pytesseract
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
@@ -46,10 +51,18 @@ pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tessera
 
 INPUT_DIR   = Path("./docs")
 REPORT_DIR  = Path("./benchmark_results")
-MAX_SAMPLES = 30
+MAX_SAMPLES = 100
 TESS_LANG   = "chi_tra+ind+eng"
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
+
+# ROI 定義（相對座標，0~1）
+# 每筆格式：(x1, y1, x2, y2)
+ROI_REGIONS = {
+    "mol":    (0.05, 0.04, 0.40, 0.22),  # image2 左上角方格：Agency's MOL License Number
+    "permit": (0.50, 0.30, 1.00, 0.85),  # image5 右欄第4項：許可號碼 / No ijin
+}
+ROI_SAVE_DIR = REPORT_DIR / "roi_preview"   # 儲存裁切預覽圖
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,17 +77,39 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════
 
 CONFIGS = [
-    {"name": "紅通道_2x_中值3",   "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98)},
-    {"name": "紅通道_2x_無濾波",  "channel": "R",    "scale": 2, "median": 0, "contrast": (2, 98)},
-    {"name": "紅通道_3x_中值3",   "channel": "R",    "scale": 3, "median": 3, "contrast": (2, 98)},
-    {"name": "灰階_2x_中值3",     "channel": "gray", "scale": 2, "median": 3, "contrast": (2, 98)},
-    {"name": "灰階_2x_無濾波",    "channel": "gray", "scale": 2, "median": 0, "contrast": (2, 98)},
-    {"name": "最小通道_2x_中值3", "channel": "min",  "scale": 2, "median": 3, "contrast": (2, 98)},
-    {"name": "紅通道_原尺寸",     "channel": "R",    "scale": 1, "median": 0, "contrast": (2, 98)},
-    {"name": "灰階_原尺寸",       "channel": "gray", "scale": 1, "median": 0, "contrast": (2, 98)},
+    # ── 原有組合（PSM 預設 3）──────────────────────────────────
+    {"name": "紅通道_2x_中值3",   "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 3, "sauvola": False},
+    {"name": "紅通道_2x_無濾波",  "channel": "R",    "scale": 2, "median": 0, "contrast": (2, 98), "psm": 3, "sauvola": False},
+    {"name": "紅通道_3x_中值3",   "channel": "R",    "scale": 3, "median": 3, "contrast": (2, 98), "psm": 3, "sauvola": False},
+    {"name": "灰階_2x_中值3",     "channel": "gray", "scale": 2, "median": 3, "contrast": (2, 98), "psm": 3, "sauvola": False},
+    {"name": "灰階_2x_無濾波",    "channel": "gray", "scale": 2, "median": 0, "contrast": (2, 98), "psm": 3, "sauvola": False},
+    {"name": "最小通道_2x_中值3", "channel": "min",  "scale": 2, "median": 3, "contrast": (2, 98), "psm": 3, "sauvola": False},
+    {"name": "紅通道_原尺寸",     "channel": "R",    "scale": 1, "median": 0, "contrast": (2, 98), "psm": 3, "sauvola": False},
+    {"name": "灰階_原尺寸",       "channel": "gray", "scale": 1, "median": 0, "contrast": (2, 98), "psm": 3, "sauvola": False},
+    # ── PSM 6（假設單一文字區塊）─────────────────────────────────
+    {"name": "紅通道_2x_PSM6",    "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 6, "sauvola": False},
+    {"name": "灰階_2x_PSM6",      "channel": "gray", "scale": 2, "median": 3, "contrast": (2, 98), "psm": 6, "sauvola": False},
+    # ── PSM 11（稀疏文字）────────────────────────────────────────
+    {"name": "紅通道_2x_PSM11",   "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 11, "sauvola": False},
+    {"name": "灰階_2x_PSM11",     "channel": "gray", "scale": 2, "median": 3, "contrast": (2, 98), "psm": 11, "sauvola": False},
+    # ── Sauvola 自適應二值化 ──────────────────────────────────────
+    {"name": "Sauvola_2x_PSM3",   "channel": "gray", "scale": 2, "median": 0, "contrast": (2, 98), "psm": 3,  "sauvola": True,  "sharpen": False},
+    {"name": "Sauvola_2x_PSM6",   "channel": "gray", "scale": 2, "median": 0, "contrast": (2, 98), "psm": 6,  "sauvola": True,  "sharpen": False},
+    {"name": "Sauvola_2x_PSM11",  "channel": "gray", "scale": 2, "median": 0, "contrast": (2, 98), "psm": 11, "sauvola": True,  "sharpen": False},
+    # ── 紅通道 + 銳化 ────────────────────────────────────────────
+    {"name": "紅通道_2x_銳化_PSM3",  "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 3,  "sauvola": False, "sharpen": True},
+    {"name": "紅通道_2x_銳化_PSM6",  "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 6,  "sauvola": False, "sharpen": True},
+    {"name": "紅通道_2x_銳化_PSM11", "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 11, "sauvola": False, "sharpen": True},
+    {"name": "紅通道_3x_銳化_PSM6",  "channel": "R",    "scale": 3, "median": 3, "contrast": (2, 98), "psm": 6,  "sauvola": False, "sharpen": True},
 ]
 
-CONFIG_NAMES = [c["name"] for c in CONFIGS]
+# ROI × 前處理 笛卡兒積（2 × 15 = 30 組合）
+BENCHMARK_CONFIGS = [
+    {**cfg, "name": f"{roi_name}__{cfg['name']}", "roi": roi_coords}
+    for roi_name, roi_coords in ROI_REGIONS.items()
+    for cfg in CONFIGS
+]
+CONFIG_NAMES = [c["name"] for c in BENCHMARK_CONFIGS]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -85,7 +120,7 @@ CONFIG_NAMES = [c["name"] for c in CONFIGS]
 class BenchmarkRow:
     source_docx: str
     image_name:  str
-    results:     dict = field(default_factory=dict)  # name -> {time, len, zh, id, hit}
+    results:     dict = field(default_factory=dict)  # name -> {time, len, zh, id, mol, hit}
 
     def flat_dict(self) -> dict:
         d = {"source_docx": self.source_docx, "image_name": self.image_name}
@@ -95,6 +130,7 @@ class BenchmarkRow:
             d[f"{name}_len"]   = r.get("len", "")
             d[f"{name}_zh"]    = r.get("zh", "")
             d[f"{name}_id"]    = r.get("id", "")
+            d[f"{name}_mol"]   = r.get("mol", "")
             d[f"{name}_hit"]   = r.get("hit", "")
         return d
 
@@ -112,22 +148,53 @@ def extract_images_from_docx(docx_path: Path) -> list[tuple[str, bytes]]:
     return images
 
 
-RE_PERMIT_ZH = re.compile(r"許\s*可\s*證\s*號[\s::]*([A-Za-z0-9\-/.]+)", re.IGNORECASE)
-RE_PERMIT_ID = re.compile(r"No\.?\s*[Ii]jin[\s::]*([A-Za-z0-9\-/.]+)", re.IGNORECASE)
+RE_PERMIT_ZH = re.compile(r"許\s*可\s*(?:證\s*號|號\s*碼)[\s::]*(\d{4})", re.IGNORECASE)
+RE_PERMIT_ID = re.compile(r"No\.?\s*i[zj]in[\s::]*(\d{4})", re.IGNORECASE)
+RE_MOL       = re.compile(r"MOL\s*License\s*Number\s*[:：]\s*(\d{4})", re.IGNORECASE)
 
 
-def find_permits(text: str) -> tuple[str, str]:
+def find_permits(text: str) -> tuple[str, str, str]:
     zh  = RE_PERMIT_ZH.search(text)
     id_ = RE_PERMIT_ID.search(text)
-    return (zh.group(1).strip() if zh else "", id_.group(1).strip() if id_ else "")
+    mol = RE_MOL.search(text)
+    return (
+        zh.group(1).strip()  if zh  else "",
+        id_.group(1).strip() if id_ else "",
+        mol.group(1).strip() if mol else "",
+    )
+
+
+def crop_roi(img: Image.Image, roi: tuple) -> Image.Image:
+    """依相對座標 (x1,y1,x2,y2) 裁切圖片。"""
+    w, h = img.size
+    x1, y1, x2, y2 = roi
+    return img.crop((int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 前處理
 # ═══════════════════════════════════════════════════════════════════════════
 
+def sauvola_binarize(arr: np.ndarray, window: int = 25, k: float = 0.2) -> np.ndarray:
+    """Sauvola 自適應二值化。需要 scipy；無 scipy 時退回 Otsu 全局閾值。"""
+    arr_f = arr.astype(np.float64)
+    if _SCIPY_OK:
+        mean   = _uniform_filter(arr_f, window)
+        mean_sq = _uniform_filter(arr_f ** 2, window)
+        std    = np.sqrt(np.maximum(mean_sq - mean ** 2, 0))
+        thresh = mean * (1 + k * (std / 128.0 - 1))
+    else:
+        thresh = arr_f.mean()
+    return ((arr_f >= thresh) * 255).astype(np.uint8)
+
+
 def preprocess(image_bytes: bytes, cfg: dict) -> Image.Image:
     img = Image.open(BytesIO(image_bytes)).convert("RGB")
+
+    # ROI 裁切（先裁後處理，保留更多細節）
+    if "roi" in cfg:
+        img = crop_roi(img, cfg["roi"])
+
     rgb = np.array(img)
 
     # 色版選擇
@@ -156,9 +223,16 @@ def preprocess(image_bytes: bytes, cfg: dict) -> Image.Image:
         a = np.clip((a - low) * 255.0 / (high - low), 0, 255).astype(np.uint8)
     pil = Image.fromarray(a)
 
-    # 中值濾波
-    if cfg["median"] > 0:
+    # Sauvola 自適應二值化（取代中值濾波）
+    if cfg.get("sauvola", False):
+        pil = Image.fromarray(sauvola_binarize(np.array(pil)))
+    elif cfg["median"] > 0:
         pil = pil.filter(ImageFilter.MedianFilter(size=cfg["median"]))
+
+    # 銳化（強化文字邊緣，對低解析度或印章干擾有幫助）
+    if cfg.get("sharpen", False):
+        pil = pil.filter(ImageFilter.SHARPEN)
+        pil = pil.filter(ImageFilter.SHARPEN)  # 套兩次效果更明顯
 
     return pil
 
@@ -170,21 +244,22 @@ def preprocess(image_bytes: bytes, cfg: dict) -> Image.Image:
 def benchmark_one(docx_name: str, img_name: str, image_bytes: bytes) -> BenchmarkRow:
     row = BenchmarkRow(source_docx=docx_name, image_name=img_name)
 
-    for cfg in CONFIGS:
+    for cfg in BENCHMARK_CONFIGS:
         name = cfg["name"]
         t0 = time.time()
         try:
             img  = preprocess(image_bytes, cfg)
-            text = pytesseract.image_to_string(img, lang=TESS_LANG)
+            tess_cfg = f"--psm {cfg.get('psm', 3)}"
+            text = pytesseract.image_to_string(img, lang=TESS_LANG, config=tess_cfg)
         except Exception as e:
             logger.error(f"  [{name}] 失敗:{e}")
-            row.results[name] = {"time": 0, "len": 0, "zh": "", "id": "", "hit": False}
+            row.results[name] = {"time": 0, "len": 0, "zh": "", "id": "", "mol": "", "hit": False}
             continue
 
-        elapsed   = round(time.time() - t0, 2)
-        zh, id_   = find_permits(text)
-        hit       = bool(zh or id_)
-        row.results[name] = {"time": elapsed, "len": len(text), "zh": zh, "id": id_, "hit": hit}
+        elapsed      = round(time.time() - t0, 2)
+        zh, id_, mol = find_permits(text)
+        hit          = bool(zh or id_ or mol)
+        row.results[name] = {"time": elapsed, "len": len(text), "zh": zh, "id": id_, "mol": mol, "hit": hit}
 
     return row
 
@@ -206,29 +281,30 @@ def write_summary(rows: list[BenchmarkRow], output_path: Path):
         return
 
     ranking = []
-    for cfg in CONFIGS:
+    for cfg in BENCHMARK_CONFIGS:
         name     = cfg["name"]
         hits     = sum(1 for r in rows if r.results.get(name, {}).get("hit"))
         zh_hits  = sum(1 for r in rows if r.results.get(name, {}).get("zh"))
         id_hits  = sum(1 for r in rows if r.results.get(name, {}).get("id"))
+        mol_hits = sum(1 for r in rows if r.results.get(name, {}).get("mol"))
         avg_time = sum(r.results.get(name, {}).get("time", 0) for r in rows) / n
-        ranking.append((name, hits, zh_hits, id_hits, avg_time))
+        ranking.append((name, hits, zh_hits, id_hits, mol_hits, avg_time))
 
-    ranking.sort(key=lambda x: (-x[1], x[4]))
+    ranking.sort(key=lambda x: (-x[1], x[5]))
 
     lines = [
-        "═" * 65,
+        "═" * 72,
         "  Tesseract 前處理參數校正報告",
-        "═" * 65,
+        "═" * 72,
         f"  測試樣本：{n} 張圖片",
         "",
-        f"  {'組合名稱':<18}  {'命中':>4}  {'許可證號':>6}  {'No ijin':>7}  {'平均秒':>6}",
-        "  " + "─" * 55,
+        f"  {'組合名稱':<18}  {'命中':>4}  {'許可證號':>6}  {'No ijin':>7}  {'MOL':>5}  {'平均秒':>6}",
+        "  " + "─" * 62,
     ]
 
-    for name, hits, zh, id_, avg_t in ranking:
+    for name, hits, zh, id_, mol, avg_t in ranking:
         lines.append(
-            f"  {name:<18}  {hits:>3}/{n}  {zh:>4}/{n}  {id_:>5}/{n}  {avg_t:>5.2f}s"
+            f"  {name:<18}  {hits:>3}/{n}  {zh:>4}/{n}  {id_:>5}/{n}  {mol:>3}/{n}  {avg_t:>5.2f}s"
         )
 
     best = ranking[0][0]
@@ -290,5 +366,121 @@ def main():
     logger.info(f"統計摘要：{txt_path.resolve()}")
 
 
+def diagnose(filter_docx: str = "", filter_img: str = ""):
+    """印出指定圖片在所有前處理組合下的原始 OCR 文字。
+
+    用法:
+      python ocr_benchmark.py diagnose              # 第一張圖
+      python ocr_benchmark.py diagnose 31011        # 含 31011 的 docx
+      python ocr_benchmark.py diagnose 31011 image5 # 指定 docx + 圖片
+    """
+    docx_files = sorted(INPUT_DIR.glob("*.docx"))
+    if not docx_files:
+        print(f"找不到 .docx：{INPUT_DIR}")
+        return
+
+    found = False
+    for docx_path in docx_files:
+        if filter_docx and filter_docx not in docx_path.name:
+            continue
+        images = extract_images_from_docx(docx_path)
+        for img_name, img_bytes in images:
+            if filter_img and filter_img not in img_name:
+                continue
+
+            print(f"\n{'═'*65}")
+            print(f"檔案：{docx_path.name}  圖片：{img_name}")
+            print(f"{'═'*65}")
+
+            for cfg in CONFIGS:
+                img      = preprocess(image_bytes=img_bytes, cfg=cfg)
+                tess_cfg = f"--psm {cfg.get('psm', 3)}"
+                text     = pytesseract.image_to_string(img, lang=TESS_LANG, config=tess_cfg)
+                zh, id_, mol = find_permits(text)
+                print(f"\n[{cfg['name']}]  長度:{len(text)}  許可證號:{zh!r}  No ijin:{id_!r}  MOL:{mol!r}")
+                print("─" * 40)
+                print(text[:600])
+
+            found = True
+            return  # 找到第一張符合的就停
+
+    if not found:
+        print(f"找不到符合的圖片：docx={filter_docx!r}  img={filter_img!r}")
+
+
+def roi_diagnose(filter_docx: str = "", filter_img: str = "", filter_roi: str = ""):
+    """裁切指定 ROI 並以所有前處理組合跑 OCR，比較各組合命中結果。
+
+    用法:
+      python ocr_benchmark.py roi 31011 image5        # 兩個 ROI × 第一種前處理（確認座標）
+      python ocr_benchmark.py roi 31015 image2 mol    # mol ROI × 全部 15 種前處理
+      python ocr_benchmark.py roi 31011 image5 permit # permit ROI × 全部 15 種前處理
+    """
+    ROI_SAVE_DIR.mkdir(parents=True, exist_ok=True)
+    docx_files = sorted(INPUT_DIR.glob("*.docx"))
+
+    found = False
+    for docx_path in docx_files:
+        if filter_docx and filter_docx not in docx_path.name:
+            continue
+        images = extract_images_from_docx(docx_path)
+        for img_name, img_bytes in images:
+            if filter_img and filter_img not in img_name:
+                continue
+
+            print(f"\n{'═'*65}")
+            print(f"檔案：{docx_path.name}  圖片：{img_name}")
+            print(f"{'═'*65}")
+            stem = f"{docx_path.stem}_{Path(img_name).stem}"
+
+            target_rois = {
+                k: v for k, v in ROI_REGIONS.items()
+                if not filter_roi or filter_roi == k
+            }
+
+            for roi_name, roi in target_rois.items():
+                print(f"\n{'─'*65}")
+                print(f"ROI: {roi_name}  座標:{roi}")
+                print(f"{'─'*65}")
+
+                for cfg in CONFIGS:
+                    # 裁切 ROI 再前處理
+                    combined_cfg = {**cfg, "roi": roi}
+                    img = preprocess(image_bytes=img_bytes, cfg=combined_cfg)
+                    tess_cfg = f"--psm {cfg.get('psm', 3)}"
+                    text = pytesseract.image_to_string(img, lang=TESS_LANG, config=tess_cfg)
+                    zh, id_, mol = find_permits(text)
+                    hit = bool(zh or id_ or mol)
+                    marker = "★" if hit else " "
+                    print(f"{marker} [{cfg['name']}]  許可證號:{zh!r}  No izin:{id_!r}  MOL:{mol!r}  len:{len(text)}")
+
+                # 儲存第一種前處理的預覽圖供確認
+                preview_cfg = {**CONFIGS[0], "roi": roi}
+                preview_img = preprocess(image_bytes=img_bytes, cfg=preview_cfg)
+                preview_path = ROI_SAVE_DIR / f"{stem}_{roi_name}.png"
+                preview_img.save(preview_path)
+                print(f"\n  預覽圖（{CONFIGS[0]['name']}）：{preview_path.resolve()}")
+
+            found = True
+            return
+
+    if not found:
+        print(f"找不到符合的圖片：docx={filter_docx!r}  img={filter_img!r}  roi={filter_roi!r}")
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "diagnose":
+        diagnose(
+            filter_docx=sys.argv[2] if len(sys.argv) > 2 else "",
+            filter_img =sys.argv[3] if len(sys.argv) > 3 else "",
+        )
+    elif cmd == "roi":
+        roi_diagnose(
+            filter_docx=sys.argv[2] if len(sys.argv) > 2 else "",
+            filter_img =sys.argv[3] if len(sys.argv) > 3 else "",
+            filter_roi =sys.argv[4] if len(sys.argv) > 4 else "",
+        )
+    else:
+        main()
