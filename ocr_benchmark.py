@@ -34,7 +34,7 @@ from pathlib import Path
 from dataclasses import dataclass, field, asdict
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageOps
 try:
     from scipy.ndimage import uniform_filter as _uniform_filter
     _SCIPY_OK = True
@@ -51,7 +51,7 @@ pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tessera
 
 INPUT_DIR   = Path("./docs")
 REPORT_DIR  = Path("./benchmark_results")
-MAX_SAMPLES = 100
+MAX_SAMPLES = 300
 TESS_LANG   = "chi_tra+ind+eng"
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
@@ -60,7 +60,7 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
 # 每筆格式：(x1, y1, x2, y2)
 ROI_REGIONS = {
     "mol":    (0.05, 0.04, 0.40, 0.22),  # image2 左上角方格：Agency's MOL License Number
-    "permit": (0.50, 0.30, 1.00, 0.85),  # image5 右欄第4項：許可號碼 / No ijin
+    "permit": (0.40, 0.30, 1.00, 0.85),  # image5 右欄第4項：許可號碼 / No ijin
 }
 ROI_SAVE_DIR = REPORT_DIR / "roi_preview"   # 儲存裁切預覽圖
 
@@ -79,11 +79,7 @@ logger = logging.getLogger(__name__)
 CONFIGS = [
     # ── 原有組合（PSM 預設 3）──────────────────────────────────
     {"name": "紅通道_2x_中值3",   "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 3, "sauvola": False},
-    {"name": "紅通道_2x_無濾波",  "channel": "R",    "scale": 2, "median": 0, "contrast": (2, 98), "psm": 3, "sauvola": False},
-    {"name": "紅通道_3x_中值3",   "channel": "R",    "scale": 3, "median": 3, "contrast": (2, 98), "psm": 3, "sauvola": False},
     {"name": "灰階_2x_中值3",     "channel": "gray", "scale": 2, "median": 3, "contrast": (2, 98), "psm": 3, "sauvola": False},
-    {"name": "灰階_2x_無濾波",    "channel": "gray", "scale": 2, "median": 0, "contrast": (2, 98), "psm": 3, "sauvola": False},
-    {"name": "最小通道_2x_中值3", "channel": "min",  "scale": 2, "median": 3, "contrast": (2, 98), "psm": 3, "sauvola": False},
     {"name": "紅通道_原尺寸",     "channel": "R",    "scale": 1, "median": 0, "contrast": (2, 98), "psm": 3, "sauvola": False},
     {"name": "灰階_原尺寸",       "channel": "gray", "scale": 1, "median": 0, "contrast": (2, 98), "psm": 3, "sauvola": False},
     # ── PSM 6（假設單一文字區塊）─────────────────────────────────
@@ -92,15 +88,9 @@ CONFIGS = [
     # ── PSM 11（稀疏文字）────────────────────────────────────────
     {"name": "紅通道_2x_PSM11",   "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 11, "sauvola": False},
     {"name": "灰階_2x_PSM11",     "channel": "gray", "scale": 2, "median": 3, "contrast": (2, 98), "psm": 11, "sauvola": False},
-    # ── Sauvola 自適應二值化 ──────────────────────────────────────
-    {"name": "Sauvola_2x_PSM3",   "channel": "gray", "scale": 2, "median": 0, "contrast": (2, 98), "psm": 3,  "sauvola": True,  "sharpen": False},
-    {"name": "Sauvola_2x_PSM6",   "channel": "gray", "scale": 2, "median": 0, "contrast": (2, 98), "psm": 6,  "sauvola": True,  "sharpen": False},
-    {"name": "Sauvola_2x_PSM11",  "channel": "gray", "scale": 2, "median": 0, "contrast": (2, 98), "psm": 11, "sauvola": True,  "sharpen": False},
     # ── 紅通道 + 銳化 ────────────────────────────────────────────
-    {"name": "紅通道_2x_銳化_PSM3",  "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 3,  "sauvola": False, "sharpen": True},
-    {"name": "紅通道_2x_銳化_PSM6",  "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 6,  "sauvola": False, "sharpen": True},
-    {"name": "紅通道_2x_銳化_PSM11", "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 11, "sauvola": False, "sharpen": True},
-    {"name": "紅通道_3x_銳化_PSM6",  "channel": "R",    "scale": 3, "median": 3, "contrast": (2, 98), "psm": 6,  "sauvola": False, "sharpen": True},
+    {"name": "紅通道_銳化_PSM6",   "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 6,  "sauvola": False, "sharpen": True},
+    {"name": "紅通道_銳化_PSM11",  "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 11, "sauvola": False, "sharpen": True},
 ]
 
 # ROI × 前處理 笛卡兒積（2 × 15 = 30 組合）
@@ -150,7 +140,7 @@ def extract_images_from_docx(docx_path: Path) -> list[tuple[str, bytes]]:
 
 RE_PERMIT_ZH = re.compile(r"許\s*可\s*(?:證\s*號|號\s*碼)[\s::]*(\d{4})", re.IGNORECASE)
 RE_PERMIT_ID = re.compile(r"No\.?\s*i[zj]in[\s::]*(\d{4})", re.IGNORECASE)
-RE_MOL       = re.compile(r"MOL\s*License\s*Number\s*[:：]\s*(\d{4})", re.IGNORECASE)
+RE_MOL       = re.compile(r"Agency'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:：]\s*(\d{4})", re.IGNORECASE)
 
 
 def find_permits(text: str) -> tuple[str, str, str]:
@@ -188,10 +178,32 @@ def sauvola_binarize(arr: np.ndarray, window: int = 25, k: float = 0.2) -> np.nd
     return ((arr_f >= thresh) * 255).astype(np.uint8)
 
 
+def remove_stamp(arr: np.ndarray, size: int = 15) -> np.ndarray:
+    """形態學去章：利用印章筆畫比文字粗大的特性，opening 保留大面積後填白。"""
+    try:
+        from scipy.ndimage import binary_opening, binary_dilation
+        dark = arr < 128                                          # 深色像素（文字+印章）
+        stamp = binary_opening(dark, structure=np.ones((size, size)))  # 只剩大塊（印章）
+        stamp = binary_dilation(stamp, structure=np.ones((5, 5)))      # 稍微膨脹邊緣
+        result = arr.copy()
+        result[stamp] = 255                                       # 印章區域填白
+        return result
+    except ImportError:
+        return arr
+
+
+def auto_rotate(img: Image.Image) -> Image.Image:
+    """套用 EXIF 方向標籤旋轉（手機/掃描儀常見問題）。"""
+    return ImageOps.exif_transpose(img)
+
+
 def preprocess(image_bytes: bytes, cfg: dict) -> Image.Image:
     img = Image.open(BytesIO(image_bytes)).convert("RGB")
 
-    # ROI 裁切（先裁後處理，保留更多細節）
+    # 自動修正掃描旋轉（部分文件放反掃描）
+    img = auto_rotate(img)
+
+    # ROI 裁切（先旋正再裁，座標才對應）
     if "roi" in cfg:
         img = crop_roi(img, cfg["roi"])
 
@@ -223,6 +235,10 @@ def preprocess(image_bytes: bytes, cfg: dict) -> Image.Image:
         a = np.clip((a - low) * 255.0 / (high - low), 0, 255).astype(np.uint8)
     pil = Image.fromarray(a)
 
+    # 形態學去章（印章筆畫較粗，opening 後填白）
+    if cfg.get("stamp_remove", False):
+        pil = Image.fromarray(remove_stamp(np.array(pil)))
+
     # Sauvola 自適應二值化（取代中值濾波）
     if cfg.get("sauvola", False):
         pil = Image.fromarray(sauvola_binarize(np.array(pil)))
@@ -232,7 +248,7 @@ def preprocess(image_bytes: bytes, cfg: dict) -> Image.Image:
     # 銳化（強化文字邊緣，對低解析度或印章干擾有幫助）
     if cfg.get("sharpen", False):
         pil = pil.filter(ImageFilter.SHARPEN)
-        pil = pil.filter(ImageFilter.SHARPEN)  # 套兩次效果更明顯
+        pil = pil.filter(ImageFilter.SHARPEN)
 
     return pil
 
@@ -453,6 +469,10 @@ def roi_diagnose(filter_docx: str = "", filter_img: str = "", filter_roi: str = 
                     hit = bool(zh or id_ or mol)
                     marker = "★" if hit else " "
                     print(f"{marker} [{cfg['name']}]  許可證號:{zh!r}  No izin:{id_!r}  MOL:{mol!r}  len:{len(text)}")
+                    # 固定印出含關鍵字的行（不管有無命中）
+                    for line in text.splitlines():
+                        if any(kw in line.upper() for kw in ("MOL", "LICENSE", "NUMBER", "AGENCY")):
+                            print(f"    → {line.strip()}")
 
                 # 儲存第一種前處理的預覽圖供確認
                 preview_cfg = {**CONFIGS[0], "roi": roi}
