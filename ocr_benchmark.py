@@ -35,12 +35,6 @@ from dataclasses import dataclass, field, asdict
 
 import numpy as np
 from PIL import Image, ImageFilter, ImageOps
-try:
-    from scipy.ndimage import uniform_filter as _uniform_filter
-    _SCIPY_OK = True
-except ImportError:
-    _SCIPY_OK = False
-
 import pytesseract
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
@@ -51,7 +45,7 @@ pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tessera
 
 INPUT_DIR   = Path("./docs")
 REPORT_DIR  = Path("./benchmark_results")
-MAX_SAMPLES = 300
+MAX_SAMPLES = 500
 TESS_LANG   = "chi_tra+ind+eng"
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
@@ -59,8 +53,8 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
 # ROI 定義（相對座標，0~1）
 # 每筆格式：(x1, y1, x2, y2)
 ROI_REGIONS = {
-    "mol":    (0.05, 0.04, 0.40, 0.22),  # image2 左上角方格：Agency's MOL License Number
-    "permit": (0.40, 0.30, 1.00, 0.85),  # image5 右欄第4項：許可號碼 / No ijin
+    "mol":    (0.05, 0.04, 0.40, 0.25),  # image2 左上角方格：Agency's MOL License Number
+    "permit": (0.40, 0.10, 1.00, 0.85),  # image5 右欄第4項：許可號碼 / No ijin
 }
 ROI_SAVE_DIR = REPORT_DIR / "roi_preview"   # 儲存裁切預覽圖
 
@@ -138,15 +132,43 @@ def extract_images_from_docx(docx_path: Path) -> list[tuple[str, bytes]]:
     return images
 
 
-RE_PERMIT_ZH = re.compile(r"許\s*可\s*(?:證\s*號|號\s*碼)[\s::]*(\d{4})", re.IGNORECASE)
-RE_PERMIT_ID = re.compile(r"No\.?\s*i[zj]in[\s::]*(\d{4})", re.IGNORECASE)
-RE_MOL       = re.compile(r"Agency'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:：]\s*(\d{4})", re.IGNORECASE)
+RE_PERMIT_ZH = re.compile(r"(?:許\s*可\s*(?:證\s*號|號\s*碼)|號)\s*[:：﹕]\s*(\d{4})", re.IGNORECASE)
+
+# permit ID 多重 fallback：依精確度由高到低，第一個命中即採用
+RE_PERMIT_ID_LIST = [
+    # 第一層：完整 No izin / No ijin
+    re.compile(r"No\.?\s*i[zj]in\s*[:：﹕]\s*(\d{4})", re.IGNORECASE),
+    # 第二層：N 開頭 + 任意 5 字 + n 結尾（izin 變體容錯）
+    re.compile(r"[Nn]\w{0,5}n\s*[:：﹕]\s*(\d{4})", re.IGNORECASE),
+    # 第三層：只靠末尾 n : XXXX 保底
+    re.compile(r"n\s*[:：﹕]\s*(\d{4})", re.IGNORECASE),
+]
+
+# MOL 多重 fallback：依精確度由高到低，第一個命中即採用
+RE_MOL_LIST = [
+    # 第一層：Agency's 完整錨點
+    re.compile(r"Agency'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:：]\s*(\d{4})", re.IGNORECASE),
+    # 第二層：Agency's 容錯（中間字元允許誤讀）
+    re.compile(r"A\w{3,6}'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:：]\s*(\d{4})", re.IGNORECASE),
+    # 第三層：Number / umber / Namber : XXXX（Number 各種 OCR 變體）
+    re.compile(r"(?:Num\s*ber|umber|[Nn]amber)\s*[:：]\s*(\d{4})", re.IGNORECASE),
+    # 第五層：MOL 出現後，後面接續任意字元直到 4 位數字
+    re.compile(r"M[O0]L\D{0,30}(\d{4})", re.IGNORECASE),
+]
 
 
 def find_permits(text: str) -> tuple[str, str, str]:
     zh  = RE_PERMIT_ZH.search(text)
-    id_ = RE_PERMIT_ID.search(text)
-    mol = RE_MOL.search(text)
+    id_ = None
+    for pattern in RE_PERMIT_ID_LIST:
+        id_ = pattern.search(text)
+        if id_:
+            break
+    mol = None
+    for pattern in RE_MOL_LIST:
+        mol = pattern.search(text)
+        if mol:
+            break
     return (
         zh.group(1).strip()  if zh  else "",
         id_.group(1).strip() if id_ else "",
@@ -164,33 +186,6 @@ def crop_roi(img: Image.Image, roi: tuple) -> Image.Image:
 # ═══════════════════════════════════════════════════════════════════════════
 # 前處理
 # ═══════════════════════════════════════════════════════════════════════════
-
-def sauvola_binarize(arr: np.ndarray, window: int = 25, k: float = 0.2) -> np.ndarray:
-    """Sauvola 自適應二值化。需要 scipy；無 scipy 時退回 Otsu 全局閾值。"""
-    arr_f = arr.astype(np.float64)
-    if _SCIPY_OK:
-        mean   = _uniform_filter(arr_f, window)
-        mean_sq = _uniform_filter(arr_f ** 2, window)
-        std    = np.sqrt(np.maximum(mean_sq - mean ** 2, 0))
-        thresh = mean * (1 + k * (std / 128.0 - 1))
-    else:
-        thresh = arr_f.mean()
-    return ((arr_f >= thresh) * 255).astype(np.uint8)
-
-
-def remove_stamp(arr: np.ndarray, size: int = 15) -> np.ndarray:
-    """形態學去章：利用印章筆畫比文字粗大的特性，opening 保留大面積後填白。"""
-    try:
-        from scipy.ndimage import binary_opening, binary_dilation
-        dark = arr < 128                                          # 深色像素（文字+印章）
-        stamp = binary_opening(dark, structure=np.ones((size, size)))  # 只剩大塊（印章）
-        stamp = binary_dilation(stamp, structure=np.ones((5, 5)))      # 稍微膨脹邊緣
-        result = arr.copy()
-        result[stamp] = 255                                       # 印章區域填白
-        return result
-    except ImportError:
-        return arr
-
 
 def auto_rotate(img: Image.Image) -> Image.Image:
     """套用 EXIF 方向標籤旋轉（手機/掃描儀常見問題）。"""
@@ -215,8 +210,6 @@ def preprocess(image_bytes: bytes, cfg: dict) -> Image.Image:
         arr = rgb[:, :, 0]
     elif ch == "gray":
         arr = np.mean(rgb, axis=2).astype(np.uint8)
-    elif ch == "min":
-        arr = rgb.min(axis=2)
     else:
         arr = rgb[:, :, 0]
 
@@ -235,14 +228,7 @@ def preprocess(image_bytes: bytes, cfg: dict) -> Image.Image:
         a = np.clip((a - low) * 255.0 / (high - low), 0, 255).astype(np.uint8)
     pil = Image.fromarray(a)
 
-    # 形態學去章（印章筆畫較粗，opening 後填白）
-    if cfg.get("stamp_remove", False):
-        pil = Image.fromarray(remove_stamp(np.array(pil)))
-
-    # Sauvola 自適應二值化（取代中值濾波）
-    if cfg.get("sauvola", False):
-        pil = Image.fromarray(sauvola_binarize(np.array(pil)))
-    elif cfg["median"] > 0:
+    if cfg["median"] > 0:
         pil = pil.filter(ImageFilter.MedianFilter(size=cfg["median"]))
 
     # 銳化（強化文字邊緣，對低解析度或印章干擾有幫助）
@@ -276,6 +262,12 @@ def benchmark_one(docx_name: str, img_name: str, image_bytes: bytes) -> Benchmar
         zh, id_, mol = find_permits(text)
         hit          = bool(zh or id_ or mol)
         row.results[name] = {"time": elapsed, "len": len(text), "zh": zh, "id": id_, "mol": mol, "hit": hit}
+
+        if len(text) > 0:
+            for line in text.splitlines():
+                if any(kw in line.upper() for kw in ("MOL", "LICENSE", "NUMBER", "AGENCY")):
+                    marker = "★" if hit else " "
+                    logger.debug(f"  {marker} [{name}] → {line.strip()}")
 
     return row
 
@@ -408,14 +400,14 @@ def diagnose(filter_docx: str = "", filter_img: str = ""):
             print(f"檔案：{docx_path.name}  圖片：{img_name}")
             print(f"{'═'*65}")
 
-            for cfg in CONFIGS:
+            for cfg in BENCHMARK_CONFIGS:
                 img      = preprocess(image_bytes=img_bytes, cfg=cfg)
                 tess_cfg = f"--psm {cfg.get('psm', 3)}"
                 text     = pytesseract.image_to_string(img, lang=TESS_LANG, config=tess_cfg)
                 zh, id_, mol = find_permits(text)
                 print(f"\n[{cfg['name']}]  長度:{len(text)}  許可證號:{zh!r}  No ijin:{id_!r}  MOL:{mol!r}")
                 print("─" * 40)
-                print(text[:600])
+                print(text[:800])
 
             found = True
             return  # 找到第一張符合的就停
@@ -469,10 +461,7 @@ def roi_diagnose(filter_docx: str = "", filter_img: str = "", filter_roi: str = 
                     hit = bool(zh or id_ or mol)
                     marker = "★" if hit else " "
                     print(f"{marker} [{cfg['name']}]  許可證號:{zh!r}  No izin:{id_!r}  MOL:{mol!r}  len:{len(text)}")
-                    # 固定印出含關鍵字的行（不管有無命中）
-                    for line in text.splitlines():
-                        if any(kw in line.upper() for kw in ("MOL", "LICENSE", "NUMBER", "AGENCY")):
-                            print(f"    → {line.strip()}")
+                    print(text[:800])
 
                 # 儲存第一種前處理的預覽圖供確認
                 preview_cfg = {**CONFIGS[0], "roi": roi}
@@ -490,17 +479,28 @@ def roi_diagnose(filter_docx: str = "", filter_img: str = "", filter_roi: str = 
 
 if __name__ == "__main__":
     import sys
-    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-    if cmd == "diagnose":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("cmd", nargs="?", default="", help="diagnose / roi / (空白=正常執行)")
+    parser.add_argument("args", nargs="*", help="附加參數（docx、image、roi 過濾）")
+    parser.add_argument("--log-level", default="INFO",
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="日誌等級（DEBUG 會印出 OCR 關鍵字行）")
+    opts = parser.parse_args()
+
+    logging.getLogger().setLevel(opts.log_level)
+
+    if opts.cmd == "diagnose":
         diagnose(
-            filter_docx=sys.argv[2] if len(sys.argv) > 2 else "",
-            filter_img =sys.argv[3] if len(sys.argv) > 3 else "",
+            filter_docx=opts.args[0] if len(opts.args) > 0 else "",
+            filter_img =opts.args[1] if len(opts.args) > 1 else "",
         )
-    elif cmd == "roi":
+    elif opts.cmd == "roi":
         roi_diagnose(
-            filter_docx=sys.argv[2] if len(sys.argv) > 2 else "",
-            filter_img =sys.argv[3] if len(sys.argv) > 3 else "",
-            filter_roi =sys.argv[4] if len(sys.argv) > 4 else "",
+            filter_docx=opts.args[0] if len(opts.args) > 0 else "",
+            filter_img =opts.args[1] if len(opts.args) > 1 else "",
+            filter_roi =opts.args[2] if len(opts.args) > 2 else "",
         )
     else:
         main()
