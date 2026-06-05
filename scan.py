@@ -1,17 +1,17 @@
 """
 scan.py
 =======
-Tesseract 粗篩工具（兩階段流程第一階段）
+Tesseract 粗篩工具(兩階段流程第一階段)
 
-從 ./docs 的 .docx 批量掃描圖片，找出含許可證號 / No izin / MOL 的圖片，
+從 ./docs 的 .docx 批量掃描圖片,找出含許可證號 / No izin / MOL 的圖片,
 輸出裁切好的原始 ROI 圖檔供 Google Vision 精讀。
 
-輸出：
-  scan_results/matches.csv       命中清單（docx、圖片、各欄位初步數字、ROI 圖路徑）
+輸出:
+  scan_results/matches.csv       命中清單(docx、圖片、各欄位初步數字、ROI 圖路徑)
   scan_results/mol_crops/        mol ROI 原始裁切圖
   scan_results/permit_crops/     permit ROI 原始裁切圖
 
-用法：
+用法:
   python scan.py
   python scan.py --log-level DEBUG
 """
@@ -47,12 +47,28 @@ OUTPUT_DIR = Path("./scan_results")
 TESS_LANG  = "chi_tra+ind+eng"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
 
+# 白名單:拉丁字母 + 數字 + 常見標點
+WHITELIST_LATIN = (
+    "0123456789"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    " :.'-,"
+)
+
+# ─── ROI 設定 ──────────────────────────────────────────────────────────────
+# 命名規則:同一邏輯欄位用相同前綴(以 "_" 分隔)
+#   - "mol"           → 欄位 = "mol"
+#   - "permit_upper"  → 欄位 = "permit"  (上半部嘗試)
+#   - "permit_lower"  → 欄位 = "permit"  (下半部備援)
+#
+# 同一欄位內依字典順序嘗試,第一個命中即停;欄位已找到後跳過該欄位剩餘 ROI
 ROI_REGIONS = {
-    "mol":    (0.05, 0.04, 0.40, 0.25),  # image2 左上角：Agency's MOL License Number
-    "permit": (0.40, 0.10, 1.00, 0.85),  # image5 右欄：許可號碼 / No izin
+    "mol":           (0.05, 0.04, 0.40, 0.25),   # 左上角:Agency's MOL License Number
+    "permit_upper":  (0.40, 0.05, 1.00, 0.55),   # 右欄上半:許可號碼可能在此
+    "permit_lower":  (0.40, 0.45, 1.00, 0.95),   # 右欄下半:或在此(10% 重疊避免切到關鍵字)
 }
 
-# 依命中率由高到低排列；找到第一個命中即停
+# 依命中率由高到低排列;找到第一個命中即停
 SCAN_CONFIGS = [
     {"name": "紅通道_2x_中值3",  "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 3},
     {"name": "灰階_2x_中值3",    "channel": "gray", "scale": 2, "median": 3, "contrast": (2, 98), "psm": 3},
@@ -63,38 +79,43 @@ SCAN_CONFIGS = [
     {"name": "紅通道_銳化_PSM6", "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 6,  "sharpen": True},
     {"name": "紅通道_2x_PSM11",  "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 11},
     {"name": "灰階_2x_PSM11",    "channel": "gray", "scale": 2, "median": 3, "contrast": (2, 98), "psm": 11},
+    # 英數白名單備援(放在末尾,主設定都失敗才嘗試)
+    {
+        "name":      "英數白名單_PSM6",
+        "channel":   "R", "scale": 2, "median": 3, "contrast": (2, 98), "psm": 6,
+        "lang":      "eng",
+        "whitelist": WHITELIST_LATIN,
+    },
+    {
+        "name":      "英數白名單_PSM3",
+        "channel":   "gray", "scale": 2, "median": 3, "contrast": (2, 98), "psm": 3,
+        "lang":      "eng",
+        "whitelist": WHITELIST_LATIN,
+    },
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 正則（與 ocr_benchmark.py 保持一致）
+# 正則
 # ═══════════════════════════════════════════════════════════════════════════
 
-RE_PERMIT_ZH = re.compile(r"(?:許\s*可\s*(?:證\s*號|號\s*碼)|號)\s*[:：﹕]\s*(\d{4})", re.IGNORECASE)
+RE_PERMIT_ZH = re.compile(r"(?:許\s*可\s*(?:證\s*號|號\s*碼)|號)\s*[:::﹕]\s*(\d{4})", re.IGNORECASE)
 
-# permit ID 多重 fallback：依精確度由高到低，第一個命中即採用
 RE_PERMIT_ID_LIST = [
-    # 第一層：完整 No izin / No ijin
-    re.compile(r"No\.?\s*i[zj]in\s*[:：﹕]\s*(\d{4})", re.IGNORECASE),
-    # 第二層：N 開頭 + 任意 5 字 + n 結尾（izin 變體容錯）
-    re.compile(r"[Nn]\w{0,5}n\s*[:：﹕]\s*(\d{4})", re.IGNORECASE),
-    # 第三層：只靠末尾 n : XXXX 保底
-    re.compile(r"n\s*[:：﹕]\s*(\d{4})", re.IGNORECASE),
+    re.compile(r"No\.?\s*i[zj]in\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
+    re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
+    re.compile(r"n\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
 ]
 
 RE_MOL_LIST = [
-    # 第一層：Agency's 完整錨點
-    re.compile(r"Agency'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:：]\s*(\d{4})", re.IGNORECASE),
-    # 第二層：Agency's 容錯（中間字元允許誤讀）
-    re.compile(r"A\w{3,6}'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:：]\s*(\d{4})", re.IGNORECASE),
-    # 第三層：Number / umber / Namber : XXXX（Number 各種 OCR 變體）
-    re.compile(r"(?:Num\s*ber|umber|[Nn]amber)\s*[:：]\s*(\d{4})", re.IGNORECASE),
-    # 第五層：MOL 出現後，後面接續任意字元直到 4 位數字
+    re.compile(r"Agency'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:::]\s*(\d{4})", re.IGNORECASE),
+    re.compile(r"A\w{3,6}'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:::]\s*(\d{4})", re.IGNORECASE),
+    re.compile(r"(?:Num\s*ber|umber|[Nn]amber)\s*[:::]\s*(\d{4})", re.IGNORECASE),
     re.compile(r"M[O0]L\D{0,30}(\d{4})", re.IGNORECASE),
 ]
 
 
 def find_permits(text: str) -> tuple[str, str, int, str, int]:
-    zh  = RE_PERMIT_ZH.search(text)
+    zh = RE_PERMIT_ZH.search(text)
     id_, id_layer = None, 0
     for i, p in enumerate(RE_PERMIT_ID_LIST, 1):
         id_ = p.search(text)
@@ -108,7 +129,7 @@ def find_permits(text: str) -> tuple[str, str, int, str, int]:
             mol_layer = i
             break
     return (
-        zh.group(1).strip()  if zh  else "",
+        zh.group(1).strip() if zh else "",
         id_.group(1).strip() if id_ else "",
         id_layer,
         mol.group(1).strip() if mol else "",
@@ -144,7 +165,7 @@ def preprocess(image_bytes: bytes, cfg: dict) -> Image.Image:
     if "roi" in cfg:
         img = crop_roi(img, cfg["roi"])
     rgb = np.array(img)
-    ch  = cfg["channel"]
+    ch = cfg["channel"]
     if ch == "R":
         arr = rgb[:, :, 0]
     elif ch == "gray":
@@ -168,6 +189,25 @@ def preprocess(image_bytes: bytes, cfg: dict) -> Image.Image:
         pil = pil.filter(ImageFilter.SHARPEN)
     return pil
 
+
+def build_tess_config(cfg: dict) -> str:
+    """依設定組合 Tesseract config 字串。"""
+    parts = [f"--psm {cfg.get('psm', 3)}"]
+    if "whitelist" in cfg and cfg["whitelist"]:
+        parts.append(f"-c tessedit_char_whitelist={cfg['whitelist']}")
+    return " ".join(parts)
+
+
+def roi_field(roi_name: str) -> str:
+    """
+    從 ROI 名稱取出邏輯欄位名(取底線前綴)。
+    例:
+      "mol"          → "mol"
+      "permit_upper" → "permit"
+      "permit_lower" → "permit"
+    """
+    return roi_name.split("_")[0]
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 掃描核心
 # ═══════════════════════════════════════════════════════════════════════════
@@ -175,8 +215,13 @@ def preprocess(image_bytes: bytes, cfg: dict) -> Image.Image:
 def scan_image(docx_name: str, img_name: str, image_bytes: bytes) -> dict | None:
     """
     對單張圖片掃描所有 ROI。
-    有任一 ROI 命中即回傳結果 dict，全部未命中回傳 None。
-    ROI 圖檔儲存的是未經前處理的原始裁切圖（供 Google Vision 使用）。
+
+    新增邏輯:
+      使用 roi_field() 將同前綴的 ROI 視為同一欄位。
+      欄位一旦找到就跳過該欄位剩餘 ROI,避免重複工作。
+      例:permit_upper 命中 → 直接跳過 permit_lower。
+
+    ROI 圖檔儲存原始裁切圖(未經前處理),供 Google Vision 使用。
     """
     stem = f"{Path(docx_name).stem}_{Path(img_name).stem}"
     result = {
@@ -188,20 +233,31 @@ def scan_image(docx_name: str, img_name: str, image_bytes: bytes) -> dict | None
         "mol":          "",
         "mol_layer":    "",
         "hit_config":   "",
+        "hit_roi":      "",          # ★ 新增:記錄是哪個 ROI 命中(upper/lower)
         "mol_crop":     "",
         "permit_crop":  "",
     }
     any_hit = False
+    fields_found: set[str] = set()    # ★ 已從某個 ROI 命中的欄位名
 
-    # 原始圖（旋轉後）延遲初始化，只在首次命中時載入
     raw_img: Image.Image | None = None
 
     for roi_name, roi_coords in ROI_REGIONS.items():
+        field = roi_field(roi_name)
+
+        # 該欄位已從前序 ROI 命中,直接跳過(這就是「找到就跳過」邏輯)
+        if field in fields_found:
+            logger.debug(f"  ⏭ 跳過 {roi_name}({field} 已從前序 ROI 命中)")
+            continue
+
         for cfg in SCAN_CONFIGS:
             combined_cfg = {**cfg, "roi": roi_coords}
-            img      = preprocess(image_bytes, combined_cfg)
-            tess_cfg = f"--psm {cfg.get('psm', 3)}"
-            text     = pytesseract.image_to_string(img, lang=TESS_LANG, config=tess_cfg)
+            img = preprocess(image_bytes, combined_cfg)
+
+            lang = cfg.get("lang", TESS_LANG)
+            tess_cfg = build_tess_config(cfg)
+            text = pytesseract.image_to_string(img, lang=lang, config=tess_cfg)
+
             zh, id_, id_layer, mol, mol_layer = find_permits(text)
 
             if not (zh or id_ or mol):
@@ -217,12 +273,14 @@ def scan_image(docx_name: str, img_name: str, image_bytes: bytes) -> dict | None
                 result["mol_layer"] = mol_layer
             if not result["hit_config"]:
                 result["hit_config"] = cfg["name"]
+                result["hit_roi"]    = roi_name      # ★ 記錄是 upper 還是 lower
             any_hit = True
+            fields_found.add(field)                  # ★ 標記此欄位已找到
 
-            # 儲存原始 ROI 裁切圖（未前處理，給 Google Vision 用）
-            crop_key = f"{roi_name}_crop"
+            # 儲存原始 ROI 裁切圖(用 field 作為 key,不是 roi_name)
+            crop_key = f"{field}_crop"
             if not result[crop_key]:
-                crop_dir = OUTPUT_DIR / f"{roi_name}_crops"
+                crop_dir = OUTPUT_DIR / f"{field}_crops"
                 crop_dir.mkdir(parents=True, exist_ok=True)
                 crop_path = crop_dir / f"{stem}.png"
                 if raw_img is None:
@@ -231,7 +289,7 @@ def scan_image(docx_name: str, img_name: str, image_bytes: bytes) -> dict | None
                 result[crop_key] = str(crop_path)
 
             logger.debug(f"  ★ {roi_name}/{cfg['name']}  zh={zh!r} id={id_!r} mol={mol!r}")
-            break  # 此 ROI 已命中，不再試其他 config
+            break  # 此 ROI 已命中,不再試其他 config
 
     return result if any_hit else None
 
@@ -245,17 +303,20 @@ def main():
     fieldnames = [
         "source_docx", "image_name",
         "zh", "id", "id_layer", "mol", "mol_layer",
-        "hit_config",
+        "hit_config", "hit_roi",                # ★ 新增 hit_roi 欄位
         "mol_crop", "permit_crop",
     ]
 
     docx_files = sorted(INPUT_DIR.glob("*.docx"))
     if not docx_files:
-        logger.error(f"找不到 .docx：{INPUT_DIR.resolve()}")
+        logger.error(f"找不到 .docx:{INPUT_DIR.resolve()}")
         return
 
     total = hits = 0
     t0 = time.time()
+
+    # 統計上/下半部分別命中次數
+    upper_hits = lower_hits = 0
 
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -268,9 +329,13 @@ def main():
                 result = scan_image(docx_path.name, img_name, img_bytes)
                 if result:
                     hits += 1
+                    if result["hit_roi"] == "permit_upper":
+                        upper_hits += 1
+                    elif result["hit_roi"] == "permit_lower":
+                        lower_hits += 1
                     writer.writerow(result)
                     logger.info(
-                        f"★ {docx_path.name} / {img_name}"
+                        f"★ {docx_path.name} / {img_name}  [{result['hit_roi']}]"
                         f"  zh={result['zh']!r} id={result['id']!r} mol={result['mol']!r}"
                     )
                 else:
@@ -278,9 +343,12 @@ def main():
 
     elapsed = round(time.time() - t0, 1)
     logger.info("")
-    logger.info(f"掃描完成：{total} 張圖，命中 {hits} 張（{hits / max(total, 1) * 100:.1f}%），耗時 {elapsed}s")
-    logger.info(f"命中清單：{csv_path.resolve()}")
-    logger.info(f"ROI 圖檔：{OUTPUT_DIR.resolve()}")
+    logger.info(f"掃描完成:{total} 張圖,命中 {hits} 張({hits / max(total, 1) * 100:.1f}%),耗時 {elapsed}s")
+    if upper_hits + lower_hits > 0:
+        logger.info(f"  permit 上半命中:{upper_hits} 張")
+        logger.info(f"  permit 下半命中:{lower_hits} 張")
+    logger.info(f"命中清單:{csv_path.resolve()}")
+    logger.info(f"ROI 圖檔:{OUTPUT_DIR.resolve()}")
 
 
 if __name__ == "__main__":
