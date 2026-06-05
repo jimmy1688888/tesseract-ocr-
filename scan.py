@@ -106,7 +106,6 @@ RE_PERMIT_ZH = re.compile(r"(?:許\s*可\s*(?:證\s*號|號\s*碼)|號)\s*[:::�
 RE_PERMIT_ID_LIST = [
     re.compile(r"No\.?\s*i[zj]in\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
     re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
-    re.compile(r"n\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
 ]
 
 RE_MOL_LIST = [
