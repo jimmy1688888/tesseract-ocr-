@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 INPUT_DIR  = Path("./docs")
 OUTPUT_DIR = Path("./scan_results")
-TESS_LANG  = "chi_tra+ind+eng"
+TESS_LANG  = "ind+eng"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
 
 # 白名單:拉丁字母 + 數字 + 常見標點
@@ -79,10 +79,13 @@ SCAN_CONFIGS = [
     {"name": "紅通道_銳化_PSM6", "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 6,  "sharpen": True},
     {"name": "紅通道_2x_PSM11",  "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 11},
     {"name": "灰階_2x_PSM11",    "channel": "gray", "scale": 2, "median": 3, "contrast": (2, 98), "psm": 11},
-    # 英數白名單備援(放在末尾,主設定都失敗才嘗試)
+]
+
+# 9 個主設定全部未命中時才嘗試的白名單備援
+FALLBACK_CONFIGS = [
     {
         "name":      "英數白名單_PSM6",
-        "channel":   "R", "scale": 2, "median": 3, "contrast": (2, 98), "psm": 6,
+        "channel":   "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 6,
         "lang":      "eng",
         "whitelist": WHITELIST_LATIN,
     },
@@ -250,46 +253,50 @@ def scan_image(docx_name: str, img_name: str, image_bytes: bytes) -> dict | None
             logger.debug(f"  ⏭ 跳過 {roi_name}({field} 已從前序 ROI 命中)")
             continue
 
-        for cfg in SCAN_CONFIGS:
-            combined_cfg = {**cfg, "roi": roi_coords}
-            img = preprocess(image_bytes, combined_cfg)
+        roi_hit = False
+        for config_list in (SCAN_CONFIGS, FALLBACK_CONFIGS):
+            if roi_hit:
+                break
+            for cfg in config_list:
+                combined_cfg = {**cfg, "roi": roi_coords}
+                img = preprocess(image_bytes, combined_cfg)
 
-            lang = cfg.get("lang", TESS_LANG)
-            tess_cfg = build_tess_config(cfg)
-            text = pytesseract.image_to_string(img, lang=lang, config=tess_cfg)
+                lang = cfg.get("lang", TESS_LANG)
+                tess_cfg = build_tess_config(cfg)
+                text = pytesseract.image_to_string(img, lang=lang, config=tess_cfg)
 
-            zh, id_, id_layer, mol, mol_layer = find_permits(text)
+                zh, id_, id_layer, mol, mol_layer = find_permits(text)
 
-            if not (zh or id_ or mol):
-                continue
+                if not (zh or id_ or mol):
+                    continue
 
-            # 有命中 — 填入結果
-            if zh:  result["zh"]  = zh
-            if id_:
-                result["id"]       = id_
-                result["id_layer"] = id_layer
-            if mol:
-                result["mol"]       = mol
-                result["mol_layer"] = mol_layer
-            if not result["hit_config"]:
-                result["hit_config"] = cfg["name"]
-                result["hit_roi"]    = roi_name      # ★ 記錄是 upper 還是 lower
-            any_hit = True
-            fields_found.add(field)                  # ★ 標記此欄位已找到
+                # 有命中 — 填入結果
+                if zh:  result["zh"]  = zh
+                if id_:
+                    result["id"]       = id_
+                    result["id_layer"] = id_layer
+                if mol:
+                    result["mol"]       = mol
+                    result["mol_layer"] = mol_layer
+                if not result["hit_config"]:
+                    result["hit_config"] = cfg["name"]
+                    result["hit_roi"]    = roi_name
+                any_hit = True
+                roi_hit = True
+                fields_found.add(field)
 
-            # 儲存原始 ROI 裁切圖(用 field 作為 key,不是 roi_name)
-            crop_key = f"{field}_crop"
-            if not result[crop_key]:
-                crop_dir = OUTPUT_DIR / f"{field}_crops"
-                crop_dir.mkdir(parents=True, exist_ok=True)
-                crop_path = crop_dir / f"{stem}.png"
-                if raw_img is None:
-                    raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
-                crop_roi(raw_img, roi_coords).save(crop_path)
-                result[crop_key] = str(crop_path)
+                crop_key = f"{field}_crop"
+                if not result[crop_key]:
+                    crop_dir = OUTPUT_DIR / f"{field}_crops"
+                    crop_dir.mkdir(parents=True, exist_ok=True)
+                    crop_path = crop_dir / f"{stem}.png"
+                    if raw_img is None:
+                        raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
+                    crop_roi(raw_img, roi_coords).save(crop_path)
+                    result[crop_key] = str(crop_path)
 
-            logger.debug(f"  ★ {roi_name}/{cfg['name']}  zh={zh!r} id={id_!r} mol={mol!r}")
-            break  # 此 ROI 已命中,不再試其他 config
+                logger.debug(f"  ★ {roi_name}/{cfg['name']}  zh={zh!r} id={id_!r} mol={mol!r}")
+                break
 
     return result if any_hit else None
 
