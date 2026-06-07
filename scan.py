@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageFilter, ImageOps
 import pytesseract
+from pytesseract import Output
 
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
@@ -201,6 +202,19 @@ def build_tess_config(cfg: dict) -> str:
     return " ".join(parts)
 
 
+CONF_LOW_THRESHOLD = 60   # 低於此值另存圖供人工複核
+
+
+def ocr_with_conf(img, lang: str, tess_cfg: str) -> tuple[str, float]:
+    """執行 OCR，回傳 (全文, 平均信心值 0~100)。"""
+    data = pytesseract.image_to_data(img, lang=lang, config=tess_cfg, output_type=Output.DICT)
+    valid = [(w, int(c)) for w, c in zip(data["text"], data["conf"])
+             if w.strip() and int(c) != -1]
+    text = " ".join(w for w, _ in valid)
+    avg_conf = round(sum(c for _, c in valid) / len(valid), 1) if valid else 0.0
+    return text, avg_conf
+
+
 def roi_field(roi_name: str) -> str:
     """
     從 ROI 名稱取出邏輯欄位名(取底線前綴)。
@@ -237,6 +251,8 @@ def scan_image(docx_name: str, img_name: str, image_bytes: bytes) -> dict | None
         "mol_layer":    "",
         "hit_config":   "",
         "hit_roi":      "",          # ★ 新增:記錄是哪個 ROI 命中(upper/lower)
+        "conf":         "",          # 命中當下的平均信心值
+        "low_conf":     "",          # 信心值 < 60 時的另存圖路徑
         "mol_crop":     "",
         "permit_crop":  "",
     }
@@ -263,7 +279,7 @@ def scan_image(docx_name: str, img_name: str, image_bytes: bytes) -> dict | None
 
                 lang = cfg.get("lang", TESS_LANG)
                 tess_cfg = build_tess_config(cfg)
-                text = pytesseract.image_to_string(img, lang=lang, config=tess_cfg)
+                text, conf = ocr_with_conf(img, lang, tess_cfg)
 
                 zh, id_, id_layer, mol, mol_layer = find_permits(text)
 
@@ -281,21 +297,32 @@ def scan_image(docx_name: str, img_name: str, image_bytes: bytes) -> dict | None
                 if not result["hit_config"]:
                     result["hit_config"] = cfg["name"]
                     result["hit_roi"]    = roi_name
+                    result["conf"]       = conf
                 any_hit = True
                 roi_hit = True
                 fields_found.add(field)
+
+                if raw_img is None:
+                    raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
 
                 crop_key = f"{field}_crop"
                 if not result[crop_key]:
                     crop_dir = OUTPUT_DIR / f"{field}_crops"
                     crop_dir.mkdir(parents=True, exist_ok=True)
                     crop_path = crop_dir / f"{stem}.png"
-                    if raw_img is None:
-                        raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
                     crop_roi(raw_img, roi_coords).save(crop_path)
                     result[crop_key] = str(crop_path)
 
-                logger.debug(f"  ★ {roi_name}/{cfg['name']}  zh={zh!r} id={id_!r} mol={mol!r}")
+                # 信心值低於門檻 → 另存圖供人工複核
+                if conf < CONF_LOW_THRESHOLD and not result["low_conf"]:
+                    low_dir = OUTPUT_DIR / "low_conf_crops"
+                    low_dir.mkdir(parents=True, exist_ok=True)
+                    low_path = low_dir / f"{stem}_{roi_name}_conf{int(conf)}.png"
+                    crop_roi(raw_img, roi_coords).save(low_path)
+                    result["low_conf"] = str(low_path)
+                    logger.info(f"  ⚠ 低信心 {conf} < {CONF_LOW_THRESHOLD}：{low_path.name}")
+
+                logger.debug(f"  ★ {roi_name}/{cfg['name']}  conf={conf}  zh={zh!r} id={id_!r} mol={mol!r}")
                 break
 
     return result if any_hit else None
@@ -310,7 +337,8 @@ def main():
     fieldnames = [
         "source_docx", "image_name",
         "zh", "id", "id_layer", "mol", "mol_layer",
-        "hit_config", "hit_roi",                # ★ 新增 hit_roi 欄位
+        "conf", "low_conf",
+        "hit_config", "hit_roi",
         "mol_crop", "permit_crop",
     ]
 
