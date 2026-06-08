@@ -111,11 +111,11 @@ RE_PERMIT_ID_LIST = [
     re.compile(r"\bi[zj]in\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
 ]
 
-# permit_lower：冒號可省略（如「No ijin 2716」）
+# permit_lower：第一層冒號可省略（如「No ijin 2716」），第二、三層維持冒號必填
 RE_PERMIT_ID_LIST_LOWER = [
     re.compile(r"No\.?\s*i[zj]in\s*[:::﹕]?\s*(\d{4})", re.IGNORECASE),
-    re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]?\s*(\d{4})", re.IGNORECASE),
-    re.compile(r"\bi[zj]in\s*[:::﹕]?\s*(\d{4})", re.IGNORECASE),
+    re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
+    re.compile(r"\bi[zj]in\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
 ]
 
 RE_MOL_LIST = [
