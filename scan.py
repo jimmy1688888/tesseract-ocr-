@@ -104,10 +104,18 @@ FALLBACK_CONFIGS = [
 
 RE_PERMIT_ZH = re.compile(r"(?:許\s*可\s*(?:證\s*號|號\s*碼)|號)\s*[:::﹕]\s*(\d{4})", re.IGNORECASE)
 
+# permit_upper：冒號必須存在
 RE_PERMIT_ID_LIST = [
     re.compile(r"No\.?\s*i[zj]in\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
     re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
     re.compile(r"\bi[zj]in\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
+]
+
+# permit_lower：冒號可省略（如「No ijin 2716」）
+RE_PERMIT_ID_LIST_LOWER = [
+    re.compile(r"No\.?\s*i[zj]in\s*[:::﹕]?\s*(\d{4})", re.IGNORECASE),
+    re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]?\s*(\d{4})", re.IGNORECASE),
+    re.compile(r"\bi[zj]in\s*[:::﹕]?\s*(\d{4})", re.IGNORECASE),
 ]
 
 RE_MOL_LIST = [
@@ -118,10 +126,12 @@ RE_MOL_LIST = [
 ]
 
 
-def find_permits(text: str) -> tuple[str, str, int, str, int]:
+def find_permits(text: str, permit_id_list=None) -> tuple[str, str, int, str, int]:
+    if permit_id_list is None:
+        permit_id_list = RE_PERMIT_ID_LIST
     zh = RE_PERMIT_ZH.search(text)
     id_, id_layer = None, 0
-    for i, p in enumerate(RE_PERMIT_ID_LIST, 1):
+    for i, p in enumerate(permit_id_list, 1):
         id_ = p.search(text)
         if id_:
             id_layer = i
@@ -281,7 +291,13 @@ def scan_image(docx_name: str, img_name: str, image_bytes: bytes) -> dict | None
                 tess_cfg = build_tess_config(cfg)
                 text, conf = ocr_with_conf(img, lang, tess_cfg)
 
-                zh, id_, id_layer, mol, mol_layer = find_permits(text)
+                permit_id_list = RE_PERMIT_ID_LIST_LOWER if roi_name == "permit_lower" else None
+                zh, id_, id_layer, mol, mol_layer = find_permits(text, permit_id_list)
+
+                logger.debug(
+                    f"  ✗ {roi_name}/{cfg['name']}  conf={conf:.0f}"
+                    f"  text={text[:400]!r}"
+                )
 
                 if not (zh or id_ or mol):
                     continue
@@ -342,10 +358,19 @@ def main():
         "mol_crop", "permit_crop",
     ]
 
-    docx_files = sorted(INPUT_DIR.glob("*.docx"))
-    if not docx_files:
-        logger.error(f"找不到 .docx:{INPUT_DIR.resolve()}")
-        return
+    if opts.file:
+        target = Path(opts.file)
+        if not target.exists():
+            logger.error(f"找不到檔案:{target.resolve()}")
+            return
+        docx_files = [target]
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.debug(f"單檔 DEBUG 模式：{target.name}")
+    else:
+        docx_files = sorted(INPUT_DIR.glob("*.docx"))
+        if not docx_files:
+            logger.error(f"找不到 .docx:{INPUT_DIR.resolve()}")
+            return
 
     total = hits = 0
     t0 = time.time()
@@ -359,6 +384,12 @@ def main():
 
         for docx_path in docx_files:
             images = extract_images_from_docx(docx_path)
+            if opts.image:
+                all_names = [n for n, _ in images]
+                images = [(n, b) for n, b in images if n == opts.image]
+                if not images:
+                    logger.error(f"找不到圖檔 {opts.image!r}（docx 內含：{all_names}）")
+                    return
             for img_name, img_bytes in images:
                 total += 1
                 result = scan_image(docx_path.name, img_name, img_bytes)
@@ -389,6 +420,10 @@ def main():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING"])
+    parser.add_argument("--file", "-f", metavar="DOCX", default="",
+                        help="只掃描指定的單一 .docx（自動啟用 DEBUG 輸出）")
+    parser.add_argument("--image", "-i", metavar="IMAGE", default="",
+                        help="配合 --file，只處理 docx 內指定的圖檔名（如 image2.jpeg）")
     opts = parser.parse_args()
     logging.getLogger().setLevel(getattr(logging, opts.log_level))
     main()
