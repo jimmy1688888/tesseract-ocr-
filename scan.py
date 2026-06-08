@@ -22,8 +22,11 @@ import time
 import zipfile
 import logging
 import argparse
+from collections import Counter
 from io import BytesIO
 from pathlib import Path
+
+from prefilter import SMALL_DOCX_THRESHOLD, classify_by_count
 
 import numpy as np
 from PIL import Image, ImageFilter, ImageOps
@@ -119,10 +122,10 @@ RE_PERMIT_ID_LIST_LOWER = [
 ]
 
 RE_MOL_LIST = [
-    re.compile(r"Agency'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:::]\s*(\d{4})", re.IGNORECASE),
-    re.compile(r"A\w{3,6}'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:::]\s*(\d{4})", re.IGNORECASE),
-    re.compile(r"(?:Num\s*ber|umber|[Nn]amber)\s*[:::]\s*(\d{4})", re.IGNORECASE),
-    re.compile(r"M[O0]L\D{0,30}(\d{4})", re.IGNORECASE),
+    re.compile(r"Agency'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:::]\s*(\d{4})(?!\d)", re.IGNORECASE),
+    re.compile(r"A\w{3,6}'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:::]\s*(\d{4})(?!\d)", re.IGNORECASE),
+    re.compile(r"(?:Num\s*ber|umber|[Nn]amber)\s*[:::]\s*(\d{4})(?!\d)", re.IGNORECASE),
+    re.compile(r"M[O0]L\D{0,30}(\d{4})(?!\d)", re.IGNORECASE),
 ]
 
 
@@ -235,6 +238,30 @@ def roi_field(roi_name: str) -> str:
     """
     return roi_name.split("_")[0]
 
+PERMIT_VOTE_N = 3   # 交叉比對時使用的前 N 個 config
+
+
+def _collect_permit_votes(image_bytes: bytes, roi_coords: tuple,
+                          permit_id_list=None) -> list[str]:
+    """對 permit ROI 跑前 PERMIT_VOTE_N 個 config，回傳所有命中值（含重複）。"""
+    values = []
+    for cfg in SCAN_CONFIGS[:PERMIT_VOTE_N]:
+        img = preprocess(image_bytes, {**cfg, "roi": roi_coords})
+        text, _ = ocr_with_conf(img, cfg.get("lang", TESS_LANG), build_tess_config(cfg))
+        _, id_, _, _, _ = find_permits(text, permit_id_list)
+        if id_:
+            values.append(id_)
+    return values
+
+
+def _majority_vote(values: list[str], min_count: int = 2) -> str:
+    """若最高票值出現次數 ≥ min_count，回傳該值；否則回傳空字串。"""
+    if not values:
+        return ""
+    best, count = Counter(values).most_common(1)[0]
+    return best if count >= min_count else ""
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 掃描核心
 # ═══════════════════════════════════════════════════════════════════════════
@@ -343,6 +370,207 @@ def scan_image(docx_name: str, img_name: str, image_bytes: bytes) -> dict | None
 
     return result if any_hit else None
 
+def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes) -> dict:
+    """
+    小型 docx（≤ SMALL_DOCX_THRESHOLD 張）專用。
+    只掃 mol ROI；mol 無值時標記人工審查，仍回傳 dict（不回傳 None）。
+    """
+    stem = f"{Path(docx_name).stem}_{Path(img_name).stem}"
+    result = {
+        "source_docx":   docx_name,
+        "image_name":    img_name,
+        "docx_class":    "small",
+        "mol":           "",
+        "mol_layer":     "",
+        "id":            "",
+        "id_layer":      "",
+        "cross_match":   "",
+        "conf":          "",
+        "low_conf":      "",
+        "hit_config":    "",
+        "hit_roi":       "",
+        "mol_crop":      "",
+        "permit_crop":   "",
+        "manual_review": "",
+    }
+    raw_img: Image.Image | None = None
+    roi_coords = ROI_REGIONS["mol"]
+
+    mol_found = False
+    for config_list in (SCAN_CONFIGS, FALLBACK_CONFIGS):
+        if mol_found:
+            break
+        for cfg in config_list:
+            img = preprocess(image_bytes, {**cfg, "roi": roi_coords})
+            lang = cfg.get("lang", TESS_LANG)
+            tess_cfg = build_tess_config(cfg)
+            text, conf = ocr_with_conf(img, lang, tess_cfg)
+            logger.debug(f"  ✗ mol/{cfg['name']}  conf={conf:.0f}  text={text[:400]!r}")
+
+            _, _, _, mol, mol_layer = find_permits(text)
+            if not mol:
+                continue
+
+            result["mol"]        = mol
+            result["mol_layer"]  = mol_layer
+            result["hit_config"] = cfg["name"]
+            result["hit_roi"]    = "mol"
+            result["conf"]       = conf
+
+            if raw_img is None:
+                raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
+            crop_dir = OUTPUT_DIR / "mol_crops"
+            crop_dir.mkdir(parents=True, exist_ok=True)
+            crop_path = crop_dir / f"{stem}.png"
+            crop_roi(raw_img, roi_coords).save(crop_path)
+            result["mol_crop"] = str(crop_path)
+
+            if conf < CONF_LOW_THRESHOLD:
+                low_dir = OUTPUT_DIR / "low_conf_crops"
+                low_dir.mkdir(parents=True, exist_ok=True)
+                low_path = low_dir / f"{stem}_mol_conf{int(conf)}.png"
+                crop_roi(raw_img, roi_coords).save(low_path)
+                result["low_conf"] = str(low_path)
+                logger.info(f"  ⚠ 低信心 {conf} < {CONF_LOW_THRESHOLD}：{low_path.name}")
+
+            logger.debug(f"  ★ mol/{cfg['name']}  conf={conf}  mol={mol!r}")
+            mol_found = True
+            break
+
+    if not mol_found:
+        result["manual_review"] = "mol 無值，需人工判斷"
+        logger.info(f"  ⚠ {img_name}: mol 無值，標記人工審查")
+
+    return result
+
+
+def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes) -> dict | None:
+    """
+    大型 docx（> SMALL_DOCX_THRESHOLD 張）專用。
+    掃 mol + permit（upper/lower）並交叉比對：
+      1. mol == permit vote → 輸出該值，cross_match=✓
+      2. mol 有值，permit vote 無值 → 輸出 mol
+      3. mol 無值，permit vote 有多數票（≥2） → 輸出 permit vote
+      4. 兩者皆無 → 回傳 None（未命中）
+    """
+    stem = f"{Path(docx_name).stem}_{Path(img_name).stem}"
+    result = {
+        "source_docx":   docx_name,
+        "image_name":    img_name,
+        "docx_class":    "large",
+        "mol":           "",
+        "mol_layer":     "",
+        "id":            "",
+        "id_layer":      "",
+        "cross_match":   "",
+        "conf":          "",
+        "low_conf":      "",
+        "hit_config":    "",
+        "hit_roi":       "",
+        "mol_crop":      "",
+        "permit_crop":   "",
+        "manual_review": "",
+    }
+    raw_img: Image.Image | None = None
+
+    # ── 步驟 1：掃 mol（邏輯與 scan_image 相同）─────────────────────────
+    fields_found: set[str] = set()
+    any_hit = False
+
+    for roi_name, roi_coords in ROI_REGIONS.items():
+        field = roi_field(roi_name)
+        if field in fields_found:
+            continue
+
+        roi_hit = False
+        for config_list in (SCAN_CONFIGS, FALLBACK_CONFIGS):
+            if roi_hit:
+                break
+            for cfg in config_list:
+                img = preprocess(image_bytes, {**cfg, "roi": roi_coords})
+                lang = cfg.get("lang", TESS_LANG)
+                tess_cfg = build_tess_config(cfg)
+                text, conf = ocr_with_conf(img, lang, tess_cfg)
+                logger.debug(
+                    f"  ✗ {roi_name}/{cfg['name']}  conf={conf:.0f}"
+                    f"  text={text[:400]!r}"
+                )
+                permit_id_list = RE_PERMIT_ID_LIST_LOWER if roi_name == "permit_lower" else None
+                zh, id_, id_layer, mol, mol_layer = find_permits(text, permit_id_list)
+
+                if not (zh or id_ or mol):
+                    continue
+
+                if id_:
+                    result["id"]       = id_
+                    result["id_layer"] = id_layer
+                if mol:
+                    result["mol"]       = mol
+                    result["mol_layer"] = mol_layer
+                if not result["hit_config"]:
+                    result["hit_config"] = cfg["name"]
+                    result["hit_roi"]    = roi_name
+                    result["conf"]       = conf
+
+                any_hit = True
+                roi_hit = True
+                fields_found.add(field)
+
+                if raw_img is None:
+                    raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
+
+                crop_key = f"{field}_crop"
+                if not result.get(crop_key, ""):
+                    crop_dir = OUTPUT_DIR / f"{field}_crops"
+                    crop_dir.mkdir(parents=True, exist_ok=True)
+                    crop_path = crop_dir / f"{stem}.png"
+                    crop_roi(raw_img, roi_coords).save(crop_path)
+                    result[crop_key] = str(crop_path)
+
+                if conf < CONF_LOW_THRESHOLD and not result["low_conf"]:
+                    low_dir = OUTPUT_DIR / "low_conf_crops"
+                    low_dir.mkdir(parents=True, exist_ok=True)
+                    low_path = low_dir / f"{stem}_{roi_name}_conf{int(conf)}.png"
+                    crop_roi(raw_img, roi_coords).save(low_path)
+                    result["low_conf"] = str(low_path)
+                    logger.info(f"  ⚠ 低信心 {conf} < {CONF_LOW_THRESHOLD}：{low_path.name}")
+
+                logger.debug(f"  ★ {roi_name}/{cfg['name']}  conf={conf}  zh={zh!r} id={id_!r} mol={mol!r}")
+                break
+
+    if not any_hit:
+        return None
+
+    # ── 步驟 2：permit 交叉比對（mol 無值，或需要驗證時）────────────────
+    mol_val  = result["mol"]
+    permit_val = result["id"]   # 第一輪已命中的 permit ID
+
+    if not mol_val or not permit_val:
+        # 收集 permit_upper 與 permit_lower 的多數票
+        upper_votes = _collect_permit_votes(
+            image_bytes, ROI_REGIONS["permit_upper"])
+        lower_votes = _collect_permit_votes(
+            image_bytes, ROI_REGIONS["permit_lower"],
+            permit_id_list=RE_PERMIT_ID_LIST_LOWER)
+        permit_vote = _majority_vote(upper_votes + lower_votes, min_count=2)
+    else:
+        permit_vote = permit_val
+
+    # ── 步驟 3：比對結果────────────────────────────────────────────────
+    if mol_val and permit_vote and mol_val == permit_vote:
+        result["cross_match"] = "✓"
+        logger.info(f"  ✓ 交叉比對吻合：{mol_val}")
+    elif mol_val and not permit_vote:
+        pass  # 只有 mol，直接使用
+    elif not mol_val and permit_vote:
+        result["id"]       = permit_vote
+        result["id_layer"] = 0
+        logger.info(f"  → mol 無值，permit 多數票：{permit_vote}")
+    # mol 有值但與 permit_vote 不同時，保留 mol，不覆蓋（可視需求調整）
+
+    return result
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 主流程
 # ═══════════════════════════════════════════════════════════════════════════
@@ -351,8 +579,9 @@ def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     csv_path = OUTPUT_DIR / "matches.csv"
     fieldnames = [
-        "source_docx", "image_name",
-        "zh", "id", "id_layer", "mol", "mol_layer",
+        "source_docx", "image_name", "docx_class",
+        "mol", "mol_layer", "id", "id_layer",
+        "cross_match", "manual_review",
         "conf", "low_conf",
         "hit_config", "hit_roi",
         "mol_crop", "permit_crop",
@@ -390,19 +619,31 @@ def main():
                 if not images:
                     logger.error(f"找不到圖檔 {opts.image!r}（docx 內含：{all_names}）")
                     return
+
+            docx_class = classify_by_count(len(images))
+            logger.debug(f"  {docx_path.name}: {len(images)} 張圖 → {docx_class}")
+
             for img_name, img_bytes in images:
                 total += 1
-                result = scan_image(docx_path.name, img_name, img_bytes)
+                if docx_class == "small":
+                    result = scan_image_mol_only(docx_path.name, img_name, img_bytes)
+                else:
+                    result = scan_image_large(docx_path.name, img_name, img_bytes)
+
                 if result:
                     hits += 1
-                    if result["hit_roi"] == "permit_upper":
+                    hit_roi = result.get("hit_roi", "")
+                    if hit_roi == "permit_upper":
                         upper_hits += 1
-                    elif result["hit_roi"] == "permit_lower":
+                    elif hit_roi == "permit_lower":
                         lower_hits += 1
-                    writer.writerow(result)
+                    writer.writerow({k: result.get(k, "") for k in fieldnames})
                     logger.info(
-                        f"★ {docx_path.name} / {img_name}  [{result['hit_roi']}]"
-                        f"  zh={result['zh']!r} id={result['id']!r} mol={result['mol']!r}"
+                        f"★ {docx_path.name} / {img_name}"
+                        f"  [{docx_class}|{hit_roi}]"
+                        f"  mol={result.get('mol')!r} id={result.get('id')!r}"
+                        f"  cross={result.get('cross_match')!r}"
+                        f"  review={result.get('manual_review')!r}"
                     )
                 else:
                     logger.debug(f"  {docx_path.name} / {img_name}  未命中")
