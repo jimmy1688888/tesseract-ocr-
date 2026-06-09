@@ -696,8 +696,8 @@ def decide_result(result: dict) -> dict:
 def aggregate_small_docx(results: list[dict]) -> list[dict]:
     """
     規則2：small docx 檔案層級聚合
-    若有任一圖有值 → 取信心最高者作為全檔代表值，並標記所有命中圖送 Vision 驗證。
-    若全部無值 → 所有圖標記 Vision（人工審查）。
+    若有任一圖有值 → 只回傳有值的圖，標記 vision_review=Y 送 Vision 驗證。
+    若全部無值   → 回傳全部圖，標記 Vision（人工審查）。
     """
     hits = [r for r in results if r.get("mol") or r.get("id")]
     if not hits:
@@ -706,7 +706,6 @@ def aggregate_small_docx(results: list[dict]) -> list[dict]:
             r["note"] = "small:無命中"
         return results
 
-    # 取信心最高的命中作為代表
     def best_conf(r: dict) -> float:
         try:
             return max(float(r.get("mol_conf") or 0), float(r.get("id_conf") or 0))
@@ -717,14 +716,12 @@ def aggregate_small_docx(results: list[dict]) -> list[dict]:
     w_value = winner.get("mol") or winner.get("id")
     w_conf  = best_conf(winner)
 
-    for r in results:
+    for r in hits:
         r["final_value"] = w_value
         r["final_conf"]  = round(w_conf, 1) if w_conf else ""
-        if r.get("mol") or r.get("id"):
-            r["vision_review"] = "Y"  # 有值 → 送 Vision 驗證
-        else:
-            r["note"] = "small:此圖無命中，參照其他圖"
-    return results
+        r["vision_review"] = "Y"
+
+    return hits  # 無值的圖不輸出至 CSV
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -811,10 +808,10 @@ def main():
                     else:
                         logger.debug(f"  {docx_path.name} / {img_name}  未命中")
 
-            # small docx 規則2：聚合後寫出
+            # small docx 規則2：聚合後只寫有值的圖
             if docx_class == "small" and small_bucket:
-                aggregate_small_docx(small_bucket)
-                for result in small_bucket:
+                to_write = aggregate_small_docx(small_bucket)
+                for result in to_write:
                     hit_roi = result.get("hit_roi", "")
                     if result.get("mol") or result.get("id"):
                         hits += 1
