@@ -105,20 +105,26 @@ FALLBACK_CONFIGS = [
 # 正則
 # ═══════════════════════════════════════════════════════════════════════════
 
-RE_PERMIT_ZH = re.compile(r"(?:許\s*可\s*(?:證\s*號|號\s*碼)|號)\s*[:::﹕]\s*(\d{4})", re.IGNORECASE)
+# 許可證號：第 1213 號  →  (?:第\s*)? 吸收「第」字
+RE_PERMIT_ZH = re.compile(
+    r"(?:許\s*可\s*(?:證\s*號|號\s*碼)|號)\s*[:::﹕]\s*(?:第\s*)?(\d{4})(?!\d)",
+    re.IGNORECASE,
+)
 
-# permit_upper：冒號必須存在
+# permit_upper：冒號必須存在；NO\.XXXX 格式作第四層保底
 RE_PERMIT_ID_LIST = [
-    re.compile(r"No\.?\s*i[zjl1]in\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
-    re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
-    re.compile(r"\bi[zjl1]in\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
+    re.compile(r"No\.?\s*i[zjl1]in\s*[:::﹕]\s*(?:NO\.)?(\d{4})(?!\d)", re.IGNORECASE),
+    re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]\s*(?:NO\.)?(\d{4})(?!\d)",       re.IGNORECASE),
+    re.compile(r"\bi[zjl1]in\s*[:::﹕]\s*(?:NO\.)?(\d{4})(?!\d)",         re.IGNORECASE),
+    re.compile(r"\bNO\.(\d{4})(?!\d)",                                    re.IGNORECASE),
 ]
 
-# permit_lower：第一層冒號可省略（如「No ijin 2716」、「No ilin 2716」），第二、三層維持冒號必填
+# permit_lower：第一層冒號可省略，第二三層必填；同樣加入 NO\. 第四層
 RE_PERMIT_ID_LIST_LOWER = [
-    re.compile(r"No\.?\s*i[zjl1]in\s*[:::﹕]?\s*(\d{4})", re.IGNORECASE),
-    re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
-    re.compile(r"\bi[zjl1]in\s*[:::﹕]\s*(\d{4})", re.IGNORECASE),
+    re.compile(r"No\.?\s*i[zjl1]in\s*[:::﹕]?\s*(?:NO\.)?(\d{4})(?!\d)", re.IGNORECASE),
+    re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]\s*(?:NO\.)?(\d{4})(?!\d)",        re.IGNORECASE),
+    re.compile(r"\bi[zjl1]in\s*[:::﹕]\s*(?:NO\.)?(\d{4})(?!\d)",          re.IGNORECASE),
+    re.compile(r"\bNO\.(\d{4})(?!\d)",                                     re.IGNORECASE),
 ]
 
 RE_MOL_LIST = [
@@ -215,7 +221,8 @@ def build_tess_config(cfg: dict) -> str:
     return " ".join(parts)
 
 
-CONF_LOW_THRESHOLD = 60   # 低於此值另存圖供人工複核
+CONF_KEY_IN   = 55   # 高於此值直接 key in；低於則標記送 Google Vision
+CONF_VOTE_MIN = 45   # permit 多數票平均信心低於此值才送 Vision
 
 
 def ocr_with_conf(img, lang: str, tess_cfg: str) -> tuple[str, float]:
@@ -242,16 +249,16 @@ PERMIT_VOTE_N = 3   # 交叉比對時使用的前 N 個 config
 
 
 def _collect_permit_votes(image_bytes: bytes, roi_coords: tuple,
-                          permit_id_list=None) -> list[str]:
-    """對 permit ROI 跑前 PERMIT_VOTE_N 個 config，回傳所有命中值（含重複）。"""
-    values = []
+                          permit_id_list=None) -> list[tuple[str, float]]:
+    """對 permit ROI 跑前 PERMIT_VOTE_N 個 config，回傳所有 (命中值, 信心) pair（含重複）。"""
+    entries: list[tuple[str, float]] = []
     for cfg in SCAN_CONFIGS[:PERMIT_VOTE_N]:
         img = preprocess(image_bytes, {**cfg, "roi": roi_coords})
-        text, _ = ocr_with_conf(img, cfg.get("lang", TESS_LANG), build_tess_config(cfg))
+        text, conf = ocr_with_conf(img, cfg.get("lang", TESS_LANG), build_tess_config(cfg))
         _, id_, _, _, _ = find_permits(text, permit_id_list)
         if id_:
-            values.append(id_)
-    return values
+            entries.append((id_, conf))
+    return entries
 
 
 def _majority_vote(values: list[str], min_count: int = 2) -> str:
@@ -357,13 +364,13 @@ def scan_image(docx_name: str, img_name: str, image_bytes: bytes) -> dict | None
                     result[crop_key] = str(crop_path)
 
                 # 信心值低於門檻 → 另存圖供人工複核
-                if conf < CONF_LOW_THRESHOLD and not result["low_conf"]:
+                if conf < CONF_KEY_IN and not result["low_conf"]:
                     low_dir = OUTPUT_DIR / "low_conf_crops"
                     low_dir.mkdir(parents=True, exist_ok=True)
                     low_path = low_dir / f"{stem}_{roi_name}_conf{int(conf)}.png"
                     crop_roi(raw_img, roi_coords).save(low_path)
                     result["low_conf"] = str(low_path)
-                    logger.info(f"  ⚠ 低信心 {conf} < {CONF_LOW_THRESHOLD}：{low_path.name}")
+                    logger.info(f"  ⚠ 低信心 {conf} < {CONF_KEY_IN}：{low_path.name}")
 
                 logger.debug(f"  ★ {roi_name}/{cfg['name']}  conf={conf}  zh={zh!r} id={id_!r} mol={mol!r}")
                 break
@@ -382,10 +389,15 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes) -> di
         "docx_class":    "small",
         "mol":           "",
         "mol_layer":     "",
+        "mol_conf":      "",
         "id":            "",
         "id_layer":      "",
+        "id_conf":       "",
         "cross_match":   "",
-        "conf":          "",
+        "final_value":   "",
+        "final_conf":    "",
+        "vision_review": "",
+        "note":          "",
         "low_conf":      "",
         "hit_config":    "",
         "hit_roi":       "",
@@ -413,9 +425,9 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes) -> di
 
             result["mol"]        = mol
             result["mol_layer"]  = mol_layer
+            result["mol_conf"]   = conf
             result["hit_config"] = cfg["name"]
             result["hit_roi"]    = "mol"
-            result["conf"]       = conf
 
             if raw_img is None:
                 raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
@@ -425,13 +437,13 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes) -> di
             crop_roi(raw_img, roi_coords).save(crop_path)
             result["mol_crop"] = str(crop_path)
 
-            if conf < CONF_LOW_THRESHOLD:
+            if conf < CONF_KEY_IN:
                 low_dir = OUTPUT_DIR / "low_conf_crops"
                 low_dir.mkdir(parents=True, exist_ok=True)
                 low_path = low_dir / f"{stem}_mol_conf{int(conf)}.png"
                 crop_roi(raw_img, roi_coords).save(low_path)
                 result["low_conf"] = str(low_path)
-                logger.info(f"  ⚠ 低信心 {conf} < {CONF_LOW_THRESHOLD}：{low_path.name}")
+                logger.info(f"  ⚠ 低信心 {conf} < {CONF_KEY_IN}：{low_path.name}")
 
             logger.debug(f"  ★ mol/{cfg['name']}  conf={conf}  mol={mol!r}")
             mol_found = True
@@ -460,10 +472,15 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes) -> dict 
         "docx_class":    "large",
         "mol":           "",
         "mol_layer":     "",
+        "mol_conf":      "",
         "id":            "",
         "id_layer":      "",
+        "id_conf":       "",
         "cross_match":   "",
-        "conf":          "",
+        "final_value":   "",
+        "final_conf":    "",
+        "vision_review": "",
+        "note":          "",
         "low_conf":      "",
         "hit_config":    "",
         "hit_roi":       "",
@@ -504,13 +521,16 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes) -> dict 
                 if id_:
                     result["id"]       = id_
                     result["id_layer"] = id_layer
+                    if not result["id_conf"]:
+                        result["id_conf"] = conf
                 if mol:
                     result["mol"]       = mol
                     result["mol_layer"] = mol_layer
+                    if not result["mol_conf"]:
+                        result["mol_conf"] = conf
                 if not result["hit_config"]:
                     result["hit_config"] = cfg["name"]
                     result["hit_roi"]    = roi_name
-                    result["conf"]       = conf
 
                 any_hit = True
                 roi_hit = True
@@ -527,13 +547,13 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes) -> dict 
                     crop_roi(raw_img, roi_coords).save(crop_path)
                     result[crop_key] = str(crop_path)
 
-                if conf < CONF_LOW_THRESHOLD and not result["low_conf"]:
+                if conf < CONF_KEY_IN and not result["low_conf"]:
                     low_dir = OUTPUT_DIR / "low_conf_crops"
                     low_dir.mkdir(parents=True, exist_ok=True)
                     low_path = low_dir / f"{stem}_{roi_name}_conf{int(conf)}.png"
                     crop_roi(raw_img, roi_coords).save(low_path)
                     result["low_conf"] = str(low_path)
-                    logger.info(f"  ⚠ 低信心 {conf} < {CONF_LOW_THRESHOLD}：{low_path.name}")
+                    logger.info(f"  ⚠ 低信心 {conf} < {CONF_KEY_IN}：{low_path.name}")
 
                 logger.debug(f"  ★ {roi_name}/{cfg['name']}  conf={conf}  zh={zh!r} id={id_!r} mol={mol!r}")
                 break
@@ -545,14 +565,20 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes) -> dict 
     mol_val  = result["mol"]
     permit_val = result["id"]   # 第一輪已命中的 permit ID
 
+    permit_vote_avg_conf = 0.0
     if not mol_val or not permit_val:
-        # 收集 permit_upper 與 permit_lower 的多數票
-        upper_votes = _collect_permit_votes(
+        # 收集 permit_upper 與 permit_lower 的多數票（含信心值）
+        upper_entries = _collect_permit_votes(
             image_bytes, ROI_REGIONS["permit_upper"])
-        lower_votes = _collect_permit_votes(
+        lower_entries = _collect_permit_votes(
             image_bytes, ROI_REGIONS["permit_lower"],
             permit_id_list=RE_PERMIT_ID_LIST_LOWER)
-        permit_vote = _majority_vote(upper_votes + lower_votes, min_count=2)
+        all_entries = upper_entries + lower_entries
+        all_values  = [v for v, _ in all_entries]
+        permit_vote = _majority_vote(all_values, min_count=2)
+        if permit_vote:
+            winning_confs = [c for v, c in all_entries if v == permit_vote]
+            permit_vote_avg_conf = round(sum(winning_confs) / len(winning_confs), 1)
     else:
         permit_vote = permit_val
 
@@ -563,12 +589,126 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes) -> dict 
     elif mol_val and not permit_vote:
         pass  # 只有 mol，直接使用
     elif not mol_val and permit_vote:
-        result["id"]       = permit_vote
-        result["id_layer"] = 0
-        logger.info(f"  → mol 無值，permit 多數票：{permit_vote}")
+        result["id"]          = permit_vote
+        result["id_layer"]    = 0
+        result["id_conf"]     = permit_vote_avg_conf
+        result["_id_from_vote"] = True   # 內部旗標，不輸出至 CSV
+        logger.info(f"  → mol 無值，permit 多數票：{permit_vote}  avg_conf={permit_vote_avg_conf}")
     # mol 有值但與 permit_vote 不同時，保留 mol，不覆蓋（可視需求調整）
 
     return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 決策層
+# ═══════════════════════════════════════════════════════════════════════════
+
+def decide_result(result: dict) -> dict:
+    """
+    規則1: mol + id 皆有值 → 取信心高者；>CONF_KEY_IN 直接 key in，≤ 則標記 Vision
+           衝突條件：mol_conf > id_conf 且 mol值 ≠ permit值 → 一律標記 Vision
+    規則3: large docx，只有 mol，conf ≤ CONF_KEY_IN → 標記 Vision
+    規則4: 多數決吻合（cross_match=✓）但信心 ≤ CONF_KEY_IN → 標記 Vision
+    多數票: id 來自 _collect_permit_votes 時，信心門檻改用 CONF_VOTE_MIN(45)
+    """
+    mol        = result.get("mol", "")
+    id_        = result.get("id", "")
+    mol_conf   = result.get("mol_conf", "")
+    id_conf    = result.get("id_conf", "")
+    cross      = result.get("cross_match", "")
+    docx_class = result.get("docx_class", "")
+    id_from_vote = result.get("_id_from_vote", False)
+
+    def to_f(v) -> float:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    mol_conf_f = to_f(mol_conf)
+    id_conf_f  = to_f(id_conf)
+
+    final_value   = ""
+    final_conf    = 0.0
+    vision_review = ""
+    note          = result.get("note", "")
+
+    if mol and id_:
+        # 規則1: 兩者皆有值，取信心高者
+        if mol_conf_f >= id_conf_f:
+            final_value = mol
+            final_conf  = mol_conf_f
+            note = "mol勝(信心高)" if mol_conf_f != id_conf_f else "mol==permit"
+        else:
+            final_value = id_
+            final_conf  = id_conf_f
+            note = "permit勝(信心高)"
+        if final_conf <= CONF_KEY_IN:
+            vision_review = "Y"
+        # 問題2：mol信心高於permit，但值不同 → 衝突，送Vision
+        if mol_conf_f > id_conf_f and mol != id_:
+            vision_review = "Y"
+            note = "mol≠permit，mol信心高，值衝突"
+    elif mol and not id_:
+        final_value = mol
+        final_conf  = mol_conf_f
+        # 規則3: large docx 只有 mol，信心低 → Vision
+        if docx_class == "large" and mol_conf_f <= CONF_KEY_IN:
+            vision_review = "Y"
+            note = "僅mol，信心低"
+    elif id_ and not mol:
+        final_value = id_
+        final_conf  = id_conf_f
+        # 多數票使用較寬鬆門檻 CONF_VOTE_MIN；直接掃描使用 CONF_KEY_IN
+        threshold = CONF_VOTE_MIN if id_from_vote else CONF_KEY_IN
+        if id_conf_f <= threshold:
+            vision_review = "Y"
+            note = "permit多數票，信心低" if id_from_vote else "僅permit，信心低"
+
+    # 規則4: 多數決吻合但信心低 → Vision
+    if cross == "✓" and final_conf <= CONF_KEY_IN:
+        vision_review = "Y"
+        note = (note + " 多數決信心低").strip() if note else "多數決信心低"
+
+    result["final_value"]   = final_value
+    result["final_conf"]    = round(final_conf, 1) if final_conf else ""
+    result["vision_review"] = vision_review
+    result["note"]          = note
+    return result
+
+
+def aggregate_small_docx(results: list[dict]) -> list[dict]:
+    """
+    規則2：small docx 檔案層級聚合
+    若有任一圖有值 → 取信心最高者作為全檔代表值，並標記所有命中圖送 Vision 驗證。
+    若全部無值 → 所有圖標記 Vision（人工審查）。
+    """
+    hits = [r for r in results if r.get("mol") or r.get("id")]
+    if not hits:
+        for r in results:
+            r["vision_review"] = "Y"
+            r["note"] = "small:無命中"
+        return results
+
+    # 取信心最高的命中作為代表
+    def best_conf(r: dict) -> float:
+        try:
+            return max(float(r.get("mol_conf") or 0), float(r.get("id_conf") or 0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    winner = max(hits, key=best_conf)
+    w_value = winner.get("mol") or winner.get("id")
+    w_conf  = best_conf(winner)
+
+    for r in results:
+        r["final_value"] = w_value
+        r["final_conf"]  = round(w_conf, 1) if w_conf else ""
+        if r.get("mol") or r.get("id"):
+            r["vision_review"] = "Y"  # 有值 → 送 Vision 驗證
+        else:
+            r["note"] = "small:此圖無命中，參照其他圖"
+    return results
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -580,9 +720,12 @@ def main():
     csv_path = OUTPUT_DIR / "matches.csv"
     fieldnames = [
         "source_docx", "image_name", "docx_class",
-        "mol", "mol_layer", "id", "id_layer",
-        "cross_match", "manual_review",
-        "conf", "low_conf",
+        "mol", "mol_layer", "mol_conf",
+        "id", "id_layer", "id_conf",
+        "cross_match",
+        "final_value", "final_conf", "vision_review",
+        "note", "manual_review",
+        "low_conf",
         "hit_config", "hit_roi",
         "mol_crop", "permit_crop",
     ]
@@ -623,30 +766,50 @@ def main():
             docx_class = classify_by_count(len(images))
             logger.debug(f"  {docx_path.name}: {len(images)} 張圖 → {docx_class}")
 
+            small_bucket: list[dict] = []
+
             for img_name, img_bytes in images:
                 total += 1
                 if docx_class == "small":
                     result = scan_image_mol_only(docx_path.name, img_name, img_bytes)
+                    # small docx 先收集，最後統一聚合
+                    small_bucket.append(result)
                 else:
                     result = scan_image_large(docx_path.name, img_name, img_bytes)
+                    if result:
+                        decide_result(result)
+                        hits += 1
+                        hit_roi = result.get("hit_roi", "")
+                        if hit_roi == "permit_upper":
+                            upper_hits += 1
+                        elif hit_roi == "permit_lower":
+                            lower_hits += 1
+                        writer.writerow({k: result.get(k, "") for k in fieldnames})
+                        logger.info(
+                            f"★ {docx_path.name} / {img_name}"
+                            f"  [{docx_class}|{hit_roi}]"
+                            f"  mol={result.get('mol')!r} id={result.get('id')!r}"
+                            f"  final={result.get('final_value')!r}"
+                            f"  vision={result.get('vision_review')!r}"
+                        )
+                    else:
+                        logger.debug(f"  {docx_path.name} / {img_name}  未命中")
 
-                if result:
-                    hits += 1
+            # small docx 規則2：聚合後寫出
+            if docx_class == "small" and small_bucket:
+                aggregate_small_docx(small_bucket)
+                for result in small_bucket:
                     hit_roi = result.get("hit_roi", "")
-                    if hit_roi == "permit_upper":
-                        upper_hits += 1
-                    elif hit_roi == "permit_lower":
-                        lower_hits += 1
+                    if result.get("mol") or result.get("id"):
+                        hits += 1
                     writer.writerow({k: result.get(k, "") for k in fieldnames})
                     logger.info(
-                        f"★ {docx_path.name} / {img_name}"
-                        f"  [{docx_class}|{hit_roi}]"
-                        f"  mol={result.get('mol')!r} id={result.get('id')!r}"
-                        f"  cross={result.get('cross_match')!r}"
-                        f"  review={result.get('manual_review')!r}"
+                        f"★ {docx_path.name} / {result.get('image_name')}"
+                        f"  [small|{hit_roi}]"
+                        f"  mol={result.get('mol')!r}"
+                        f"  final={result.get('final_value')!r}"
+                        f"  vision={result.get('vision_review')!r}"
                     )
-                else:
-                    logger.debug(f"  {docx_path.name} / {img_name}  未命中")
 
     elapsed = round(time.time() - t0, 1)
     logger.info("")
