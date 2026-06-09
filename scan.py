@@ -129,21 +129,24 @@ RE_MOL_LIST = [
 ]
 
 
-def find_permits(text: str, permit_id_list=None) -> tuple[str, int, str, int]:
+def find_permits(text: str, permit_id_list=None,
+                 find_mol: bool = True, find_id: bool = True) -> tuple[str, int, str, int]:
     if permit_id_list is None:
         permit_id_list = RE_PERMIT_ID_LIST
     id_, id_layer = None, 0
-    for i, p in enumerate(permit_id_list, 1):
-        id_ = p.search(text)
-        if id_:
-            id_layer = i
-            break
+    if find_id:
+        for i, p in enumerate(permit_id_list, 1):
+            id_ = p.search(text)
+            if id_:
+                id_layer = i
+                break
     mol, mol_layer = None, 0
-    for i, p in enumerate(RE_MOL_LIST, 1):
-        mol = p.search(text)
-        if mol:
-            mol_layer = i
-            break
+    if find_mol:
+        for i, p in enumerate(RE_MOL_LIST, 1):
+            mol = p.search(text)
+            if mol:
+                mol_layer = i
+                break
     return (
         id_.group(1).strip() if id_ else "",
         id_layer,
@@ -400,8 +403,14 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes) -> dict 
                     f"  ✗ {roi_name}/{cfg['name']}  conf={conf:.0f}"
                     f"  text={text[:400]!r}"
                 )
+                is_permit_roi = roi_name.startswith("permit")
                 permit_id_list = RE_PERMIT_ID_LIST_LOWER if roi_name == "permit_lower" else None
-                id_, id_layer, mol, mol_layer = find_permits(text, permit_id_list)
+                # permit ROI 不跑 mol regex；mol ROI 不跑 permit regex，避免跨區誤觸發
+                id_, id_layer, mol, mol_layer = find_permits(
+                    text, permit_id_list,
+                    find_mol=not is_permit_roi,
+                    find_id=is_permit_roi,
+                )
 
                 if not (id_ or mol):
                     continue
