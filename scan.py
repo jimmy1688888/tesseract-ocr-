@@ -579,6 +579,17 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes) -> dict 
         if permit_vote:
             winning_confs = [c for v, c in all_entries if v == permit_vote]
             permit_vote_avg_conf = round(sum(winning_confs) / len(winning_confs), 1)
+        elif all_entries:
+            # 有符合正則但不足多數 → 取最高信心的 entry 作為候選，標記送 Vision
+            best = max(all_entries, key=lambda x: x[1])
+            result["id"]      = best[0]
+            result["id_conf"] = best[1]
+            result["_permit_partial_hit"] = True
+            logger.info(
+                f"  ⚠ permit 有部分命中({len(all_entries)}筆)但無多數"
+                f"  → 候選值={best[0]!r} conf={best[1]:.0f}，標記送 Vision"
+                f"  all={[v for v,_ in all_entries]}"
+            )
     else:
         permit_vote = permit_val
 
@@ -669,6 +680,11 @@ def decide_result(result: dict) -> dict:
     if cross == "✓" and final_conf <= CONF_KEY_IN:
         vision_review = "Y"
         note = (note + " 多數決信心低").strip() if note else "多數決信心低"
+
+    # permit 有部分命中但無多數 → 一律送 Vision
+    if result.get("_permit_partial_hit"):
+        vision_review = "Y"
+        note = (note + " permit部分命中無多數").strip() if note else "permit部分命中無多數"
 
     result["final_value"]   = final_value
     result["final_conf"]    = round(final_conf, 1) if final_conf else ""
