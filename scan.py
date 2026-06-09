@@ -105,12 +105,6 @@ FALLBACK_CONFIGS = [
 # 正則
 # ═══════════════════════════════════════════════════════════════════════════
 
-# 許可證號：第 1213 號  →  (?:第\s*)? 吸收「第」字
-RE_PERMIT_ZH = re.compile(
-    r"(?:許\s*可\s*(?:證\s*號|號\s*碼)|號)\s*[:::﹕]\s*(?:第\s*)?(\d{4})(?!\d)",
-    re.IGNORECASE,
-)
-
 # permit_upper：冒號必須存在；NO\.XXXX 格式作第四層保底
 RE_PERMIT_ID_LIST = [
     re.compile(r"No\.?\s*i[zjl1]in\s*[:::﹕]\s*(?:NO\.)?(\d{4})(?!\d)", re.IGNORECASE),
@@ -135,10 +129,9 @@ RE_MOL_LIST = [
 ]
 
 
-def find_permits(text: str, permit_id_list=None) -> tuple[str, str, int, str, int]:
+def find_permits(text: str, permit_id_list=None) -> tuple[str, int, str, int]:
     if permit_id_list is None:
         permit_id_list = RE_PERMIT_ID_LIST
-    zh = RE_PERMIT_ZH.search(text)
     id_, id_layer = None, 0
     for i, p in enumerate(permit_id_list, 1):
         id_ = p.search(text)
@@ -152,7 +145,6 @@ def find_permits(text: str, permit_id_list=None) -> tuple[str, str, int, str, in
             mol_layer = i
             break
     return (
-        zh.group(1).strip() if zh else "",
         id_.group(1).strip() if id_ else "",
         id_layer,
         mol.group(1).strip() if mol else "",
@@ -255,7 +247,7 @@ def _collect_permit_votes(image_bytes: bytes, roi_coords: tuple,
     for cfg in SCAN_CONFIGS[:PERMIT_VOTE_N]:
         img = preprocess(image_bytes, {**cfg, "roi": roi_coords})
         text, conf = ocr_with_conf(img, cfg.get("lang", TESS_LANG), build_tess_config(cfg))
-        _, id_, _, _, _ = find_permits(text, permit_id_list)
+        _, id_, _, _ = find_permits(text, permit_id_list)
         if id_:
             entries.append((id_, conf))
     return entries
@@ -272,110 +264,6 @@ def _majority_vote(values: list[str], min_count: int = 2) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 # 掃描核心
 # ═══════════════════════════════════════════════════════════════════════════
-
-def scan_image(docx_name: str, img_name: str, image_bytes: bytes) -> dict | None:
-    """
-    對單張圖片掃描所有 ROI。
-
-    新增邏輯:
-      使用 roi_field() 將同前綴的 ROI 視為同一欄位。
-      欄位一旦找到就跳過該欄位剩餘 ROI,避免重複工作。
-      例:permit_upper 命中 → 直接跳過 permit_lower。
-
-    ROI 圖檔儲存原始裁切圖(未經前處理),供 Google Vision 使用。
-    """
-    stem = f"{Path(docx_name).stem}_{Path(img_name).stem}"
-    result = {
-        "source_docx":  docx_name,
-        "image_name":   img_name,
-        "zh":           "",
-        "id":           "",
-        "id_layer":     "",
-        "mol":          "",
-        "mol_layer":    "",
-        "hit_config":   "",
-        "hit_roi":      "",          # ★ 新增:記錄是哪個 ROI 命中(upper/lower)
-        "conf":         "",          # 命中當下的平均信心值
-        "low_conf":     "",          # 信心值 < 60 時的另存圖路徑
-        "mol_crop":     "",
-        "permit_crop":  "",
-    }
-    any_hit = False
-    fields_found: set[str] = set()    # ★ 已從某個 ROI 命中的欄位名
-
-    raw_img: Image.Image | None = None
-
-    for roi_name, roi_coords in ROI_REGIONS.items():
-        field = roi_field(roi_name)
-
-        # 該欄位已從前序 ROI 命中,直接跳過(這就是「找到就跳過」邏輯)
-        if field in fields_found:
-            logger.debug(f"  ⏭ 跳過 {roi_name}({field} 已從前序 ROI 命中)")
-            continue
-
-        roi_hit = False
-        for config_list in (SCAN_CONFIGS, FALLBACK_CONFIGS):
-            if roi_hit:
-                break
-            for cfg in config_list:
-                combined_cfg = {**cfg, "roi": roi_coords}
-                img = preprocess(image_bytes, combined_cfg)
-
-                lang = cfg.get("lang", TESS_LANG)
-                tess_cfg = build_tess_config(cfg)
-                text, conf = ocr_with_conf(img, lang, tess_cfg)
-
-                permit_id_list = RE_PERMIT_ID_LIST_LOWER if roi_name == "permit_lower" else None
-                zh, id_, id_layer, mol, mol_layer = find_permits(text, permit_id_list)
-
-                logger.debug(
-                    f"  ✗ {roi_name}/{cfg['name']}  conf={conf:.0f}"
-                    f"  text={text[:400]!r}"
-                )
-
-                if not (zh or id_ or mol):
-                    continue
-
-                # 有命中 — 填入結果
-                if zh:  result["zh"]  = zh
-                if id_:
-                    result["id"]       = id_
-                    result["id_layer"] = id_layer
-                if mol:
-                    result["mol"]       = mol
-                    result["mol_layer"] = mol_layer
-                if not result["hit_config"]:
-                    result["hit_config"] = cfg["name"]
-                    result["hit_roi"]    = roi_name
-                    result["conf"]       = conf
-                any_hit = True
-                roi_hit = True
-                fields_found.add(field)
-
-                if raw_img is None:
-                    raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
-
-                crop_key = f"{field}_crop"
-                if not result[crop_key]:
-                    crop_dir = OUTPUT_DIR / f"{field}_crops"
-                    crop_dir.mkdir(parents=True, exist_ok=True)
-                    crop_path = crop_dir / f"{stem}.png"
-                    crop_roi(raw_img, roi_coords).save(crop_path)
-                    result[crop_key] = str(crop_path)
-
-                # 信心值低於門檻 → 另存圖供人工複核
-                if conf < CONF_KEY_IN and not result["low_conf"]:
-                    low_dir = OUTPUT_DIR / "low_conf_crops"
-                    low_dir.mkdir(parents=True, exist_ok=True)
-                    low_path = low_dir / f"{stem}_{roi_name}_conf{int(conf)}.png"
-                    crop_roi(raw_img, roi_coords).save(low_path)
-                    result["low_conf"] = str(low_path)
-                    logger.info(f"  ⚠ 低信心 {conf} < {CONF_KEY_IN}：{low_path.name}")
-
-                logger.debug(f"  ★ {roi_name}/{cfg['name']}  conf={conf}  zh={zh!r} id={id_!r} mol={mol!r}")
-                break
-
-    return result if any_hit else None
 
 def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes) -> dict:
     """
@@ -419,7 +307,7 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes) -> di
             text, conf = ocr_with_conf(img, lang, tess_cfg)
             logger.debug(f"  ✗ mol/{cfg['name']}  conf={conf:.0f}  text={text[:400]!r}")
 
-            _, _, _, mol, mol_layer = find_permits(text)
+            _, _, mol, mol_layer = find_permits(text)
             if not mol:
                 continue
 
@@ -513,9 +401,9 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes) -> dict 
                     f"  text={text[:400]!r}"
                 )
                 permit_id_list = RE_PERMIT_ID_LIST_LOWER if roi_name == "permit_lower" else None
-                zh, id_, id_layer, mol, mol_layer = find_permits(text, permit_id_list)
+                id_, id_layer, mol, mol_layer = find_permits(text, permit_id_list)
 
-                if not (zh or id_ or mol):
+                if not (id_ or mol):
                     continue
 
                 if id_:
@@ -555,7 +443,7 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes) -> dict 
                     result["low_conf"] = str(low_path)
                     logger.info(f"  ⚠ 低信心 {conf} < {CONF_KEY_IN}：{low_path.name}")
 
-                logger.debug(f"  ★ {roi_name}/{cfg['name']}  conf={conf}  zh={zh!r} id={id_!r} mol={mol!r}")
+                logger.debug(f"  ★ {roi_name}/{cfg['name']}  conf={conf}  id={id_!r} mol={mol!r}")
                 break
 
     if not any_hit:
