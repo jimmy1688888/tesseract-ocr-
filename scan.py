@@ -243,14 +243,23 @@ def roi_field(roi_name: str) -> str:
     """
     return roi_name.split("_")[0]
 
-PERMIT_VOTE_N = 3   # 交叉比對時使用的前 N 個 config
+# 多數票投票使用的前處理組合（依名稱明確指定，避免因 SCAN_CONFIGS 順序改變而誤用）
+_VOTE_NAMES = {
+    "紅通道_2x_中值3",
+    "灰階_2x_中值3",
+    "紅通道_原尺寸",
+    "紅通道_2x_PSM6",
+    "灰階_2x_PSM6",
+    "紅通道_銳化_PSM6",
+}
+PERMIT_VOTE_CONFIGS = [cfg for cfg in SCAN_CONFIGS if cfg["name"] in _VOTE_NAMES]
 
 
 def _collect_permit_votes(image_bytes: bytes, roi_coords: tuple,
                           permit_id_list=None) -> list[tuple[str, float]]:
-    """對 permit ROI 跑前 PERMIT_VOTE_N 個 config，回傳所有 (命中值, 信心) pair（含重複）。"""
+    """對 permit ROI 跑 PERMIT_VOTE_CONFIGS 各組，回傳所有 (命中值, 信心) pair（含重複）。"""
     entries: list[tuple[str, float]] = []
-    for cfg in SCAN_CONFIGS[:PERMIT_VOTE_N]:
+    for cfg in PERMIT_VOTE_CONFIGS:
         img = preprocess(image_bytes, {**cfg, "roi": roi_coords})
         text, conf = ocr_with_conf(img, cfg.get("lang", TESS_LANG), build_tess_config(cfg))
         id_, _, _, _ = find_permits(text, permit_id_list)
