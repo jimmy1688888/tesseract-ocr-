@@ -72,6 +72,9 @@ ROI_REGIONS = {
     "permit_lower":  (0.40, 0.45, 1.00, 0.95),   # 右欄下半:或在此(10% 重疊避免切到關鍵字)
 }
 
+# --roi 過濾用，由 __main__ 設定（空字串 = 不過濾）
+ROI_FILTER: str = ""
+
 # 依命中率由高到低排列;找到第一個命中即停
 SCAN_CONFIGS = [
     {"name": "紅通道_2x_中值3",  "channel": "R",    "scale": 2, "median": 3, "contrast": (2, 98), "psm": 3},
@@ -250,7 +253,7 @@ def _collect_permit_votes(image_bytes: bytes, roi_coords: tuple,
     for cfg in SCAN_CONFIGS[:PERMIT_VOTE_N]:
         img = preprocess(image_bytes, {**cfg, "roi": roi_coords})
         text, conf = ocr_with_conf(img, cfg.get("lang", TESS_LANG), build_tess_config(cfg))
-        _, id_, _, _ = find_permits(text, permit_id_list)
+        id_, _, _, _ = find_permits(text, permit_id_list)
         if id_:
             entries.append((id_, conf))
     return entries
@@ -386,6 +389,8 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes) -> dict 
     any_hit = False
 
     for roi_name, roi_coords in ROI_REGIONS.items():
+        if ROI_FILTER and roi_name != ROI_FILTER:
+            continue
         field = roi_field(roi_name)
         if field in fields_found:
             continue
@@ -738,6 +743,14 @@ if __name__ == "__main__":
                         help="只掃描指定的單一 .docx（自動啟用 DEBUG 輸出）")
     parser.add_argument("--image", "-i", metavar="IMAGE", default="",
                         help="配合 --file，只處理 docx 內指定的圖檔名（如 image2.jpeg）")
+    parser.add_argument("--roi", "-r", metavar="ROI", default="",
+                        help="只掃描指定 ROI（mol / permit_upper / permit_lower）")
     opts = parser.parse_args()
     logging.getLogger().setLevel(getattr(logging, opts.log_level))
+    if opts.roi:
+        valid_rois = list(ROI_REGIONS.keys())
+        if opts.roi not in valid_rois:
+            print(f"錯誤：--roi 必須為 {valid_rois}，收到 {opts.roi!r}")
+            raise SystemExit(1)
+        globals()["ROI_FILTER"] = opts.roi
     main()
