@@ -715,15 +715,13 @@ def run_google_vision(img_path: str) -> str:
         return ""
 
     full_text = response.full_text_annotation.text if response.full_text_annotation else ""
-    # 嘗試用既有 regex 從 Vision 全文萃取
+    # 用既有 regex 從 Vision 全文萃取，需符合關鍵字錨點才接受
     for pattern_list in (RE_PERMIT_ID_LIST, RE_MOL_LIST):
         for p in pattern_list:
             m = p.search(full_text)
             if m:
                 return m.group(1).strip()
-    # 備援：直接找第一個獨立 4 位數
-    m = re.search(r"\b(\d{4})\b", full_text)
-    return m.group(1) if m else ""
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════
