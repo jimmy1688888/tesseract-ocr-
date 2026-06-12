@@ -701,7 +701,11 @@ def run_google_vision(img_path: str) -> str:
     送圖給 Google Vision OCR，從回傳文字中嘗試萃取 4 位數許可號碼。
     回傳萃取到的值，或空字串。
     """
-    client = gvision.ImageAnnotatorClient()
+    credentials = service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_JSON,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
+    client = gvision.ImageAnnotatorClient(credentials=credentials)
     with open(img_path, "rb") as f:
         content = f.read()
     image    = gvision.Image(content=content)
