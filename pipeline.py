@@ -69,7 +69,7 @@ TESS_LANG  = "ind+eng"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
 
 # Google Sheets
-SPREADSHEET_ID = "YOUR_SPREADSHEET_ID"          # ← 改為實際試算表 ID
+SPREADSHEET_ID = "1zL5sRhaJHHXd-FBcY7rEm28Sfhz48l32gBwn-ATHalM"
 SHEET_NAME     = "工作表1"                        # ← 改為實際工作表名稱
 # 每列寫入 4 欄：A=source_docx, B=final_value, C=status, D=note
 # 欄位順序由 keyin_to_sheets() 內 values 組裝決定；若需改順序在那裡調整
