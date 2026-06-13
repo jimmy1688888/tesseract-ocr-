@@ -725,6 +725,7 @@ def run_google_vision(img_path: str) -> str:
             m = p.search(full_text)
             if m:
                 return m.group(1).strip()
+    logger.debug(f"  Vision 無正則命中，原始文字：{full_text[:300]!r}")
     return ""
 
 
@@ -926,11 +927,16 @@ def main():
             f"  Vision → {item['source_docx']} / {item['image_name']}"
             f"  candidate={item['candidate_value']!r}  vision={vision_value!r}"
         )
-        final = vision_value or item["candidate_value"]
+        if vision_value:
+            final  = vision_value
+            reason = f"vision:{item['reason']}"
+        else:
+            final  = item["candidate_value"]
+            reason = f"Vision無正則命中_fallback:{item['reason']}"
         vision_keyin.append({
             "source_docx":     item["source_docx"],
             "candidate_value": final,
-            "reason":          f"vision:{item['reason']}",
+            "reason":          reason,
         })
     keyin_to_sheets(vision_keyin, status="vision")
 
