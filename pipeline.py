@@ -676,6 +676,10 @@ def build_vision_queue(csv_path: Path) -> tuple[list[dict], list[str], list[dict
     for docx_name, rows in sorted(groups.items()):
         docx_class = rows[0]["docx_class"]
         if docx_class == "large":
+            # large 全無命中 → 人工審查，不送 Vision
+            if all(r.get("note", "") == "large:全無命中" for r in rows):
+                manual_review.append(docx_name)
+                continue
             queue = process_large_vs(rows)
         else:
             queue = process_small_vs(rows)
@@ -811,6 +815,7 @@ def run_scan(docx_files: list[Path], image_filter: str = "") -> Path:
             logger.debug(f"  {docx_path.name}: {len(images)} 張圖 → {docx_class}")
 
             small_bucket: list[dict] = []
+            large_hit_count = 0
 
             for img_name, img_bytes in images:
                 total += 1
@@ -822,6 +827,7 @@ def run_scan(docx_files: list[Path], image_filter: str = "") -> Path:
                     if result:
                         decide_result(result)
                         hits += 1
+                        large_hit_count += 1
                         hit_roi = result.get("hit_roi", "")
                         if hit_roi == "permit_upper":
                             upper_hits += 1
@@ -837,6 +843,15 @@ def run_scan(docx_files: list[Path], image_filter: str = "") -> Path:
                         )
                     else:
                         logger.debug(f"  {docx_path.name} / {img_name}  未命中")
+
+            # large 全無命中：寫一列佔位記錄，供後續人工審查
+            if docx_class == "large" and large_hit_count == 0:
+                first_img_name = images[0][0] if images else ""
+                fallback = _empty_result(docx_path.name, first_img_name, "large")
+                fallback["note"]          = "large:全無命中"
+                fallback["manual_review"] = "Y"
+                writer.writerow({k: fallback.get(k, "") for k in fieldnames})
+                logger.info(f"  ⚠ {docx_path.name} large全無命中 → 標記人工審查")
 
             if docx_class == "small" and small_bucket:
                 to_write = aggregate_small_docx(small_bucket)
@@ -921,7 +936,7 @@ def main():
 
     # ── 步驟 4c：人工審查清單 ──────────────────────────────────────────────
     if manual_review:
-        manual_rows = [{"source_docx": d, "candidate_value": "", "reason": "small:全無命中"}
+        manual_rows = [{"source_docx": d, "candidate_value": "", "reason": "全無命中"}
                        for d in manual_review]
         keyin_to_sheets(manual_rows, status="manual_review")
         logger.info(f"── 人工審查（{len(manual_review)} 件）：")
