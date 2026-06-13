@@ -932,7 +932,7 @@ def main():
             reason = f"vision:{item['reason']}"
         else:
             final  = item["candidate_value"]
-            reason = f"Vision無正則命中_fallback:{item['reason']}"
+            reason = f"Vision無正則命中；使用Tesseract候選值({item['reason']})"
         vision_keyin.append({
             "source_docx":     item["source_docx"],
             "candidate_value": final,
