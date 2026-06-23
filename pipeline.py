@@ -1030,6 +1030,201 @@ def run_google_vision(img_path: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# ⑧b Vision 結果交叉比對
+# ═══════════════════════════════════════════════════════════════════════════
+# 目的:Vision 自己讀到一個值不代表就對。本層用三組獨立證據交叉驗證:
+#   1. 格式驗證 — Vision 值必須是 4 位數(基本 sanity check)
+#   2. 雙引擎交叉 — Vision 值與 Tesseract 原本讀到的值是否一致
+#   3. 已知清單 — 是否在歷史成功 key-in 過的值集合內(來自 upload_log.csv)
+#
+# 設計原則:保守。**只有當 Tesseract 與 Vision 完全一致時才自動 key-in**,
+# 其餘所有情境(包括「Vision 值剛好在已知清單內」)一律標記人工審查。
+# 已知清單僅用於補充 rationale,不會單獨作為自動採用的依據。
+
+class VerificationLevel(str, Enum):
+    CONFIRMED            = "confirmed"             # 雙引擎完全一致
+    LIKELY_OCR_CONFUSION = "likely_ocr_confusion"  # 差 1 字元(視覺相近字常見)
+    VISION_ONLY          = "vision_only"           # Tesseract 沒讀到,僅 Vision 有值
+    DISAGREEMENT         = "disagreement"          # 兩引擎差異 2 字元以上
+    FORMAT_INVALID       = "format_invalid"        # Vision 無值或值不符 4 位數格式
+
+
+@dataclass
+class VerifiedResult:
+    """三層交叉比對後的決定。
+
+    should_keyin:是否可自動寫入 Sheets;False 一律進人工審查批次。
+    rationale  :給人看的決策理由(會寫到 Sheets 的 reason 欄)。
+    """
+    final_value: str
+    level: VerificationLevel
+    should_keyin: bool
+    rationale: str
+    in_known_list: bool = False
+
+
+# 4 位數格式檢查:Vision 回傳的值必須是純 4 位數字才接受。
+# 這是「最低門檻」:Vision 偶爾會把日期、頁碼、其他不相關文字解析為候選值,
+# 此 regex 把這類雜訊濾掉。
+_RE_PERMIT_VALUE = re.compile(r"^\d{4}$")
+
+
+def _is_valid_permit_format(value: str) -> bool:
+    """Vision 值是否符合 4 位數 permit/mol 格式。"""
+    return bool(value and _RE_PERMIT_VALUE.match(value))
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """計算 a 與 b 的 Levenshtein 編輯距離。
+
+    用於辨識「視覺相近字」混淆:Vision 跟 Tesseract 對同一張圖讀到的值若僅差 1 字,
+    高機率是 0/O、1/l、5/S 等 OCR 常見混淆,而非完全不同的兩個 permit。
+    """
+    if len(a) < len(b):
+        a, b = b, a
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a):
+        curr = [i + 1]
+        for j, cb in enumerate(b):
+            curr.append(min(
+                prev[j + 1] + 1,         # 刪除 a[i]
+                curr[j] + 1,             # 插入 b[j]
+                prev[j] + (ca != cb),    # 替換(相同時 +0)
+            ))
+        prev = curr
+    return prev[-1]
+
+
+def load_known_permits_from_log(log_path: Path | None = None) -> set[str]:
+    """從 upload_log.csv 累積歷史成功值,建立「軟版已知清單」。
+
+    用途:作為交叉比對的補充證據。歷史上出現過的 permit id 比從未出現過的可信度高。
+    與決策直接綁定的是 should_keyin 旗標,本清單僅影響 rationale 文字,
+    用來告訴審查者「這個值在歷史紀錄裡出現過,可優先處理」。
+
+    回傳:已知 permit value 的集合;檔案不存在或為空時回傳空集合。
+    """
+    if log_path is None:
+        log_path = UPLOAD_LOG_PATH
+    if not log_path.exists():
+        return set()
+    known: set[str] = set()
+    try:
+        with open(log_path, encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                v = (row.get("final_value") or "").strip()
+                if v:
+                    known.add(v)
+    except Exception as e:
+        logger.warning(f"讀取 upload_log.csv 失敗(將視為空清單):{e!r}")
+    return known
+
+
+def verify_vision_result(
+    vision_value: str,
+    tesseract_candidate: str,
+    known_permits: set[str] | None = None,
+) -> VerifiedResult:
+    """對 Vision 的結果做三層交叉比對。
+
+    決策表(保守版,僅 CONFIRMED 自動 key-in):
+      Level                   | Action
+      ─────────────────────── | ──────────────
+      CONFIRMED               | should_keyin=True   ← 唯一自動寫入
+      LIKELY_OCR_CONFUSION    | should_keyin=False(在已知清單也是 False)
+      VISION_ONLY             | should_keyin=False(在已知清單也是 False)
+      DISAGREEMENT            | should_keyin=False
+      FORMAT_INVALID          | should_keyin=False
+
+    參數:
+      vision_value         : Vision OCR 萃取的值(run_google_vision 的回傳)。
+                             空字串代表 Vision 沒有正則命中。
+      tesseract_candidate  : 該圖在 Tesseract 階段讀到的最佳候選
+                             (來自 VisionQueueItem.candidate_value);可為空字串。
+      known_permits        : 已知合法 permit 集合(從 upload_log.csv 累積);
+                             僅用於補充 rationale,不影響 should_keyin 判斷。
+
+    回傳:VerifiedResult,呼叫端據此決定該列進 key-in 批次或人工審查批次。
+    """
+    in_known_list = bool(known_permits and vision_value in known_permits)
+
+    # ── 第一層:格式 ──────────────────────────────────────────────────
+    if not _is_valid_permit_format(vision_value):
+        return VerifiedResult(
+            final_value=vision_value or tesseract_candidate,
+            level=VerificationLevel.FORMAT_INVALID,
+            should_keyin=False,
+            rationale=(
+                "Vision 無正則命中,需人工審查"
+                if not vision_value
+                else f"Vision 值 {vision_value!r} 不符合 4 位數格式"
+            ),
+            in_known_list=False,
+        )
+
+    # ── 第二層:跟 Tesseract 比對 ────────────────────────────────────
+    # VISION_ONLY:Tesseract 沒讀到值,只有 Vision 給出候選
+    if not tesseract_candidate:
+        rationale = (
+            f"僅 Vision 讀到 {vision_value!r}(值在已知清單內,可優先處理),需人工確認"
+            if in_known_list
+            else f"僅 Vision 讀到 {vision_value!r},不在已知清單,需人工審查"
+        )
+        return VerifiedResult(
+            final_value=vision_value,
+            level=VerificationLevel.VISION_ONLY,
+            should_keyin=False,
+            rationale=rationale,
+            in_known_list=in_known_list,
+        )
+
+    # 兩引擎完全一致 → 唯一自動 key-in 的路徑
+    if vision_value == tesseract_candidate:
+        rationale = f"Tesseract 與 Vision 雙引擎一致:{vision_value!r}"
+        if in_known_list:
+            rationale += "(且在已知清單內)"
+        return VerifiedResult(
+            final_value=vision_value,
+            level=VerificationLevel.CONFIRMED,
+            should_keyin=True,
+            rationale=rationale,
+            in_known_list=in_known_list,
+        )
+
+    distance = _edit_distance(vision_value, tesseract_candidate)
+
+    # 差 1 字元 → 高機率 OCR 視覺相近字混淆,但仍需人工確認
+    if distance == 1:
+        rationale = (
+            f"Tesseract={tesseract_candidate!r} vs Vision={vision_value!r} "
+            f"僅差 1 字元(疑似 OCR 視覺相近字混淆),需人工判斷"
+        )
+        if in_known_list:
+            rationale += f";Vision 候選 {vision_value!r} 在已知清單內"
+        return VerifiedResult(
+            final_value=vision_value,
+            level=VerificationLevel.LIKELY_OCR_CONFUSION,
+            should_keyin=False,
+            rationale=rationale,
+            in_known_list=in_known_list,
+        )
+
+    # 差 2 字元以上 → 兩引擎不一致,最可疑
+    return VerifiedResult(
+        final_value=vision_value,
+        level=VerificationLevel.DISAGREEMENT,
+        should_keyin=False,
+        rationale=(
+            f"Tesseract={tesseract_candidate!r} 與 Vision={vision_value!r} "
+            f"差異 {distance} 字元,兩引擎不一致,需人工確認"
+        ),
+        in_known_list=in_known_list,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # ⑨ Google Sheets key-in
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1326,54 +1521,73 @@ def main(opts: argparse.Namespace) -> None:
     logger.info(f"  送 Vision  ：{len(vision_items)} 筆")
     logger.info(f"  人工審查   ：{len(manual_review)} 件")
 
-    # ── 步驟 4a：送 Google Vision，收集要寫入的列 ──────────────────────────
-    logger.info("── 步驟 4a：Google Vision 判讀 ──")
-    vision_keyin: list[dict] = []
+    # ── 步驟 4a：送 Google Vision + 三層交叉比對 ──────────────────────────
+    # 雙引擎(Tesseract + Vision)完全一致才自動 key-in;其餘進人工審查批次。
+    # 即便 Vision 值在已知清單內,只要與 Tesseract 不完全一致,仍標為人工審查,
+    # 避免任何單一 OCR 引擎的判讀直接決定資料寫入。
+    logger.info("── 步驟 4a：Google Vision 判讀 + 交叉比對 ──")
+    known_permits = load_known_permits_from_log()
+    logger.info(f"  載入已知清單(來自 upload_log.csv):{len(known_permits)} 筆")
+
+    vision_keyin: list[dict] = []          # 雙引擎一致 → 自動寫
+    vision_review_rows: list[dict] = []    # 任何不一致 → 人工審查
     for item in vision_items:
         if not item.img_path or not Path(item.img_path).exists():
             logger.warning(f"  ⚠ 找不到圖檔：{item.img_path}（{item.source_docx}）")
             continue
         vision_value = run_google_vision(item.img_path)
+        verified = verify_vision_result(
+            vision_value, item.candidate_value, known_permits
+        )
         logger.info(
             f"  Vision → {item.source_docx} / {item.image_name}"
-            f"  candidate={item.candidate_value!r}  vision={vision_value!r}"
+            f"  candidate={item.candidate_value!r} vision={vision_value!r}"
+            f"  → {verified.level.value}(keyin={verified.should_keyin})"
         )
-        if vision_value:
-            final  = vision_value
-            reason = f"vision:{item.reason}"
-        else:
-            final  = item.candidate_value
-            reason = f"Vision無正則命中；使用Tesseract候選值({item.reason})"
-        vision_keyin.append({
+        row = {
             "source_docx":     item.source_docx,
-            "candidate_value": final,
-            "reason":          reason,
-        })
+            "candidate_value": verified.final_value,
+            "reason":          verified.rationale,
+        }
+        if verified.should_keyin:
+            vision_keyin.append(row)
+        else:
+            vision_review_rows.append(row)
 
     # ── 步驟 4b：彙整三批，atomic 一次寫入 Google Sheets ──────────────────
     # 過去是分三次 API 呼叫，中途失敗會造成「半成功」的不一致狀態（前面已寫入、後面沒寫）；
     # 改用 write_sheets_batched 一次性 append，Sheets API 層面就是 atomic：
     # 成功就全部寫入、失敗就完全沒寫，可直接修錯後重跑。
+    #
+    # 人工審查批次包含兩來源:
+    #   (1) build_vision_queue 直接判定為無命中的 docx
+    #   (2) 經 Vision 比對後 should_keyin=False 的列(disagreement/vision_only/etc)
     logger.info("── 步驟 4b：合併批次寫入 Google Sheets（atomic）──")
     manual_rows = [
         {"source_docx": d, "candidate_value": "", "reason": "全無命中"}
         for d in manual_review
-    ]
+    ] + vision_review_rows
     written = write_sheets_batched([
         (keyin_items,  SheetStatus.KEYED_IN),       # 高信心直接 key-in（VisionQueueItem）
-        (vision_keyin, SheetStatus.VISION),         # 經 Vision 判讀後的結果（dict）
-        (manual_rows,  SheetStatus.MANUAL_REVIEW),  # 人工審查清單（dict）
+        (vision_keyin, SheetStatus.VISION),         # 雙引擎一致的 Vision 結果（dict）
+        (manual_rows,  SheetStatus.MANUAL_REVIEW),  # 無命中 + Vision 交叉比對失敗（dict）
     ])
     logger.info(
         f"  本次寫入彙總：keyed-in={len(keyin_items)} / vision={len(vision_keyin)} "
-        f"/ manual_review={len(manual_review)}（實際寫入 Sheets：{written} 筆）"
+        f"/ manual_review={len(manual_rows)}"
+        f"(其中 Vision 交叉比對失敗 {len(vision_review_rows)} 筆,無命中 {len(manual_review)} 件)"
+        f"（實際寫入 Sheets：{written} 筆）"
     )
 
     # ── 步驟 4c：列出人工審查清單，方便人類確認 ────────────────────────────
     if manual_review:
-        logger.info(f"── 人工審查（{len(manual_review)} 件）：")
+        logger.info(f"── 人工審查 — 全無命中（{len(manual_review)} 件）：")
         for d in manual_review:
             logger.info(f"    {d}")
+    if vision_review_rows:
+        logger.info(f"── 人工審查 — Vision 交叉比對失敗（{len(vision_review_rows)} 件）：")
+        for row in vision_review_rows:
+            logger.info(f"    {row['source_docx']}: {row['reason']}")
 
     logger.info("── 全部完成 ──")
 
