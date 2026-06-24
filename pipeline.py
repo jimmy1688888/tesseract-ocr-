@@ -1397,30 +1397,15 @@ def write_sheets_batched(batches: list[tuple[list, SheetStatus]]) -> int:
 
     特性：
       1. 合併成一次 API 呼叫 → 中途網路失敗時不會出現「半成功」狀態。
-      2. 寫入前先讀取本地 upload_log.csv，跳過已上傳的 (source_docx, status) 組合，
-         避免意外重跑造成重複寫入 Sheets。
-      3. 寫入成功後才更新 upload_log.csv（保證 log 不會比實際 Sheets 樂觀）。
-      4. 5xx / 429 / 連線錯誤自動退避重試；4xx 直接拋出。
+      2. 5xx / 429 / 連線錯誤自動退避重試；4xx 直接拋出。
 
     回傳實際寫入 Sheets 的列數。
     """
-    done = _load_upload_log()
     values: list[list[str]] = []
-    skipped = 0
 
     for rows, status in batches:
         for r in rows:
-            source_docx = (r.source_docx if isinstance(r, VisionQueueItem)
-                           else r.get("source_docx", ""))
-            key = (source_docx, status.value)
-            if key in done:
-                skipped += 1
-                logger.debug(f"  ⏭ 已上傳過，跳過：{source_docx} ({status.value})")
-                continue
             values.append(_row_to_sheet_values(r, status))
-
-    if skipped:
-        logger.info(f"  ⏭ 依本地上傳日誌跳過 {skipped} 筆已上傳資料")
 
     if not values:
         logger.info("  （此次無新資料需寫入 Sheets）")
@@ -1439,7 +1424,6 @@ def write_sheets_batched(batches: list[tuple[list, SheetStatus]]) -> int:
         )
         raise
 
-    _append_upload_log(values)
     logger.info(f"  ✔ 已 atomic 寫入 Google Sheets {len(values)} 筆（含多種 status）")
     return len(values)
 
