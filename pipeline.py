@@ -164,6 +164,9 @@ class SheetStatus(str, Enum):
 class VisionQueueItem:
     """vision_submit 階段產生的工作項目。
     direct_keyin=True 表示信心足夠，直接寫 Sheets；False 則送 Google Vision 再決定。
+
+    candidate_conf:候選值對應的 Tesseract 信心分數。後續 verify_vision_result
+    在「差 1 字元(LIKELY_OCR_CONFUSION)」分支中,會用它決定要採 Tesseract 還是 Vision 值。
     """
     source_docx: str
     image_name: str
@@ -171,6 +174,7 @@ class VisionQueueItem:
     candidate_value: str
     reason: str
     direct_keyin: bool = False
+    candidate_conf: float = 0.0
 
 
 # ─── CSV 欄位順序（同時供寫入與讀取使用，避免兩端走樣） ───────────────────
@@ -840,6 +844,7 @@ def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
                     image_name      = best_row.image_name,
                     img_path        = _best_img_path(best_row),
                     candidate_value = best_val,
+                    candidate_conf  = best_conf,
                     reason          = f"cross_match(file)_高信心 conf={best_conf}",
                     direct_keyin    = True,
                 ))
@@ -849,6 +854,7 @@ def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
                     image_name      = best_row.image_name,
                     img_path        = _best_img_path(best_row),
                     candidate_value = best_val,
+                    candidate_conf  = best_conf,
                     reason          = f"cross_match(file)_低信心 conf={best_conf}",
                     direct_keyin    = False,
                 ))
@@ -861,6 +867,7 @@ def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
                 image_name      = best_row.image_name,
                 img_path        = _best_img_path(best_row),
                 candidate_value = best_val,
+                candidate_conf  = best_conf,
                 reason          = f"mol≠permit衝突_最高conf={best_conf}",
                 direct_keyin    = False,
             ))
@@ -874,6 +881,7 @@ def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
             image_name      = r.image_name,
             img_path        = r.permit_crop or _best_img_path(r),
             candidate_value = r.id or r.final_value,
+            candidate_conf  = r.id_conf or r.final_conf,
             reason          = "permit部分命中無多數",
             direct_keyin    = False,
         ))
@@ -887,6 +895,7 @@ def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
                 image_name      = r.image_name,
                 img_path        = _best_img_path(r),
                 candidate_value = r.final_value,
+                candidate_conf  = r.final_conf,
                 reason          = r.note or "vision_review=True",
                 direct_keyin    = False,
             ))
@@ -901,6 +910,7 @@ def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
                 image_name      = best_row.image_name,
                 img_path        = _best_img_path(best_row),
                 candidate_value = best_row.final_value,
+                candidate_conf  = best_row.final_conf,
                 reason          = f"高信心直接key-in conf={best_row.final_conf}",
                 direct_keyin    = True,
             ))
@@ -925,6 +935,7 @@ def process_small_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
                 image_name      = r.image_name,
                 img_path        = _best_img_path(r),
                 candidate_value = r.final_value,
+                candidate_conf  = r.final_conf,
                 reason          = r.note or "vision_review=True",
                 direct_keyin    = False,
             ))
@@ -1126,25 +1137,31 @@ def verify_vision_result(
     vision_value: str,
     tesseract_candidate: str,
     known_permits: set[str] | None = None,
+    *,
+    tesseract_conf: float = 0.0,
 ) -> VerifiedResult:
     """對 Vision 的結果做三層交叉比對。
 
     決策表(保守版,僅 CONFIRMED 自動 key-in):
-      Level                   | Action
-      ─────────────────────── | ──────────────
-      CONFIRMED               | should_keyin=True   ← 唯一自動寫入
-      LIKELY_OCR_CONFUSION    | should_keyin=False(在已知清單也是 False)
-      VISION_ONLY             | should_keyin=False(在已知清單也是 False)
-      DISAGREEMENT            | should_keyin=False
-      FORMAT_INVALID          | should_keyin=False
+      Level                   | Action                | final_value 來源
+      ─────────────────────── | ───────────────────── | ─────────────────
+      CONFIRMED               | should_keyin=True     | vision_value(等於 tesseract)
+      LIKELY_OCR_CONFUSION    | should_keyin=False    | 視 tesseract_conf 而定 ↓
+      VISION_ONLY             | should_keyin=False    | vision_value
+      DISAGREEMENT            | should_keyin=False    | vision_value
+      FORMAT_INVALID          | should_keyin=False    | tesseract_candidate(若有)或空
+
+    LIKELY_OCR_CONFUSION 的 final_value 選擇:
+      tesseract_conf >  50:採用 Tesseract 值(Tesseract 信心夠,Vision 可能誤判)
+      tesseract_conf <= 50:採用 Vision 值(Tesseract 信心不足,以 Vision 為主)
+      不論哪邊勝出,should_keyin 都是 False — 兩引擎不一致仍需人工確認。
 
     參數:
-      vision_value         : Vision OCR 萃取的值(run_google_vision 的回傳)。
-                             空字串代表 Vision 沒有正則命中。
-      tesseract_candidate  : 該圖在 Tesseract 階段讀到的最佳候選
-                             (來自 VisionQueueItem.candidate_value);可為空字串。
-      known_permits        : 已知合法 permit 集合(從 upload_log.csv 累積);
-                             僅用於補充 rationale,不影響 should_keyin 判斷。
+      vision_value         : Vision OCR 萃取的值。空字串代表 Vision 沒有正則命中。
+      tesseract_candidate  : 該圖在 Tesseract 階段讀到的最佳候選(可為空字串)。
+      known_permits        : 已知合法 permit 集合;僅影響 rationale,不影響 should_keyin。
+      tesseract_conf       : 該 tesseract_candidate 對應的 Tesseract 信心(0-100);
+                             僅在 LIKELY_OCR_CONFUSION 分支用到。預設 0.0 → 採 Vision 值。
 
     回傳:VerifiedResult,呼叫端據此決定該列進 key-in 批次或人工審查批次。
     """
@@ -1195,16 +1212,32 @@ def verify_vision_result(
 
     distance = _edit_distance(vision_value, tesseract_candidate)
 
-    # 差 1 字元 → 高機率 OCR 視覺相近字混淆,但仍需人工確認
+    # 差 1 字元 → 高機率 OCR 視覺相近字混淆。
+    # Tesseract conf > 50 表示 Tesseract 自己的判讀並非低信心,
+    # 此情境採用 Tesseract 值作為候選(Vision 的「修正」反而可能是錯誤的修正);
+    # Tesseract conf <= 50 則 Tesseract 自己也不確定,以 Vision 為主。
+    # 不論採哪邊,仍需人工確認,因為兩引擎終究不一致。
     if distance == 1:
+        if tesseract_conf > 50:
+            final_value = tesseract_candidate
+            pick_note = (
+                f"Tesseract conf={tesseract_conf:.1f} > 50,"
+                f"優先採 Tesseract={tesseract_candidate!r}"
+            )
+        else:
+            final_value = vision_value
+            pick_note = (
+                f"Tesseract conf={tesseract_conf:.1f} ≤ 50,"
+                f"採 Vision={vision_value!r}"
+            )
         rationale = (
             f"Tesseract={tesseract_candidate!r} vs Vision={vision_value!r} "
-            f"僅差 1 字元(疑似 OCR 視覺相近字混淆),需人工判斷"
+            f"差 1 字元(疑似 OCR 視覺相近字混淆);{pick_note},需人工判斷"
         )
         if in_known_list:
-            rationale += f";Vision 候選 {vision_value!r} 在已知清單內"
+            rationale += ";Vision 候選在已知清單內"
         return VerifiedResult(
-            final_value=vision_value,
+            final_value=final_value,
             level=VerificationLevel.LIKELY_OCR_CONFUSION,
             should_keyin=False,
             rationale=rationale,
@@ -1246,6 +1279,10 @@ def _load_upload_log() -> set[tuple[str, str]]:
     用途：若上一次 pipeline 跑到一半失敗、或意外重跑，可避免相同資料重複寫入 Sheets。
     這是「Sheets 沒有原生 idempotency」的本地補強；不是百分百可靠
     （例如 API 已寫入但回應遺失的極端情境仍可能漏記）。
+
+    向後相容:過去版本曾用 SheetStatus.VISION 寫入 Vision-CONFIRMED 列。
+    本版改為把 Vision-CONFIRMED 視為 KEYED_IN(自動寫入的一種)。
+    為了讓舊 log 仍能正確 dedup,讀取時把 "vision" 正規化為 "keyed_in"。
     """
     if not UPLOAD_LOG_PATH.exists():
         return set()
@@ -1253,7 +1290,12 @@ def _load_upload_log() -> set[tuple[str, str]]:
     try:
         with open(UPLOAD_LOG_PATH, encoding="utf-8-sig") as f:
             for r in csv.DictReader(f):
-                done.add((r.get("source_docx", ""), r.get("status", "")))
+                docx = r.get("source_docx", "")
+                status = r.get("status", "")
+                # 向後相容:舊版的 "vision" 等同新版的 "keyed_in"
+                if status == SheetStatus.VISION.value:
+                    status = SheetStatus.KEYED_IN.value
+                done.add((docx, status))
     except Exception as e:
         logger.warning(f"讀取上傳日誌失敗（將視為空集合）：{e!r}")
     return done
@@ -1525,11 +1567,14 @@ def main(opts: argparse.Namespace) -> None:
     # 雙引擎(Tesseract + Vision)完全一致才自動 key-in;其餘進人工審查批次。
     # 即便 Vision 值在已知清單內,只要與 Tesseract 不完全一致,仍標為人工審查,
     # 避免任何單一 OCR 引擎的判讀直接決定資料寫入。
+    #
+    # 額外規則(LIKELY_OCR_CONFUSION):兩引擎差 1 字元時,若 Tesseract conf > 50,
+    # 採用 Tesseract 值作為候選(因為 Vision 的「修正」可能是錯誤的修正)。
     logger.info("── 步驟 4a：Google Vision 判讀 + 交叉比對 ──")
     known_permits = load_known_permits_from_log()
     logger.info(f"  載入已知清單(來自 upload_log.csv):{len(known_permits)} 筆")
 
-    vision_keyin: list[dict] = []          # 雙引擎一致 → 自動寫
+    vision_auto_keyin: list[dict] = []     # 雙引擎一致(CONFIRMED) → 自動寫
     vision_review_rows: list[dict] = []    # 任何不一致 → 人工審查
     for item in vision_items:
         if not item.img_path or not Path(item.img_path).exists():
@@ -1537,11 +1582,15 @@ def main(opts: argparse.Namespace) -> None:
             continue
         vision_value = run_google_vision(item.img_path)
         verified = verify_vision_result(
-            vision_value, item.candidate_value, known_permits
+            vision_value=vision_value,
+            tesseract_candidate=item.candidate_value,
+            known_permits=known_permits,
+            tesseract_conf=item.candidate_conf,
         )
         logger.info(
             f"  Vision → {item.source_docx} / {item.image_name}"
-            f"  candidate={item.candidate_value!r} vision={vision_value!r}"
+            f"  candidate={item.candidate_value!r}(conf={item.candidate_conf:.1f})"
+            f"  vision={vision_value!r}"
             f"  → {verified.level.value}(keyin={verified.should_keyin})"
         )
         row = {
@@ -1550,43 +1599,40 @@ def main(opts: argparse.Namespace) -> None:
             "reason":          verified.rationale,
         }
         if verified.should_keyin:
-            vision_keyin.append(row)
+            vision_auto_keyin.append(row)
         else:
             vision_review_rows.append(row)
 
-    # ── 步驟 4b：彙整三批，atomic 一次寫入 Google Sheets ──────────────────
-    # 過去是分三次 API 呼叫，中途失敗會造成「半成功」的不一致狀態（前面已寫入、後面沒寫）；
-    # 改用 write_sheets_batched 一次性 append，Sheets API 層面就是 atomic：
-    # 成功就全部寫入、失敗就完全沒寫，可直接修錯後重跑。
+    # ── 步驟 4b：統一寫入 Google Sheets ────────────────────────────────────
+    # 簡化為兩個 status,理由欄(reason)負責歸因:
+    #   KEYED_IN      = Tesseract 直接 key-in(高信心)  +  Vision-CONFIRMED(雙引擎一致)
+    #   MANUAL_REVIEW = Vision 交叉比對失敗(各種不一致)  +  全無命中
     #
-    # 人工審查批次包含兩來源:
-    #   (1) build_vision_queue 直接判定為無命中的 docx
-    #   (2) 經 Vision 比對後 should_keyin=False 的列(disagreement/vision_only/etc)
+    # 設計動機:自動 vs 人工的二分讓使用者只需依 status 篩選即可知道「哪些要看」。
+    # 每列來源(Tesseract 直接 / Vision 確認 / 差 1 字元 / 僅 Vision / 無命中)
+    # 都寫進 reason 欄,審查時看 reason 就知道 context。
     logger.info("── 步驟 4b：合併批次寫入 Google Sheets（atomic）──")
-    manual_rows = [
+    auto_keyin_batch = keyin_items + vision_auto_keyin   # VisionQueueItem + dict 混合,_row_to_sheet_values 兼容
+    review_batch = vision_review_rows + [
         {"source_docx": d, "candidate_value": "", "reason": "全無命中"}
         for d in manual_review
-    ] + vision_review_rows
+    ]
     written = write_sheets_batched([
-        (keyin_items,  SheetStatus.KEYED_IN),       # 高信心直接 key-in（VisionQueueItem）
-        (vision_keyin, SheetStatus.VISION),         # 雙引擎一致的 Vision 結果（dict）
-        (manual_rows,  SheetStatus.MANUAL_REVIEW),  # 無命中 + Vision 交叉比對失敗（dict）
+        (auto_keyin_batch, SheetStatus.KEYED_IN),
+        (review_batch,     SheetStatus.MANUAL_REVIEW),
     ])
     logger.info(
-        f"  本次寫入彙總：keyed-in={len(keyin_items)} / vision={len(vision_keyin)} "
-        f"/ manual_review={len(manual_rows)}"
-        f"(其中 Vision 交叉比對失敗 {len(vision_review_rows)} 筆,無命中 {len(manual_review)} 件)"
-        f"（實際寫入 Sheets：{written} 筆）"
+        f"  本次寫入彙總:auto_keyin={len(auto_keyin_batch)} 筆"
+        f"(其中 Tesseract 直接 {len(keyin_items)} 筆 + Vision 確認 {len(vision_auto_keyin)} 筆) "
+        f"/ manual_review={len(review_batch)} 筆"
+        f"(其中 Vision 交叉比對失敗 {len(vision_review_rows)} 筆 + 全無命中 {len(manual_review)} 件)"
+        f"(實際寫入 Sheets:{written} 筆)"
     )
 
     # ── 步驟 4c：列出人工審查清單，方便人類確認 ────────────────────────────
-    if manual_review:
-        logger.info(f"── 人工審查 — 全無命中（{len(manual_review)} 件）：")
-        for d in manual_review:
-            logger.info(f"    {d}")
-    if vision_review_rows:
-        logger.info(f"── 人工審查 — Vision 交叉比對失敗（{len(vision_review_rows)} 件）：")
-        for row in vision_review_rows:
+    if review_batch:
+        logger.info(f"── 人工審查清單(共 {len(review_batch)} 件,reason 欄已標註原因)：")
+        for row in review_batch:
             logger.info(f"    {row['source_docx']}: {row['reason']}")
 
     logger.info("── 全部完成 ──")
