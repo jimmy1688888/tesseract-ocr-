@@ -405,24 +405,24 @@ def classify_by_count(image_count: int) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 RE_PERMIT_ID_LIST = [
-    re.compile(r"No\.?\s*i[zjl1]in\s*[:::﹕]\s*(?:NO\.)?(\d{4})(?!\d)", re.IGNORECASE),
-    re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]\s*(?:NO\.)?(\d{4})(?!\d)",       re.IGNORECASE),
-    re.compile(r"\bi[zjl1]in\s*[:::﹕]\s*(?:NO\.)?(\d{4})(?!\d)",         re.IGNORECASE),
-    re.compile(r"\bNO\.(\d{4})(?!\d)",                                    re.IGNORECASE),
+    re.compile(r"No\.?\s*i[zjl1]in\s*[:::﹕]\s*(?:NO\.)?(\d{4}(?:-\d)?)(?!\d)", re.IGNORECASE),
+    re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]\s*(?:NO\.)?(\d{4}(?:-\d)?)(?!\d)",       re.IGNORECASE),
+    re.compile(r"\bi[zjl1]in\s*[:::﹕]\s*(?:NO\.)?(\d{4}(?:-\d)?)(?!\d)",         re.IGNORECASE),
+    re.compile(r"\bNO\.(\d{4}(?:-\d)?)(?!\d)",                                    re.IGNORECASE),
 ]
 
 RE_PERMIT_ID_LIST_LOWER = [
-    re.compile(r"No\.?\s*i[zjl1]in\s*[:::﹕]?\s*(?:NO\.)?(\d{4})(?!\d)", re.IGNORECASE),
-    re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]\s*(?:NO\.)?(\d{4})(?!\d)",        re.IGNORECASE),
-    re.compile(r"\bi[zjl1]in\s*[:::﹕]\s*(?:NO\.)?(\d{4})(?!\d)",          re.IGNORECASE),
-    re.compile(r"\bNO\.(\d{4})(?!\d)",                                     re.IGNORECASE),
+    re.compile(r"No\.?\s*i[zjl1]in\s*[:::﹕]?\s*(?:NO\.)?(\d{4}(?:-\d)?)(?!\d)", re.IGNORECASE),
+    re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]\s*(?:NO\.)?(\d{4}(?:-\d)?)(?!\d)",        re.IGNORECASE),
+    re.compile(r"\bi[zjl1]in\s*[:::﹕]\s*(?:NO\.)?(\d{4}(?:-\d)?)(?!\d)",          re.IGNORECASE),
+    re.compile(r"\bNO\.(\d{4}(?:-\d)?)(?!\d)",                                     re.IGNORECASE),
 ]
 
 RE_MOL_LIST = [
-    re.compile(r"Agency'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:::]\s*(\d{4})(?!\d)", re.IGNORECASE),
-    re.compile(r"A\w{3,6}'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:::]\s*(\d{4})(?!\d)", re.IGNORECASE),
-    re.compile(r"(?:Num\s*ber|umber|[Nn]amber)\s*[:::]\s*(\d{4})(?!\d)", re.IGNORECASE),
-    re.compile(r"M[O0]L\D{0,30}(\d{4})(?!\d)", re.IGNORECASE),
+    re.compile(r"Agency'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:::]\s*(\d{4}(?:-\d)?)(?!\d)", re.IGNORECASE),
+    re.compile(r"A\w{3,6}'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:::]\s*(\d{4}(?:-\d)?)(?!\d)", re.IGNORECASE),
+    re.compile(r"(?:Num\s*ber|umber|[Nn]amber)\s*[:::]\s*(\d{4}(?:-\d)?)(?!\d)", re.IGNORECASE),
+    re.compile(r"M[O0]L\D{0,30}(\d{4}(?:-\d)?)(?!\d)", re.IGNORECASE),
 ]
 
 
@@ -456,12 +456,41 @@ def find_permits(text: str, permit_id_list=None,
 # ④ 影像工具
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _image_sort_key(name: str) -> tuple[int, int, str]:
+    """為圖檔名提供 natural sort key,讓 image1 < image2 < ... < image10。
+
+    docx 內的圖通常命名為 image{N}.{ext}。預設的 lexical sort 會把
+    image10.jpeg 排在 image2.jpeg 之前(因為字串 '1' < '2'),導致 pipeline
+    可能先掃到第 10 頁的舊資料而非第 2 頁的當前資料。
+
+    本函數從檔名抽出第一個數字當排序鍵:
+      - 有數字 → (0, 數字值, 原名)
+      - 無數字 → (1, 0, 原名) (排在所有有數字的後面)
+
+    範例:
+      _image_sort_key("image1.jpeg")  → (0, 1, "image1.jpeg")
+      _image_sort_key("image10.jpeg") → (0, 10, "image10.jpeg")
+      _image_sort_key("cover.png")    → (1, 0, "cover.png")
+    """
+    m = re.search(r"\d+", name)
+    if m:
+        return (0, int(m.group()), name)
+    return (1, 0, name)
+
+
 def extract_images_from_docx(docx_path: Path) -> list[tuple[str, bytes]]:
+    """從 docx 取出所有圖檔,**保證以 natural sort 順序回傳**。
+
+    順序很重要:同一份 docx 內的 image1, image2, ... image10 應該嚴格依數字序處理,
+    避免 lexical sort 把 image10 排在 image2 之前,導致先掃到後面頁的舊資料。
+    """
     images = []
     with zipfile.ZipFile(docx_path, "r") as z:
-        for fname in sorted(z.namelist()):
+        for fname in z.namelist():
             if fname.startswith("word/media/") and Path(fname).suffix.lower() in IMAGE_EXTENSIONS:
                 images.append((Path(fname).name, z.read(fname)))
+    # natural sort:image1 < image2 < ... < image10(避免 lexical sort 的 image10 < image2 問題)
+    images.sort(key=lambda x: _image_sort_key(x[0]))
     return images
 
 
@@ -1077,7 +1106,12 @@ class VerifiedResult:
 # 4 位數格式檢查:Vision 回傳的值必須是純 4 位數字才接受。
 # 這是「最低門檻」:Vision 偶爾會把日期、頁碼、其他不相關文字解析為候選值,
 # 此 regex 把這類雜訊濾掉。
-_RE_PERMIT_VALUE = re.compile(r"^\d{4}$")
+# 4 位數格式檢查:Vision 回傳的值必須是純 4 位數字才接受,或 4 位數+破折號+1 位數(xxxx-x)。
+# 這是「最低門檻」:Vision 偶爾會把日期、頁碼、其他不相關文字解析為候選值,
+# 此 regex 把這類雜訊濾掉。接受格式:
+#   1234     (4 位純數字)
+#   1234-5   (4 位數+破折號+1 位數)
+_RE_PERMIT_VALUE = re.compile(r"^\d{4}(?:-\d)?$")
 
 
 def _is_valid_permit_format(value: str) -> bool:

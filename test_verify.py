@@ -32,6 +32,7 @@ from pipeline import (
     _edit_distance,
     _is_valid_permit_format,
     load_known_permits_from_log,
+    find_permits,
 )
 
 
@@ -511,15 +512,77 @@ class TestEditDistance:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestValidPermitFormat:
-    """4 位數格式檢查。"""
+    """4 位數(可選帶 -x 後綴)格式檢查。
+
+    支援格式:
+      1234     (4 位純數字)
+      1234-5   (4 位數 + 破折號 + 1 位數字後綴)
+    """
 
     @pytest.mark.parametrize("value", ["0000", "1234", "9999"])
     def test_valid_four_digits(self, value):
         assert _is_valid_permit_format(value) is True
 
-    @pytest.mark.parametrize("value", ["", "123", "12345", "ABCD", "12.4", "12 3"])
+    @pytest.mark.parametrize("value", ["0000-0", "1234-5", "9999-9", "3422-1"])
+    def test_valid_four_digits_with_dash_suffix(self, value):
+        """**新規則**:xxxx-x 也視為合法格式"""
+        assert _is_valid_permit_format(value) is True
+
+    @pytest.mark.parametrize("value", [
+        "", "123", "12345", "ABCD", "12.4", "12 3",
+        "1234-",         # 破折號後無數字
+        "1234-12",       # 後綴超過 1 位數
+        "1234-A",        # 後綴非數字
+        "1234 -5",       # 含空白
+        "-1234-5",       # 多餘破折號
+        "12-3456",       # 位數錯位
+    ])
     def test_invalid(self, value):
         assert _is_valid_permit_format(value) is False
+
+
+class TestRegexExtractsDashSuffix:
+    """find_permits 從文字抽取時也需支援 xxxx-x 格式。"""
+
+    def test_permit_id_with_dash_suffix_extracted(self):
+        """文字含 'No.izin: 3422-1' → 完整抽出 '3422-1'"""
+        text = "No.izin: 3422-1"
+        id_, _, mol, _ = find_permits(text, find_mol=False, find_id=True)
+        assert id_ == "3422-1"
+
+    def test_mol_with_dash_suffix_extracted(self):
+        """文字含 MOL 段落帶 -x 後綴 → 完整抽出"""
+        text = "Agency's MOL License Number: 5678-2"
+        id_, _, mol, _ = find_permits(text, find_mol=True, find_id=False)
+        assert mol == "5678-2"
+
+    def test_four_digit_only_still_works_without_dash(self):
+        """既有格式 xxxx(不帶 dash)依然可抽出"""
+        text = "No.izin: 1234"
+        id_, _, mol, _ = find_permits(text, find_mol=False, find_id=True)
+        assert id_ == "1234"
+
+    def test_five_digit_does_not_match(self):
+        """xxxxx(5 位純數字)不該被誤認為 xxxx-x"""
+        # 與舊行為一致:5 位數時 (?!\d) 失敗 → 不抽
+        text = "No.izin: 12345"
+        id_, _, mol, _ = find_permits(text, find_mol=False, find_id=True)
+        assert id_ == ""
+
+    def test_xxxx_dash_xx_falls_back_to_xxxx(self):
+        """xxxx-xx(後綴 2 位數)→ regex 透過 backtrack 退回到 xxxx 匹配。
+
+        regex 引擎行為:
+          1. 嘗試 (\\d{4}(?:-\\d)?) 貪婪匹配 → 抓到 '1234-1'
+          2. (?!\\d) lookahead 檢查:後面是 '2'(digit) → 失敗
+          3. backtrack:(?:-\\d)? 改成不匹配 → 抓 '1234'
+          4. (?!\\d) lookahead:後面是 '-'(非 digit) → 成功
+          5. 結果:'1234'
+        這與舊行為(只支援 xxxx)一致 — 等同認定「-12 是 permit 後的雜訊」。
+        """
+        text = "No.izin: 1234-12"
+        id_, _, mol, _ = find_permits(text, find_mol=False, find_id=True)
+        assert id_ == "1234"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

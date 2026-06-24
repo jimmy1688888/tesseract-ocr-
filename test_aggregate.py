@@ -3,14 +3,9 @@
 
 small docx 走不同的決策路徑(不經 decide_result):
   1. 整份 docx 所有圖片都沒命中 → 全列標 SMALL_NO_HIT + 送人工審查
-  2. 至少一張命中 → 選信心最高者作 winner,所有命中列都標 vision_review=True
+  2. 至少一張命中 → 選**信心最高者**作 winner,所有命中列都標 vision_review=True
 
 語意上 small 沒有 cross_match 機制可確認,所以即使有 winner 也必須 Vision 二次確認。
-
-重構後與重構前的差異:
-  - 輸入 list[dict] → list[ScanResult]
-  - r["status"] == "SMALL_NO_HIT" → r.status == ResultStatus.SMALL_NO_HIT
-  - r["vision_review"] == "Y" → r.vision_review is True
 """
 
 import pytest
@@ -57,7 +52,7 @@ class TestAllNoHits:
 
 
 class TestWithHits:
-    """至少一張命中時的 winner 選擇邏輯。"""
+    """至少一張命中時的 winner 選擇邏輯:**信心最高者勝**。"""
 
     def test_single_hit_becomes_winner(self):
         """只有一張命中時,該張就是 winner"""
@@ -108,7 +103,7 @@ class TestWithHits:
         result = aggregate_small_docx(rows)
         # row2 應為 winner
         for r in result:
-            assert r.final_value == "2222"  # winner 的 mol 值
+            assert r.final_value == "2222"
 
     def test_all_hits_marked_for_vision_review(self):
         """有 winner 也要 vision_review=True(small 沒有 cross_match 機制)"""
