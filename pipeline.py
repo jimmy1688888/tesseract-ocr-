@@ -1695,7 +1695,7 @@ def main(opts: argparse.Namespace) -> None:
         row = {
             "source_docx":     item.source_docx,
             "candidate_value": verified.final_value,
-            "reason":          verified.rationale,
+            "reason":          f"[送Vision原因] {item.reason} ／ [Vision結果] {verified.rationale}",
         }
         if verified.should_keyin:
             vision_auto_keyin.append(row)
