@@ -1046,11 +1046,11 @@ def process_small_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
     return queue
 
 
-def build_vision_queue(csv_path: Path) -> tuple[list[VisionQueueItem], list[str], list[VisionQueueItem]]:
+def build_vision_queue(csv_path: Path) -> tuple[list[VisionQueueItem], list[dict], list[VisionQueueItem]]:
     """
     讀取 matches.csv，分成三類回傳：
       vision_items  : 需送 Google Vision 的 VisionQueueItem
-      manual_review : 人工審查 docx 名稱清單
+      manual_review : 人工審查清單，每筆為 {"source_docx": ..., "reason": ...}
       keyin_items   : 直接 key-in 的 VisionQueueItem（direct_keyin=True）
 
     CSV 讀回後立刻反序列化成 ScanResult,讓下游函數有強型別保證。
@@ -1063,20 +1063,26 @@ def build_vision_queue(csv_path: Path) -> tuple[list[VisionQueueItem], list[str]
 
     vision_items: list[VisionQueueItem] = []
     keyin_items:  list[VisionQueueItem] = []
-    manual_review: list[str]            = []
+    manual_review: list[dict]           = []
 
     for docx_name, rows in sorted(groups.items()):
         docx_class = rows[0].docx_class
         if docx_class == "large":
             # large 全無命中 → 人工審查，不送 Vision
             if all(r.status == ResultStatus.LARGE_NO_HIT for r in rows):
-                manual_review.append(docx_name)
+                manual_review.append({
+                    "source_docx": docx_name,
+                    "reason": f"large docx：全 {len(rows)} 張圖掃描無許可證命中",
+                })
                 continue
             queue = process_large_vs(rows)
         else:
             queue = process_small_vs(rows)
             if not queue and all(r.status == ResultStatus.SMALL_NO_HIT for r in rows):
-                manual_review.append(docx_name)
+                manual_review.append({
+                    "source_docx": docx_name,
+                    "reason": f"small docx：mol ROI 全 {len(rows)} 張圖無命中",
+                })
                 continue
 
         for item in queue:
@@ -1707,7 +1713,7 @@ def main(opts: argparse.Namespace) -> None:
     logger.info("── 步驟 4b：合併批次寫入 Google Sheets（atomic）──")
     auto_keyin_batch = keyin_items + vision_auto_keyin   # VisionQueueItem + dict 混合,_row_to_sheet_values 兼容
     review_batch = vision_review_rows + [
-        {"source_docx": d, "candidate_value": "", "reason": "全無命中"}
+        {"source_docx": d["source_docx"], "candidate_value": "", "reason": d["reason"]}
         for d in manual_review
     ]
     written = write_sheets_batched([
