@@ -889,12 +889,12 @@ def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
                 ))
             return queue
         else:
-            # mol ≠ permit：取圖檔位置最靠前的值（而非最高信心）。
-            # 理由：同一 docx 可能包含新舊兩份文件（新在前、舊在後），
-            # 若以最高信心選取，舊資料可能因掃描品質較佳而覆蓋新資料。
-            all_candidates = mol_rows + permit_rows
+            # mol ≠ permit：ROI 優先（permit ROI > mol ROI）+ 位置次要。
+            # permit ROI 是目的明確的掃描區域，mol ROI 為輔助 cross-check，
+            # 衝突時以 permit ROI 的最早圖為主，避免 mol 誤讀覆蓋正確的 permit 值。
+            priority_pool = permit_rows if permit_rows else mol_rows
             earliest_row, earliest_val, earliest_conf = min(
-                all_candidates, key=lambda x: _image_sort_key(x[0].image_name)
+                priority_pool, key=lambda x: _image_sort_key(x[0].image_name)
             )
             queue.append(VisionQueueItem(
                 source_docx     = earliest_row.source_docx,
@@ -903,7 +903,7 @@ def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
                 candidate_value = earliest_val,
                 candidate_conf  = earliest_conf,
                 reason          = (
-                    f"mol≠permit衝突_取最早圖({earliest_row.image_name})"
+                    f"mol≠permit衝突_permit優先_最早圖({earliest_row.image_name})"
                     f" conf={earliest_conf}"
                 ),
                 direct_keyin    = False,
