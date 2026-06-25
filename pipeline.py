@@ -87,8 +87,9 @@ SERVICE_ACCOUNT_JSON = os.environ.get(
 SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # 信心門檻
-CONF_KEY_IN   = 55   # 高於此值直接 key-in；低於則標記送 Google Vision
-CONF_VOTE_MIN = 45   # permit 多數票平均信心低於此值才送 Vision
+CONF_KEY_IN       = 55   # 高於此值直接 key-in；低於則標記送 Google Vision
+CONF_VOTE_MIN     = 45   # permit 多數票平均信心低於此值才送 Vision
+CONF_MOL_VOTE_MIN = 50   # small docx mol 多數票平均信心高於此值直接 key-in
 
 # ─── prefilter ────────────────────────────────────────────────────────────
 SMALL_DOCX_THRESHOLD = 3   # 圖片數 ≤ 此值 → "small"
@@ -237,7 +238,8 @@ class ScanResult:
     permit_crop: str = ""      # permit crop 圖檔路徑
 
     # ─── 內部 flag（取代過去的 _id_from_vote） ───────────────────────────
-    id_from_vote: bool = False
+    id_from_vote:  bool = False
+    mol_from_vote: bool = False   # mol 值來自多數票（SCAN_CONFIGS 全跑後投票）
 
     # ─── 序列化 ──────────────────────────────────────────────────────────
     def to_csv_row(self) -> dict[str, str]:
@@ -572,14 +574,53 @@ def _majority_vote(values: list[str], min_count: int = 2) -> str:
     return best if count >= min_count else ""
 
 
+def _collect_mol_votes(image_bytes: bytes) -> list[tuple[str, float]]:
+    """mol ROI 以 PERMIT_VOTE_CONFIGS（6組）逐一掃描，回傳 (值, conf) 清單。"""
+    entries: list[tuple[str, float]] = []
+    for cfg in PERMIT_VOTE_CONFIGS:
+        img = preprocess(image_bytes, {**cfg, "roi": ROI_REGIONS["mol"]})
+        text, conf = ocr_with_conf(img, cfg.get("lang", TESS_LANG), build_tess_config(cfg))
+        _, _, mol, _ = find_permits(text)
+        if mol:
+            entries.append((mol, conf))
+    return entries
+
+
 def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes) -> ScanResult:
-    """small docx 專用：只掃 mol ROI。"""
+    """small docx 專用：只掃 mol ROI。
+
+    第一階段先跑 PERMIT_VOTE_CONFIGS 多數票；有多數票直接採用並標記 mol_from_vote=True。
+    無多數票時退回 first-hit（SCAN_CONFIGS → FALLBACK_CONFIGS）。
+    """
     stem = f"{Path(docx_name).stem}_{Path(img_name).stem}"
     result = _empty_result(docx_name, img_name, "small")
     raw_img = None
     roi_coords = ROI_REGIONS["mol"]
-    mol_found = False
 
+    # ── 第一階段：多數票（PERMIT_VOTE_CONFIGS 6組）────────────────────
+    mol_entries = _collect_mol_votes(image_bytes)
+    mol_vote = _majority_vote([v for v, _ in mol_entries], min_count=2)
+    if mol_vote:
+        winning_confs = [c for v, c in mol_entries if v == mol_vote]
+        avg_conf = round(sum(winning_confs) / len(winning_confs), 1)
+        result.mol          = mol_vote
+        result.mol_conf     = avg_conf
+        result.mol_from_vote = True
+        result.hit_roi      = "mol"
+        raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
+        crop_dir = OUTPUT_DIR / "mol_crops"
+        crop_dir.mkdir(parents=True, exist_ok=True)
+        crop_path = crop_dir / f"{stem}.png"
+        crop_roi(raw_img, roi_coords).save(crop_path)
+        result.mol_crop = str(crop_path)
+        logger.info(
+            f"  ★ mol 多數票：{mol_vote}  avg_conf={avg_conf}"
+            f"  ({len(winning_confs)}/{len(mol_entries)} 票)"
+        )
+        return result
+
+    # ── 第二階段：first-hit（SCAN_CONFIGS → FALLBACK_CONFIGS）────────
+    mol_found = False
     for config_list in (SCAN_CONFIGS, FALLBACK_CONFIGS):
         if mol_found:
             break
@@ -591,11 +632,11 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes) -> Sc
             _, _, mol, mol_layer = find_permits(text)
             if not mol:
                 continue
-            result.mol = mol
+            result.mol       = mol
             result.mol_layer = mol_layer
-            result.mol_conf = conf
+            result.mol_conf  = conf
             result.hit_config = cfg["name"]
-            result.hit_roi = "mol"
+            result.hit_roi   = "mol"
             if raw_img is None:
                 raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
             crop_dir = OUTPUT_DIR / "mol_crops"
@@ -833,10 +874,22 @@ def aggregate_small_docx(results: list[ScanResult]) -> list[ScanResult]:
     winner  = max(hits, key=best_conf)
     w_value = winner.mol or winner.id
     w_conf  = best_conf(winner)
+
+    # 所有命中列共享同一個 docx 層級的最終值
     for r in hits:
-        r.final_value   = w_value
-        r.final_conf    = round(w_conf, 1) if w_conf else 0.0
-        r.vision_review = True
+        r.final_value = w_value
+        r.final_conf  = round(w_conf, 1) if w_conf else 0.0
+        if r is not winner:
+            r.mol_from_vote = False   # 只保留 winner 的投票旗標
+
+    # mol 多數票且平均信心高於門檻 → 直接 key-in，無須送 Vision
+    if winner.mol_from_vote and winner.mol_conf > CONF_MOL_VOTE_MIN:
+        logger.info(
+            f"  ✓ mol 多數票高信心（{winner.mol_conf} > {CONF_MOL_VOTE_MIN}）"
+            f"  → 直接 key-in：{w_value}"
+        )
+    else:
+        winner.vision_review = True   # Q2 修正：只送 winner 一張
     return hits
 
 
@@ -956,17 +1009,31 @@ def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
 
 
 def process_small_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
-    """small docx：全部無命中 → 人工審查；否則依 vision_review 送件。
+    """small docx：全部無命中 → 人工審查；否則依規則送件或直接 key-in。
 
-    過去用 "small:無命中" 字串比對識別「全無命中」；現改用 status 欄判斷。
+    決策優先順序：
+      1. 全 SMALL_NO_HIT → 回傳 []（人工審查）
+      2. mol 多數票且高信心（mol_from_vote=True, mol_conf > CONF_MOL_VOTE_MIN）
+         → direct_keyin=True，不送 Vision
+      3. vision_review=True → 送 Vision
     """
     all_no_match = all(r.status == ResultStatus.SMALL_NO_HIT for r in rows)
     if all_no_match:
-        return []  # 人工審查，不送 Vision
+        return []
 
     queue: list[VisionQueueItem] = []
     for r in rows:
-        if r.vision_review:
+        if r.mol_from_vote and r.mol_conf > CONF_MOL_VOTE_MIN and r.final_value:
+            queue.append(VisionQueueItem(
+                source_docx     = r.source_docx,
+                image_name      = r.image_name,
+                img_path        = _best_img_path(r),
+                candidate_value = r.final_value,
+                candidate_conf  = r.mol_conf,
+                reason          = f"mol多數票_高信心 avg_conf={r.mol_conf}",
+                direct_keyin    = True,
+            ))
+        elif r.vision_review:
             queue.append(VisionQueueItem(
                 source_docx     = r.source_docx,
                 image_name      = r.image_name,
