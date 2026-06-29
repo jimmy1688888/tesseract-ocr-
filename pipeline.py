@@ -681,6 +681,33 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
         field = roi_field(roi_name)
         if field in fields_found:
             continue
+
+        # ── mol ROI：先嘗試多數票（PERMIT_VOTE_CONFIGS 6組）────────────
+        if roi_name == "mol":
+            mol_entries = _collect_mol_votes(image_bytes)
+            mol_vote = _majority_vote([v for v, _ in mol_entries], min_count=2)
+            if mol_vote:
+                winning_confs = [c for v, c in mol_entries if v == mol_vote]
+                avg_conf = round(sum(winning_confs) / len(winning_confs), 1)
+                result.mol           = mol_vote
+                result.mol_conf      = avg_conf
+                result.mol_from_vote = True
+                result.hit_roi       = "mol"
+                if raw_img is None:
+                    raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
+                crop_dir = OUTPUT_DIR / "mol_crops"
+                crop_dir.mkdir(parents=True, exist_ok=True)
+                crop_path = crop_dir / f"{stem}.png"
+                crop_roi(raw_img, roi_coords).save(crop_path)
+                result.mol_crop = str(crop_path)
+                any_hit = True
+                fields_found.add(field)
+                logger.info(
+                    f"  ★ mol 多數票：{mol_vote}  avg_conf={avg_conf}"
+                    f"  ({len(winning_confs)}/{len(mol_entries)} 票)"
+                )
+                continue   # 跳過 mol ROI 的 first-hit
+
         roi_hit = False
         for config_list in (SCAN_CONFIGS, FALLBACK_CONFIGS):
             if roi_hit:
@@ -808,7 +835,8 @@ def decide_result(result: ScanResult) -> ScanResult:
     id_conf     = result.id_conf
     cross       = result.cross_match
     docx_class  = result.docx_class
-    id_from_vote = result.id_from_vote
+    id_from_vote  = result.id_from_vote
+    mol_from_vote = result.mol_from_vote
 
     final_value = ""
     final_conf  = 0.0
@@ -829,9 +857,11 @@ def decide_result(result: ScanResult) -> ScanResult:
             note = "mol≠permit，mol信心高，值衝突"
     elif mol:
         final_value, final_conf = mol, mol_conf
-        if docx_class == "large" and mol_conf <= CONF_KEY_IN:
-            vision_review = True
-            note = "僅mol，信心低"
+        if docx_class == "large":
+            mol_threshold = CONF_MOL_VOTE_MIN if mol_from_vote else CONF_KEY_IN
+            if mol_conf <= mol_threshold:
+                vision_review = True
+                note = "僅mol，多數票信心低" if mol_from_vote else "僅mol，信心低"
     elif id_:
         final_value, final_conf = id_, id_conf
         threshold = CONF_VOTE_MIN if id_from_vote else CONF_KEY_IN
