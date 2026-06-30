@@ -181,8 +181,8 @@ class VisionQueueItem:
 # ─── CSV 欄位順序（同時供寫入與讀取使用，避免兩端走樣） ───────────────────
 CSV_FIELDS = [
     "source_docx", "image_name", "docx_class",
-    "mol", "mol_layer", "mol_conf",
-    "id", "id_layer", "id_conf",
+    "mol", "mol_layer", "mol_conf", "mol_from_vote",
+    "id",  "id_layer",  "id_conf",  "id_from_vote",
     "cross_match", "final_value", "final_conf", "vision_review",
     "note", "manual_review", "low_conf", "hit_config", "hit_roi",
     "mol_crop", "permit_crop",
@@ -258,9 +258,11 @@ class ScanResult:
             "mol":           self.mol,
             "mol_layer":     str(self.mol_layer) if self.mol_layer else "",
             "mol_conf":      f"{self.mol_conf:.1f}" if self.mol_conf else "",
+            "mol_from_vote": "Y" if self.mol_from_vote else "",
             "id":            self.id,
             "id_layer":      str(self.id_layer) if self.id_layer else "",
             "id_conf":       f"{self.id_conf:.1f}" if self.id_conf else "",
+            "id_from_vote":  "Y" if self.id_from_vote else "",
             "cross_match":   "✓" if self.cross_match else "",
             "final_value":   self.final_value,
             "final_conf":    f"{self.final_conf:.1f}" if self.final_conf else "",
@@ -307,9 +309,11 @@ class ScanResult:
             mol           = row.get("mol", ""),
             mol_layer     = to_int(row.get("mol_layer", "")),
             mol_conf      = to_float(row.get("mol_conf", "")),
+            mol_from_vote = (row.get("mol_from_vote", "") == "Y"),
             id            = row.get("id", ""),
             id_layer      = to_int(row.get("id_layer", "")),
             id_conf       = to_float(row.get("id_conf", "")),
+            id_from_vote  = (row.get("id_from_vote", "") == "Y"),
             cross_match   = (row.get("cross_match", "") == "✓"),
             final_value   = row.get("final_value", ""),
             final_conf    = to_float(row.get("final_conf", "")),
@@ -1042,10 +1046,14 @@ def process_small_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
     """small docx：全部無命中 → 人工審查；否則依規則送件或直接 key-in。
 
     決策優先順序：
-      1. 全 SMALL_NO_HIT → 回傳 []（人工審查）
+      1. 全 SMALL_NO_HIT → 回傳 []（上游會歸到 manual_review）
       2. mol 多數票且高信心（mol_from_vote=True, mol_conf > CONF_MOL_VOTE_MIN）
          → direct_keyin=True，不送 Vision
       3. vision_review=True → 送 Vision
+      4. [C: defensive fallback] 有 final_value 但 (2)(3) 都沒觸發 → 強制送 Vision
+         並記 warning。正常流程不該走進這條;走進來代表上游某個旗標漏設,
+         避免該 docx 被靜默吃掉(這是過去 bug 的形態:scan 階段把 mol_from_vote
+         設好但忘記寫進 CSV,讀回後兩條件都失敗、row 直接消失)。
     """
     all_no_match = all(r.status == ResultStatus.SMALL_NO_HIT for r in rows)
     if all_no_match:
@@ -1073,6 +1081,35 @@ def process_small_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
                 reason          = r.note or "vision_review=True",
                 direct_keyin    = False,
             ))
+        # 其他 row(非 winner、無觸發旗標)刻意 skip:winner 已代表整個 docx。
+
+    # ── C: defensive fallback ──────────────────────────────────────────────
+    # queue 空但仍有 row 帶 final_value → 上游旗標漏設,撈一張當錨點送 Vision
+    # 避免該 docx 在 build_vision_queue 既不進 keyin、也不進 vision、也不進
+    # manual_review(status 不是 SMALL_NO_HIT) 而靜默消失。
+    if not queue and any(r.final_value for r in rows):
+        anchor = next(r for r in rows if r.final_value)
+        statuses = [r.status.value for r in rows]
+        logger.warning(
+            f"  ⚠ process_small_vs fallback:{anchor.source_docx} "
+            f"有 final_value={anchor.final_value!r} 但 mol_from_vote / vision_review "
+            f"兩條件皆未觸發(statuses={statuses})→ 強制送 Vision"
+        )
+        queue.append(VisionQueueItem(
+            source_docx     = anchor.source_docx,
+            image_name      = anchor.image_name,
+            img_path        = _best_img_path(anchor),
+            candidate_value = anchor.final_value,
+            candidate_conf  = anchor.final_conf,
+            reason          = (
+                f"[fallback] 有 final_value 但無觸發旗標 "
+                f"(mol_from_vote={anchor.mol_from_vote}, "
+                f"vision_review={anchor.vision_review}, "
+                f"mol_conf={anchor.mol_conf})"
+            ),
+            direct_keyin    = False,   # 狀態未知 → 保守走 Vision,不直接 key-in
+        ))
+
     return queue
 
 
