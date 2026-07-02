@@ -935,6 +935,37 @@ def _best_img_path(r: ScanResult) -> str:
     return r.permit_crop or r.mol_crop or ""
 
 
+def _describe_vision_reason(r: ScanResult) -> str:
+    """描述某列「為何」需送 Vision(vision_review=True),供 reason/rationale 使用。
+
+    有些階段(如 aggregate_small_docx)只設了 vision_review 旗標卻沒寫 note,
+    若直接把旗標名稱 "vision_review=True" 塞進 reason 欄,審查者看不出成因。
+    這裡優先沿用既有 note;note 為空時,依 ScanResult 現況還原
+    「哪個階段、為什麼」判定要送 Vision。
+    """
+    if r.note:
+        return r.note
+    conf = r.final_conf or max(r.mol_conf, r.id_conf)
+    # small docx:唯一自動 key-in 的路徑是「mol 多數票且高信心」,其餘 winner 都送 Vision
+    if r.docx_class == "small":
+        if r.mol_from_vote:
+            return (
+                f"small:mol多數票但平均信心{r.mol_conf}未達直接key-in門檻"
+                f"{CONF_MOL_VOTE_MIN},需人工確認"
+            )
+        return f"small:mol非多數票(單一判讀 conf={conf:.1f}),需人工複核"
+    # large docx(正常情況 decide_result 已寫 note,以下為 note 遺漏時的防禦性描述)
+    if r.cross_match:
+        return f"large:mol與permit交叉比對吻合但信心低(conf={conf:.1f} ≤ {CONF_KEY_IN}),需人工確認"
+    if r.mol and r.id:
+        return f"large:mol與permit均有值但信心偏低(conf={conf:.1f} ≤ {CONF_KEY_IN}),需人工確認"
+    if r.mol:
+        return f"large:僅mol有值且信心偏低(conf={conf:.1f} ≤ {CONF_KEY_IN}),需人工確認"
+    if r.id:
+        return f"large:僅permit有值且信心偏低(conf={conf:.1f} ≤ {CONF_KEY_IN}),需人工確認"
+    return f"OCR結果需人工確認(conf={conf:.1f})"
+
+
 def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
     """large docx：回傳要送 Vision 的 VisionQueueItem 清單（含 direct_keyin 旗標）。
 
@@ -1044,7 +1075,7 @@ def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
                 img_path        = _best_img_path(r),
                 candidate_value = r.final_value,
                 candidate_conf  = r.final_conf,
-                reason          = r.note or "vision_review=True",
+                reason          = _describe_vision_reason(r),
                 direct_keyin    = False,
             ))
 
@@ -1102,7 +1133,7 @@ def process_small_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
                 img_path        = _best_img_path(r),
                 candidate_value = r.final_value,
                 candidate_conf  = r.final_conf,
-                reason          = r.note or "vision_review=True",
+                reason          = _describe_vision_reason(r),
                 direct_keyin    = False,
             ))
         # 其他 row(非 winner、無觸發旗標)刻意 skip:winner 已代表整個 docx。
