@@ -167,7 +167,7 @@ class VisionQueueItem:
     direct_keyin=True 表示信心足夠，直接寫 Sheets；False 則送 Google Vision 再決定。
 
     candidate_conf:候選值對應的 Tesseract 信心分數。後續 verify_vision_result
-    在「差 1 字元(LIKELY_OCR_CONFUSION)」分支中,會用它決定要採 Tesseract 還是 Vision 值。
+    會帶進 rationale 供人工審查參考(差 1 字元時不再用它自動挑值)。
     """
     source_docx: str
     image_name: str
@@ -1418,32 +1418,20 @@ def verify_vision_result(
 
     distance = _edit_distance(vision_value, tesseract_candidate)
 
-    # 差 1 字元 → 高機率 OCR 視覺相近字混淆。
-    # Tesseract conf > 50 表示 Tesseract 自己的判讀並非低信心,
-    # 此情境採用 Tesseract 值作為候選(Vision 的「修正」反而可能是錯誤的修正);
-    # Tesseract conf <= 50 則 Tesseract 自己也不確定,以 Vision 為主。
-    # 不論採哪邊,仍需人工確認,因為兩引擎終究不一致。
+    # 差 1 字元 → 高機率 OCR 視覺相近字混淆(如 0/O、1/l、6/8)。
+    # 兩引擎僅差 1 字時無法可靠判斷誰對(Tesseract 高信心也可能讀錯,
+    # Vision 的「修正」也可能是錯誤的修正),因此不自動填入任何值,
+    # 一律標人工審查、由人工輸入;rationale 列出兩候選與 Tesseract 信心供參考。
     if distance == 1:
-        if tesseract_conf > 50:
-            final_value = tesseract_candidate
-            pick_note = (
-                f"Tesseract conf={tesseract_conf:.1f} > 50,"
-                f"優先採 Tesseract={tesseract_candidate!r}"
-            )
-        else:
-            final_value = vision_value
-            pick_note = (
-                f"Tesseract conf={tesseract_conf:.1f} ≤ 50,"
-                f"採 Vision={vision_value!r}"
-            )
         rationale = (
-            f"Tesseract={tesseract_candidate!r} vs Vision={vision_value!r} "
-            f"差 1 字元(疑似 OCR 視覺相近字混淆);{pick_note},需人工判斷"
+            f"Tesseract={tesseract_candidate!r}(conf={tesseract_conf:.1f}) vs "
+            f"Vision={vision_value!r} 差 1 字元(疑似 OCR 視覺相近字混淆);"
+            f"不自動填值,需人工輸入"
         )
         if in_known_list:
             rationale += ";Vision 候選在已知清單內"
         return VerifiedResult(
-            final_value=final_value,
+            final_value="",
             level=VerificationLevel.LIKELY_OCR_CONFUSION,
             should_keyin=False,
             rationale=rationale,
@@ -1758,8 +1746,8 @@ def main(opts: argparse.Namespace) -> None:
     # 即便 Vision 值在已知清單內,只要與 Tesseract 不完全一致,仍標為人工審查,
     # 避免任何單一 OCR 引擎的判讀直接決定資料寫入。
     #
-    # 額外規則(LIKELY_OCR_CONFUSION):兩引擎差 1 字元時,若 Tesseract conf > 50,
-    # 採用 Tesseract 值作為候選(因為 Vision 的「修正」可能是錯誤的修正)。
+    # 額外規則(LIKELY_OCR_CONFUSION):兩引擎差 1 字元時,不自動填任何值,
+    # 一律標人工審查、由人工輸入(兩候選與信心寫進 reason 供參考)。
     logger.info("── 步驟 4a：Google Vision 判讀 + 交叉比對 ──")
     known_permits = load_known_permits_from_log()
     logger.info(f"  載入已知清單(來自 upload_log.csv):{len(known_permits)} 筆")

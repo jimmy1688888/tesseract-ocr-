@@ -165,25 +165,20 @@ class TestLikelyOcrConfusion:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# LikelyOcrConfusion 子規則:Tesseract conf > 50 時優先採 Tesseract 值
+# LikelyOcrConfusion 子規則:差 1 字元一律不自動填值,交人工輸入
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestTesseractConfThresholdInConfusion:
-    """LIKELY_OCR_CONFUSION 分支的 final_value 選擇規則。
+class TestConfusionNoAutoPick:
+    """LIKELY_OCR_CONFUSION 分支不自動挑值。
 
-    設計動機:當 Tesseract conf > 50,代表 Tesseract 自己的判讀並非低信心。
-    這時 Vision 的「修正」反而可能是錯誤的修正(例如 Vision 把清晰的 6 誤判為 8)。
-    所以在差 1 字元的情境下:
-      - Tesseract conf >  50  → 採 Tesseract 值
-      - Tesseract conf <= 50  → 採 Vision 值
-    不論採哪邊,should_keyin 都是 False — 兩引擎不一致,終究要人工確認。
+    設計變更:過去會依 Tesseract conf 是否 > 50 決定採 Tesseract 或 Vision 值。
+    現行策略更保守 — 兩引擎差 1 字元時無法可靠判斷誰對(Tesseract 高信心也可能
+    讀錯,Vision 的「修正」也可能是錯的),因此不填入任何值(final_value=""),
+    一律標人工審查、由人工輸入。rationale 仍列出兩候選與 Tesseract 信心供參考。
     """
 
-    def test_high_tesseract_conf_uses_tesseract_value(self):
-        """Tesseract='3166'(conf=70) vs Vision='3186' → 採 Tesseract 值。
-
-        這是使用者明確要求的範例:差 1 字、Tesseract 信心高 → 信 Tesseract。
-        """
+    def test_high_tesseract_conf_no_autofill(self):
+        """Tesseract='3166'(conf=70) vs Vision='3186' → 不填值,交人工。"""
         v = verify_vision_result(
             vision_value="3186",
             tesseract_candidate="3166",
@@ -192,12 +187,15 @@ class TestTesseractConfThresholdInConfusion:
         )
         assert v.level == VerificationLevel.LIKELY_OCR_CONFUSION
         assert v.should_keyin is False               # 仍需人工
-        assert v.final_value == "3166"               # 但採 Tesseract 值
-        assert "優先採 Tesseract" in v.rationale
-        assert "conf=70.0" in v.rationale            # rationale 顯示信心數字
+        assert v.final_value == ""                   # 不自動填值
+        assert "不自動填值" in v.rationale
+        # rationale 列出兩候選與信心供審查者參考
+        assert "3166" in v.rationale
+        assert "3186" in v.rationale
+        assert "conf=70.0" in v.rationale
 
-    def test_low_tesseract_conf_uses_vision_value(self):
-        """Tesseract='3166'(conf=30) vs Vision='3186' → 採 Vision 值"""
+    def test_low_tesseract_conf_no_autofill(self):
+        """Tesseract='3166'(conf=30) vs Vision='3186' → 一樣不填值。"""
         v = verify_vision_result(
             vision_value="3186",
             tesseract_candidate="3166",
@@ -206,50 +204,25 @@ class TestTesseractConfThresholdInConfusion:
         )
         assert v.level == VerificationLevel.LIKELY_OCR_CONFUSION
         assert v.should_keyin is False
-        assert v.final_value == "3186"               # 改採 Vision 值
-        assert "採 Vision" in v.rationale
+        assert v.final_value == ""                   # 不自動填值
         assert "conf=30.0" in v.rationale
 
-    def test_conf_exactly_at_50_boundary_uses_vision(self):
-        """Tesseract conf 剛好等於 50 → 不滿足 > 50,採 Vision 值。
+    def test_conf_does_not_change_final_value(self):
+        """不論 Tesseract conf 高低,final_value 恆為空字串。"""
+        for conf in [0.0, 30.0, 50.0, 50.1, 70.0, 99.9]:
+            v = verify_vision_result(
+                vision_value="3186",
+                tesseract_candidate="3166",
+                known_permits=set(),
+                tesseract_conf=conf,
+            )
+            assert v.final_value == "", f"conf={conf} 不該自動填值"
 
-        鎖住邊界:條件是嚴格大於 50(>),不是大於等於(>=)。
-        若未來想放寬到 >= 50,改測試先,改 production code 後。
-        """
-        v = verify_vision_result(
-            vision_value="3186",
-            tesseract_candidate="3166",
-            known_permits=set(),
-            tesseract_conf=50.0,
-        )
-        assert v.final_value == "3186"               # 50.0 不 > 50,採 Vision
-
-    def test_conf_just_above_50_uses_tesseract(self):
-        """Tesseract conf=50.1 → 剛好 > 50,採 Tesseract"""
-        v = verify_vision_result(
-            vision_value="3186",
-            tesseract_candidate="3166",
-            known_permits=set(),
-            tesseract_conf=50.1,
-        )
-        assert v.final_value == "3166"
-
-    def test_default_conf_zero_uses_vision(self):
-        """未傳 tesseract_conf(預設 0.0) → 採 Vision 值(向後相容)"""
-        v = verify_vision_result(
-            vision_value="3186",
-            tesseract_candidate="3166",
-            known_permits=set(),
-            # 不傳 tesseract_conf
-        )
-        assert v.final_value == "3186"               # 預設 0.0 不 > 50
-
-    def test_conf_threshold_only_applies_to_likely_confusion(self):
-        """門檻只在 LIKELY_OCR_CONFUSION 生效,DISAGREEMENT(差 2 字以上)不適用。
+    def test_disagreement_still_uses_vision_value(self):
+        """對照組:差 2 字以上是 DISAGREEMENT,行為不變(仍採 Vision 值)。
 
         Tesseract='3166'(conf=80) vs Vision='9999' → DISAGREEMENT
-        DISAGREEMENT 一律採 Vision 值(避免「Tesseract 高信心讀錯」的情境),
-        高 conf 不會推翻這個決定。
+        DISAGREEMENT 一律採 Vision 值,高 conf 不會推翻這個決定。
         """
         v = verify_vision_result(
             vision_value="9999",
@@ -260,7 +233,7 @@ class TestTesseractConfThresholdInConfusion:
         assert v.level == VerificationLevel.DISAGREEMENT
         assert v.final_value == "9999"               # DISAGREEMENT 用 Vision
 
-    def test_conf_threshold_does_not_promote_to_keyin(self):
+    def test_conf_does_not_promote_to_keyin(self):
         """Tesseract conf 不論多高都不能把 LIKELY_OCR_CONFUSION 升級為自動 key-in。
 
         鎖住保守策略:兩引擎不一致 = 絕對不自動寫入,不論誰的信心高。
@@ -275,16 +248,15 @@ class TestTesseractConfThresholdInConfusion:
             assert v.should_keyin is False, f"conf={conf} 不該推升為 keyin"
 
     def test_in_known_list_still_appended_to_rationale(self):
-        """conf > 50 + 在已知清單 → rationale 同時包含兩種資訊"""
+        """在已知清單 → rationale 仍附註,但一樣不填值。"""
         v = verify_vision_result(
             vision_value="3186",
             tesseract_candidate="3166",
             known_permits={"3186"},
             tesseract_conf=70.0,
         )
-        assert v.final_value == "3166"               # 採 Tesseract
+        assert v.final_value == ""                   # 不自動填值
         assert v.in_known_list is True               # Vision 值 3186 在清單內
-        assert "優先採 Tesseract" in v.rationale
         assert "已知清單" in v.rationale
 
 
