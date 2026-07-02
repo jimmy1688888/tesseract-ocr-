@@ -997,6 +997,30 @@ def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
             ))
             return queue
 
+    # 規則A2：僅 permit（無 mol）且已有高信心多數票 → 直接 key-in。
+    #          此時同 docx 內其餘「部分命中無多數」的圖不需再送 Vision;
+    #          多張多數票取最早的圖（image 序號小者優先，如 image5 < image8）。
+    if not mol_rows:
+        vote_rows = [
+            r for r in rows
+            if r.id_from_vote and r.id and r.id_conf > CONF_VOTE_MIN
+        ]
+        if vote_rows:
+            best_row = min(vote_rows, key=lambda r: _image_sort_key(r.image_name))
+            queue.append(VisionQueueItem(
+                source_docx     = best_row.source_docx,
+                image_name      = best_row.image_name,
+                img_path        = _best_img_path(best_row),
+                candidate_value = best_row.id,
+                candidate_conf  = best_row.id_conf,
+                reason          = (
+                    f"permit多數票_高信心_最早圖({best_row.image_name})"
+                    f" conf={best_row.id_conf}"
+                ),
+                direct_keyin    = True,
+            ))
+            return queue
+
     # 規則B：permit 部分命中無多數（用 status 判斷，不再依賴 note 文字）
     partial_rows = [r for r in rows if r.status == ResultStatus.PERMIT_PARTIAL]
     for r in partial_rows:
