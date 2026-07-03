@@ -55,6 +55,9 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2 import service_account
 
+# 許可證 → 機構資料(名稱／地址／電話)查表(來源:data.gov.tw 6682 名冊)
+from permit_lookup import PermitLookup
+
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 logging.basicConfig(
@@ -63,6 +66,25 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+# 名冊查表器惰性單例:整個 pipeline 只載一次;載入失敗則降級為 None(機構欄留空,不中斷)。
+_PERMIT_LOOKUP: "PermitLookup | bool | None" = None
+
+
+def _permit_lookup() -> "PermitLookup | None":
+    global _PERMIT_LOOKUP
+    if _PERMIT_LOOKUP is None:
+        try:
+            _PERMIT_LOOKUP = PermitLookup()
+            logger.info(
+                f"  ✔ 載入仲介名冊:母公司 {len(_PERMIT_LOOKUP.main_index)} 筆"
+                f"／分支 {len(_PERMIT_LOOKUP.branch_index)} 筆"
+            )
+        except Exception as e:
+            logger.warning(f"  ⚠ 名冊載入失敗,機構名稱/地址/電話欄將留空:{e!r}")
+            _PERMIT_LOOKUP = False   # 降級標記,避免每列重試
+    return _PERMIT_LOOKUP or None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -77,8 +99,10 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
 # Google Sheets
 SPREADSHEET_ID = "1zL5sRhaJHHXd-FBcY7rEm28Sfhz48l32gBwn-ATHalM"
 SHEET_NAME     = "工作表1"                        # ← 改為實際工作表名稱
-# 每列寫入 4 欄：A=source_docx, B=final_value, C=status, D=note
-# 欄位順序由 keyin_to_sheets() 內 values 組裝決定；若需改順序在那裡調整
+# 每列寫入 7 欄：A=source_docx, B=final_value(許可證), C=status, D=reason,
+#              E=機構名稱, F=機構地址, G=電話（E~G 由 permit_lookup 查名冊補上）
+# 欄位順序由 _row_to_sheet_values() 組裝決定；若需改順序在那裡調整。
+# 注意：Sheet 標題列需自行補上 E/F/G 三欄標題（程式 append 不會寫標題列）。
 
 # Service Account 金鑰路徑（或設環境變數 GOOGLE_APPLICATION_CREDENTIALS）
 SERVICE_ACCOUNT_JSON = os.environ.get(
@@ -1564,17 +1588,33 @@ def _sheets_append_atomic(values: list[list[str]]) -> None:
 
 
 # 一筆要寫入 Sheets 的資料原型，可由 dict 或 VisionQueueItem 轉成。
+def _agency_cols(permit_value: str) -> list[str]:
+    """依許可證查名冊,回傳 [機構名稱, 機構地址, 電話];查無或無值 → 三個空字串。"""
+    pl = _permit_lookup()
+    info = pl.lookup(permit_value) if (pl and permit_value) else None
+    if not info:
+        return ["", "", ""]
+    return [info["機構名稱"], info["機構地址"], info["電話"]]
+
+
 def _row_to_sheet_values(r, status: SheetStatus) -> list[str]:
-    """把一筆紀錄轉成 Sheets 的一列；支援 dict（manual 用）與 VisionQueueItem。"""
+    """把一筆紀錄轉成 Sheets 的一列（7 欄，含機構名稱/地址/電話）。
+
+    支援 dict（manual 用）與 VisionQueueItem。E~G 欄由 B 欄的許可證值查名冊補上。
+    """
     if isinstance(r, VisionQueueItem):
-        return [r.source_docx, r.candidate_value, status.value, r.reason]
-    # dict 形式（main 內動態組裝的 vision_keyin / manual_rows）
-    return [
-        r.get("source_docx", ""),
-        r.get("final_value") or r.get("candidate_value", ""),
-        status.value,
-        r.get("reason") or r.get("note", ""),
-    ]
+        value = r.candidate_value
+        base = [r.source_docx, value, status.value, r.reason]
+    else:
+        # dict 形式（main 內動態組裝的 vision_keyin / manual_rows）
+        value = r.get("final_value") or r.get("candidate_value", "")
+        base = [
+            r.get("source_docx", ""),
+            value,
+            status.value,
+            r.get("reason") or r.get("note", ""),
+        ]
+    return base + _agency_cols(value)
 
 
 def write_sheets_batched(batches: list[tuple[list, SheetStatus]]) -> int:

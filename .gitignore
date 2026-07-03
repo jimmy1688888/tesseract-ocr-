@@ -19,6 +19,10 @@ output/
 *.pdf
 !sample/*.docx              # 若有放範例,可保留 sample 資料夾下的檔案
 
+# ── 仲介名冊資料檔（政府開放資料，2.2MB 且會隨時間變舊，手動下載更新）──────
+# 來源：data.gov.tw dataset 6682 的 JSON；下載後放到 data/agency_roster.json
+data/agency_roster.json
+
 # ── Python 快取與虛擬環境 ─────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
