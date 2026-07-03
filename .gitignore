@@ -29,6 +29,8 @@ __pycache__/
 *$py.class
 *.so
 .Python
+# VSCode Code Runner 暫存檔
+tempCodeRunnerFile.py
 
 # 虛擬環境
 .venv/
