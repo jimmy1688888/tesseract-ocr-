@@ -37,8 +37,7 @@
 
 ### 待決策（下次接手先選）
 
-- **A（建議）**：先加「去紅章前處理」（抽紅色通道讓印章變淡、黑字保留），重測救名稱/地址，再接 Sheets。
-- **B**：直接接 Sheets 補欄，名稱低信心時標人工複核，先上線再優化。
+- 請參考AllData.json，是否可以依照此JSON提出更好的與OCR出的英文地址對照出中文地址
 
 ### Sheets 欄位規劃（接在 G 之後）
 
@@ -48,4 +47,4 @@
 
 > 台灣移工 OCR 專案（repo 已 clone）。permit_lookup 許可證查表完成、Sheets A–G。
 > 現在繼續 `employer_extract.py`（Vision DOCUMENT_TEXT_DETECTION 擷取雇主名稱中/英、
-> 地址中/英、電話，規劃寫 Sheets H–L）。請幫我做選項 A（去紅章前處理）。
+> 地址中/英、電話，規劃寫 Sheets H–L）。請幫我確認目前employer_extract.PY 篩選地址的邏輯，並參考AllData.json，是否可以依照此JSON提出更好的與OCR出的英文地址對照出中文地址
