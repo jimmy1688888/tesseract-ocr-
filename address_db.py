@@ -106,8 +106,27 @@ def _match_area(L: str, areas: dict):
     return (hit[1], hit[2], hit[3], hit[4]) if hit else None
 
 
-# 段號只在數字後確實接『段』時才擷取,避免把「德南路201巷」的 201 誤當段號。
-_ROAD_RE = re.compile(r"([一-鿿A-Za-z]{1,8}?[路街道大道])(?:\s*(\d+)\s*段)?")
+# 段號只在數字(阿拉伯或中文一二三…)後確實接『段』時才擷取,
+# 避免把「德南路201巷」的 201 誤當段號。中文數字會轉成阿拉伯以對上官方庫。
+_ROAD_RE = re.compile(r"([一-鿿A-Za-z]{1,8}?[路街道大道])(?:\s*([0-9一二三四五六七八九十]+)\s*段)?")
+
+_CN_NUM = {c: i for i, c in enumerate("零一二三四五六七八九", 0)}
+
+
+def _seg_to_arabic(seg: str) -> str:
+    """段號轉阿拉伯:'二'→'2'、'十'→'10'、'十二'→'12'。純阿拉伯原樣回傳。"""
+    if seg is None:
+        return None
+    if seg.isdigit():
+        return seg
+    if seg == "十":
+        return "10"
+    if "十" in seg:                       # 十X / X十 / X十Y
+        a, _, b = seg.partition("十")
+        tens = _CN_NUM.get(a, 1) if a else 1
+        ones = _CN_NUM.get(b, 0) if b else 0
+        return str(tens * 10 + ones)
+    return str(_CN_NUM.get(seg, seg))
 
 
 def _match_road(L: str, roads: list, cutoff: float = 0.5):
@@ -117,7 +136,7 @@ def _match_road(L: str, roads: list, cutoff: float = 0.5):
     if not m:
         return None
     road_core = _norm(m.group(1))                 # 例:辛亥路
-    seg_num = m.group(2)                           # 例:7(可能為 None)
+    seg_num = _seg_to_arabic(m.group(2))           # 7 / 二→2 / 十二→12(可能為 None)
     # 1. 有段號 → 直接組出「辛亥路7段」做精確配,拿到正確段別英文
     if seg_num:
         want = f"{road_core}{seg_num}段"
@@ -205,7 +224,8 @@ def normalize_address(text: str, *, road_cutoff: float = 0.5) -> dict:
         en_parts = [p for p in (road_eng, area_eng, city_eng) if p]
         addr_en = ", ".join(en_parts)
         if detail:
-            num = re.match(r"(\d+(?:之\d+)?)", detail)
+            # 英文門牌號取「N號」的號碼(而非 N巷/N弄);無「號」才退回開頭數字。
+            num = re.search(r"(\d+(?:之\d+)?)號", detail) or re.match(r"(\d+(?:之\d+)?)", detail)
             if num and addr_en:
                 no = num.group(1).replace("之", "-")   # 1之9 → 1-9
                 addr_en = f"No. {no}, {addr_en}"
