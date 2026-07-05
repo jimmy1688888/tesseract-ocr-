@@ -99,10 +99,13 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
 # Google Sheets
 SPREADSHEET_ID = "1zL5sRhaJHHXd-FBcY7rEm28Sfhz48l32gBwn-ATHalM"
 SHEET_NAME     = "工作表1"                        # ← 改為實際工作表名稱
-# 每列寫入 7 欄：A=source_docx, B=final_value(許可證), C=status, D=reason,
-#              E=機構名稱, F=機構地址, G=電話（E~G 由 permit_lookup 查名冊補上）
+# 每列寫入 15 欄：A=source_docx, B=final_value(許可證), C=status, D=reason,
+#              E=機構名稱, F=機構地址, G=電話（E~G 由 permit_lookup 查名冊補上）,
+#              H=雇主名稱_中, I=雇主名稱_英, J=雇主地址_中(標準), K=雇主地址_中(OCR),
+#              L=雇主地址_英(標準), M=雇主地址_英(OCR), N=郵遞區號, O=雇主電話
+#              （H~O 由 employer_extract 產出；整合尚未接上，目前一律填空字串預留欄位）
 # 欄位順序由 _row_to_sheet_values() 組裝決定；若需改順序在那裡調整。
-# 注意：Sheet 標題列需自行補上 E/F/G 三欄標題（程式 append 不會寫標題列）。
+# 注意：Sheet 標題列需自行補上 E~O 各欄標題（程式 append 不會寫標題列）。
 
 # Service Account 金鑰路徑（或設環境變數 GOOGLE_APPLICATION_CREDENTIALS）
 SERVICE_ACCOUNT_JSON = os.environ.get(
@@ -1597,10 +1600,29 @@ def _agency_cols(permit_value: str) -> list[str]:
     return [info["機構名稱"], info["機構地址"], info["電話"]]
 
 
-def _row_to_sheet_values(r, status: SheetStatus) -> list[str]:
-    """把一筆紀錄轉成 Sheets 的一列（7 欄，含機構名稱/地址/電話）。
+# H~O 欄：雇主資料（employer_extract 產出）。目前尚未接進 pipeline，
+# 一律回傳 8 個空字串預留欄位；整合時把契約 OCR 的雇主欄位填進這裡即可，
+# 順序須對齊標題列註解 H=雇主名稱_中 … O=雇主電話。
+_EMPLOYER_COL_KEYS = (
+    "雇主名稱_中", "雇主名稱_英",
+    "地址_中_標準", "地址_中",        # J=標準, K=OCR原文
+    "地址_英_標準", "地址_英",        # L=標準, M=OCR原文
+    "郵遞區號", "電話",
+)
 
-    支援 dict（manual 用）與 VisionQueueItem。E~G 欄由 B 欄的許可證值查名冊補上。
+
+def _employer_cols(r) -> list[str]:
+    """依 _EMPLOYER_COL_KEYS 取雇主 8 欄。dict 有值就帶出，否則(含 VisionQueueItem)全空。"""
+    if isinstance(r, dict):
+        return [str(r.get(k, "") or "") for k in _EMPLOYER_COL_KEYS]
+    return ["", "", "", "", "", "", "", ""]
+
+
+def _row_to_sheet_values(r, status: SheetStatus) -> list[str]:
+    """把一筆紀錄轉成 Sheets 的一列（15 欄：A~D 識別/決策、E~G 機構、H~O 雇主）。
+
+    支援 dict（manual 用）與 VisionQueueItem。E~G 欄由 B 欄的許可證值查名冊補上；
+    H~O 為雇主欄位，整合前恆為空字串（見 _employer_cols）。
     """
     if isinstance(r, VisionQueueItem):
         value = r.candidate_value
@@ -1614,7 +1636,7 @@ def _row_to_sheet_values(r, status: SheetStatus) -> list[str]:
             status.value,
             r.get("reason") or r.get("note", ""),
         ]
-    return base + _agency_cols(value)
+    return base + _agency_cols(value) + _employer_cols(r)
 
 
 def write_sheets_batched(batches: list[tuple[list, SheetStatus]]) -> int:

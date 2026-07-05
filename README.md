@@ -35,6 +35,8 @@
 - 🔍 **ROI 掃描 + 多數票**：只掃 mol / permit 指定區域，多組設定投票取共識值
 - 🤝 **雙引擎交叉比對**：Tesseract 值與 Google Vision 值一致才自動 key-in；差 1 字元／不一致 → 人工審查
 - 🏢 **許可證查名冊**：以許可證號查勞動部名冊，自動補上機構**名稱／地址／電話**
+- 👤 **雇主資料擷取**：契約頁 OCR（Google Vision）取雇主**名稱／地址／電話**（雇主≠仲介，不在名冊）
+- 🏠 **地址標準化**：用官方全國門牌庫校正 OCR 地址，補上**官方中英譯名 + 郵遞區號**
 - 📊 **自動寫入 Google Sheets**：分 `keyed-in` 與 `manual_review` 兩種狀態，理由寫在備註欄
 - 🧾 **matches.csv**：Tesseract 掃描結果留存本地，可重跑後段而不必重掃
 
@@ -149,20 +151,29 @@ python pipeline.py --roi mol              # 只掃某個 ROI（mol / permit_uppe
 
 ## 輸出欄位
 
-寫入 Google Sheets 每列 **7 欄**：
+寫入 Google Sheets 每列 **15 欄**：
 
-| 欄 | 內容 |
-|---|---|
-| A | 來源 docx |
-| B | 許可證 / final_value |
-| C | status（`keyed-in` 或 `manual_review`）|
-| D | reason（歸因說明：多數票、雙引擎一致、部分命中…）|
-| E | 機構名稱 |
-| F | 機構地址 |
-| G | 電話 |
+| 欄 | 內容 | 來源 |
+|---|---|---|
+| A | 來源 docx | |
+| B | 許可證 / final_value | OCR 投票 |
+| C | status（`keyed-in` 或 `manual_review`）| 決策 |
+| D | reason（歸因說明：多數票、雙引擎一致、部分命中…）| 決策 |
+| E | 機構名稱 | 許可證查名冊 |
+| F | 機構地址 | 許可證查名冊 |
+| G | 電話（仲介機構）| 許可證查名冊 |
+| H | 雇主名稱_中 | 契約 OCR |
+| I | 雇主名稱_英 | 契約 OCR |
+| J | 雇主地址_中(標準) | 官方地址庫校正 |
+| K | 雇主地址_中(OCR) | 契約 OCR 原文 |
+| L | 雇主地址_英(標準) | 官方地址庫校正 |
+| M | 雇主地址_英(OCR) | 契約 OCR 原文 |
+| N | 郵遞區號 | 官方地址庫 |
+| O | 雇主電話 | 契約 OCR |
 
-E/F/G 由 B 欄許可證查名冊補上；查無或無值則留空。
-**Sheet 標題列需自行補上 E/F/G 三欄標題**（程式為 append，不會寫標題列）。
+- E/F/G 由 B 欄許可證查名冊補上（**仲介機構**，非雇主）；查無或無值則留空。
+- H~O 為**雇主**資料（契約甲方）。⚠️ **目前 `employer_extract` 尚未接進 pipeline，H~O 一律填空字串預留欄位**；整合完成後才會有值（見 `NOTES.md`「整合三步」）。標準地址（J/L）未命中官方庫時留空，以 OCR 原文（K/M）為準。
+- **Sheet 標題列需自行補上 E~O 各欄標題**（程式為 append，不會寫標題列）。
 
 ---
 
@@ -213,9 +224,12 @@ SMALL_DOCX_THRESHOLD = 3 # 圖片數 ≤ 此值 → small
 ```
 pipeline.py            # 主程式（prefilter→scan→vision_submit→Sheets）
 permit_lookup.py       # 許可證 → 機構名稱/地址/電話 查表
+employer_extract.py    # 契約 OCR → 雇主名稱/地址/電話（Google Vision）
+address_db.py          # 地址標準化：用官方地址庫校正 OCR 地址、補中英譯名+郵遞區號
 test_*.py, conftest.py # pytest 測試（decide / verify / aggregate / helpers）
 docs/                  # 輸入 .docx（不進版控）
 data/agency_roster.json# 仲介名冊（自行下載，不進版控）
+data/AllData.json      # 全國門牌地址庫（自行下載/複製，不進版控）
 scan_results/          # matches.csv 與裁切圖（不進版控）
 service_account.json   # Google 金鑰（不進版控）
 ```
