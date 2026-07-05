@@ -23,6 +23,10 @@ output/
 # 來源：data.gov.tw dataset 6682 的 JSON；下載後放到 data/agency_roster.json
 data/agency_roster.json
 
+# ── 全國門牌地址資料檔（政府開放資料，2.4MB，供 address_db.py 地址標準化）────
+# 來源：data.gov.tw 縣市→行政區→路街 中英對照 JSON；下載後放到 data/AllData.json
+data/AllData.json
+
 # ── 真實契約樣本 / 資料壓縮檔（含個資，絕不上版控）────────────────────────
 samples/
 *.7z

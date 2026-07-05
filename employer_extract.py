@@ -214,13 +214,46 @@ def extract_employer_fields(text: str) -> dict:
                 if cand and _has_cjk(cand):
                     name_cn = cand
 
-    return {
+    fields = {
         "雇主名稱_中": name_cn,
         "雇主名稱_英": name_en,
         "地址_中": addr_cn,
         "地址_英": addr_en,
         "電話": phone,
     }
+    _standardize_address(fields, addr_cn or "")
+    return fields
+
+
+def _standardize_address(fields: dict, raw_cn: str) -> None:
+    """用官方地址庫(address_db)校正地址,非破壞式補上標準欄位。
+
+    - 新增:地址_中_標準、地址_英_標準、郵遞區號、地址_比對(是否命中)。
+    - 回填:原 OCR 地址_英 為空時,以官方英文譯名補上。
+    - 保守:縣市+行政區都命中才回填標準中文;僅命中縣市時只補郵遞/英文,
+      不覆寫地址_中,避免把「有 OCR 原文」誤換成「資訊較少的標準串」。
+    庫或資料缺失時安靜跳過(try/except),絕不影響既有流程。
+    """
+    fields.setdefault("地址_中_標準", "")
+    fields.setdefault("地址_英_標準", "")
+    fields.setdefault("郵遞區號", "")
+    fields.setdefault("地址_比對", False)
+    if not raw_cn.strip():
+        return
+    try:
+        from address_db import normalize_address
+        r = normalize_address(raw_cn)
+    except Exception:
+        return
+    if not r.get("matched"):
+        return
+    fields["地址_比對"] = True
+    fields["郵遞區號"] = r["zip"]
+    fields["地址_英_標準"] = r["address_en"]
+    if r["district"] and r["road"]:        # 縣市+區+路都命中才給標準中文地址;
+        fields["地址_中_標準"] = r["address_cn"]  # 無路名的鄉村地址易失真,留空以 OCR 原文為準
+    if not fields["地址_英"] and r["address_en"]:   # 原英文空 → 用官方英文回填
+        fields["地址_英"] = r["address_en"]
 
 
 def vision_full_text(image_bytes: bytes, client=None) -> str:
@@ -333,8 +366,9 @@ if __name__ == "__main__":
         # docx:自動找契約頁 → ROI → 去紅章 → Vision
         res = extract_employer_from_docx(args.path, deink=True, roi=roi)
         print(f"採用契約頁:{res.get('_image') or '(無)'}  {res.get('_note','')}")
-        for k in ("雇主名稱_中", "雇主名稱_英", "地址_中", "地址_英", "電話"):
-            print(f"  {k}: {res[k]!r}")
+        for k in ("雇主名稱_中", "雇主名稱_英", "地址_中", "地址_英", "電話",
+                  "地址_中_標準", "地址_英_標準", "郵遞區號"):
+            print(f"  {k}: {res.get(k)!r}")
     elif args.no_ab:
         print(extract_employer(args.path, deink=True, roi=roi))
     else:
