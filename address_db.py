@@ -223,12 +223,16 @@ def normalize_address(text: str, *, road_cutoff: float = 0.5) -> dict:
         addr_cn = f"{city_raw}{area_raw}{road_raw}{detail}"
         en_parts = [p for p in (road_eng, area_eng, city_eng) if p]
         addr_en = ", ".join(en_parts)
-        if detail:
+        if detail and addr_en:
             # 英文門牌號取「N號」的號碼(而非 N巷/N弄);無「號」才退回開頭數字。
             num = re.search(r"(\d+(?:之\d+)?)號", detail) or re.match(r"(\d+(?:之\d+)?)", detail)
-            if num and addr_en:
+            if num:
                 no = num.group(1).replace("之", "-")   # 1之9 → 1-9
                 addr_en = f"No. {no}, {addr_en}"
+            # 樓層:台灣官方英文置於最前,如「3F., No. 15, ...」。
+            flr = re.search(r"(\d+)樓", detail)
+            if flr:
+                addr_en = f"{flr.group(1)}F., {addr_en}"
 
         cand = {
             "matched": True, "city": city_raw, "city_en": city_eng,
