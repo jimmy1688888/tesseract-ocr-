@@ -1817,11 +1817,11 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
                         f"  final={result.final_value!r}"
                         f"  vision={result.vision_review!r}"
                     )
-                # mol ROI 全無命中：存該檔第二張圖(image2)供人工比對
+                # mol ROI 全無命中：存該檔 image2、image3 供人工比對
                 if all(r.status == ResultStatus.SMALL_NO_HIT for r in to_write):
-                    saved = _save_review_images(docx_path, images, {2})
+                    saved = _save_review_images(docx_path, images, {2, 3})
                     logger.info(
-                        f"  ⚠ {docx_path.name} small全無命中 → 存第二張圖供比對 {saved}"
+                        f"  ⚠ {docx_path.name} small全無命中 → 存 image2/3 供比對 {saved}"
                     )
 
     elapsed = round(time.time() - t0, 1)
