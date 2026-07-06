@@ -1704,6 +1704,28 @@ def keyin_to_sheets(rows: list, status: str = "keyed-in"):
 # ⑩ 主流程
 # ═══════════════════════════════════════════════════════════════════════════
 
+# 全無命中的 docx：保留關鍵頁原圖供人工比對的資料夾
+NO_HIT_REVIEW_DIR = OUTPUT_DIR / "no_hit_review"
+
+
+def _save_review_images(docx_path: Path, images: list[tuple[str, bytes]],
+                        wanted: set[int]) -> list[str]:
+    """把指定編號（依檔名 imageN 的 N）的原圖存到人工比對資料夾，回傳已存檔名。
+
+    用於「全無命中」的 docx：留下關鍵頁原圖，人工可直接開來對照缺漏原因。
+    存整張原圖（非 ROI 裁切）；找不到對應編號者略過。
+    """
+    NO_HIT_REVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    saved: list[str] = []
+    for name, data in images:
+        m = re.search(r"(\d+)", name)
+        if m and int(m.group(1)) in wanted:
+            dst = NO_HIT_REVIEW_DIR / f"{docx_path.stem}_{name}"
+            dst.write_bytes(data)
+            saved.append(dst.name)
+    return saved
+
+
 def run_scan(docx_files: list[Path], image_filter: str = "",
              roi_filter: str = "") -> Path:
     """執行 Tesseract 掃描，輸出 matches.csv，回傳 csv 路徑。
@@ -1768,7 +1790,7 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
                     else:
                         logger.debug(f"  {docx_path.name} / {img_name}  未命中")
 
-            # large 全無命中：寫一列佔位記錄,供後續人工審查
+            # large 全無命中：寫一列佔位記錄,供後續人工審查，並存 image2/5/6 原圖
             if docx_class == "large" and large_hit_count == 0:
                 first_img_name = images[0][0] if images else ""
                 fallback = _empty_result(docx_path.name, first_img_name, "large")
@@ -1776,7 +1798,11 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
                 fallback.manual_review = "Y"
                 fallback.status        = ResultStatus.LARGE_NO_HIT
                 writer.writerow(fallback.to_csv_row())
-                logger.info(f"  ⚠ {docx_path.name} large全無命中 → 標記人工審查")
+                saved = _save_review_images(docx_path, images, {2, 5, 6})
+                logger.info(
+                    f"  ⚠ {docx_path.name} large全無命中 → 標記人工審查"
+                    f"，存原圖供比對 {saved}"
+                )
 
             if docx_class == "small" and small_bucket:
                 to_write = aggregate_small_docx(small_bucket)
@@ -1790,6 +1816,12 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
                         f"  mol={result.mol!r}"
                         f"  final={result.final_value!r}"
                         f"  vision={result.vision_review!r}"
+                    )
+                # mol ROI 全無命中：存該檔第二張圖(image2)供人工比對
+                if all(r.status == ResultStatus.SMALL_NO_HIT for r in to_write):
+                    saved = _save_review_images(docx_path, images, {2})
+                    logger.info(
+                        f"  ⚠ {docx_path.name} small全無命中 → 存第二張圖供比對 {saved}"
                     )
 
     elapsed = round(time.time() - t0, 1)
