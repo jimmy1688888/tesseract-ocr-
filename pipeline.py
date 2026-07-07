@@ -103,7 +103,7 @@ SHEET_NAME     = "工作表1"                        # ← 改為實際工作表
 #              E=機構名稱, F=機構地址, G=電話（E~G 由 permit_lookup 查名冊補上）,
 #              H=雇主名稱_中, I=雇主名稱_英, J=雇主地址_中(標準), K=雇主地址_中(OCR),
 #              L=雇主地址_英(標準), M=雇主地址_英(OCR), N=郵遞區號, O=雇主電話
-#              （H~O 由 employer_extract 產出；整合尚未接上，目前一律填空字串預留欄位）
+#              （H~O 由 employer_extract 於寫入前逐 docx 擷取；契約頁 OCR 失敗該列留空）
 # 欄位順序由 _row_to_sheet_values() 組裝決定；若需改順序在那裡調整。
 # 注意：Sheet 標題列需自行補上 E~O 各欄標題（程式 append 不會寫標題列）。
 
@@ -1600,9 +1600,10 @@ def _agency_cols(permit_value: str) -> list[str]:
     return [info["機構名稱"], info["機構地址"], info["電話"]]
 
 
-# H~O 欄：雇主資料（employer_extract 產出）。目前尚未接進 pipeline，
-# 一律回傳 8 個空字串預留欄位；整合時把契約 OCR 的雇主欄位填進這裡即可，
-# 順序須對齊標題列註解 H=雇主名稱_中 … O=雇主電話。
+# H~O 欄：雇主資料（employer_extract 產出）。寫入 Sheets 前先對每份 docx 跑一次
+# collect_employer_fields()（契約頁偵測 → ROI → 去紅章 → Vision），結果存進
+# _EMPLOYER_FIELDS_BY_DOCX；組列時依 source_docx 查表填入，
+# 順序對齊標題列註解 H=雇主名稱_中 … O=雇主電話。擷取失敗該 docx 的 H~O 留空。
 _EMPLOYER_COL_KEYS = (
     "雇主名稱_中", "雇主名稱_英",
     "地址_中_標準", "地址_中",        # J=標準, K=OCR原文
@@ -1610,19 +1611,67 @@ _EMPLOYER_COL_KEYS = (
     "郵遞區號", "電話",
 )
 
+_EMPLOYER_FIELDS_BY_DOCX: dict[str, dict] = {}
+
+# 雇主 ROI 截圖(去紅章前的契約頁裁切)存放處,供人工複查 H~O 欄位值
+EMPLOYER_CROP_DIR = OUTPUT_DIR / "employer_crops"
+
+
+def collect_employer_fields(docx_files) -> None:
+    """對每份 docx 擷取雇主欄位進查表快取（每份一次 Vision 呼叫）。
+
+    契約頁偵測用本機 Tesseract 特徵字計分,只有選中的那一頁送 Vision。
+    送 Vision 的 ROI 裁切圖(去紅章前原貌)同步存到 EMPLOYER_CROP_DIR,
+    檔名 {docx主檔名}_{圖檔名},供人工複查。
+    任何單檔失敗只記 warning、該檔 H~O 留空,絕不中斷主流程;
+    employer_extract 或其相依(address_db/AllData.json)缺失時整段安靜跳過。
+    """
+    try:
+        from employer_extract import extract_employer_from_docx
+    except Exception as e:
+        logger.warning(f"  ⚠ employer_extract 載入失敗,雇主欄(H~O)本次全部留空:{e!r}")
+        return
+    client = get_vision_client()
+    for dp in docx_files:
+        name = Path(dp).name
+        try:
+            fields = extract_employer_from_docx(
+                str(dp), client=client, crop_dir=str(EMPLOYER_CROP_DIR))
+        except Exception as e:
+            logger.warning(f"  ⚠ {name}: 雇主擷取失敗({e!r}),該列 H~O 留空")
+            continue
+        _EMPLOYER_FIELDS_BY_DOCX[name] = fields
+        if fields.get("_note"):
+            logger.info(f"  {name}: {fields['_note']} → H~O 留空")
+        else:
+            logger.info(
+                f"  {name}: 雇主={fields.get('雇主名稱_中', '')!r}"
+                f" 電話={fields.get('電話', '')!r}"
+                f" 郵遞={fields.get('郵遞區號', '')!r}"
+                f"（契約頁 {fields.get('_image', '')} → 截圖 {fields.get('_crop', '')}）"
+            )
+
 
 def _employer_cols(r) -> list[str]:
-    """依 _EMPLOYER_COL_KEYS 取雇主 8 欄。dict 有值就帶出，否則(含 VisionQueueItem)全空。"""
+    """依 _EMPLOYER_COL_KEYS 取雇主 8 欄:row 自帶的 key 優先,否則查 docx 快取。"""
     if isinstance(r, dict):
-        return [str(r.get(k, "") or "") for k in _EMPLOYER_COL_KEYS]
-    return ["", "", "", "", "", "", "", ""]
+        docx = r.get("source_docx", "")
+    else:
+        docx = getattr(r, "source_docx", "")
+    cached = _EMPLOYER_FIELDS_BY_DOCX.get(docx, {})
+    out = []
+    for k in _EMPLOYER_COL_KEYS:
+        own = r.get(k, "") if isinstance(r, dict) else ""
+        out.append(str(own or cached.get(k, "") or ""))
+    return out
 
 
 def _row_to_sheet_values(r, status: SheetStatus) -> list[str]:
     """把一筆紀錄轉成 Sheets 的一列（15 欄：A~D 識別/決策、E~G 機構、H~O 雇主）。
 
     支援 dict（manual 用）與 VisionQueueItem。E~G 欄由 B 欄的許可證值查名冊補上；
-    H~O 為雇主欄位，整合前恆為空字串（見 _employer_cols）。
+    H~O 為雇主欄位，依 source_docx 查 collect_employer_fields() 建好的快取
+    （見 _employer_cols），未擷取或失敗則留空。
     """
     if isinstance(r, VisionQueueItem):
         value = r.candidate_value
@@ -1914,6 +1963,13 @@ def main(opts: argparse.Namespace) -> None:
     # 設計動機:自動 vs 人工的二分讓使用者只需依 status 篩選即可知道「哪些要看」。
     # 每列來源(Tesseract 直接 / Vision 確認 / 差 1 字元 / 僅 Vision / 無命中)
     # 都寫進 reason 欄,審查時看 reason 就知道 context。
+    # ── 步驟 4b 前置：雇主資料擷取（H~O 欄）───────────────────────────────
+    # 每份 docx 一次 Vision 呼叫(契約頁偵測是本機 Tesseract,不花 API)。
+    # 這裡對「本次要寫入的所有 docx」都擷取,含 manual_review 列——
+    # 許可證待人工複核不代表雇主資料無效,先填好可省一次人工查找。
+    logger.info("── 步驟 4b 前置：雇主資料擷取（契約頁 OCR → H~O 欄）──")
+    collect_employer_fields(docx_files)
+
     logger.info("── 步驟 4b：合併批次寫入 Google Sheets（atomic）──")
     auto_keyin_batch = keyin_items + vision_auto_keyin   # VisionQueueItem + dict 混合,_row_to_sheet_values 兼容
     review_batch = vision_review_rows + [

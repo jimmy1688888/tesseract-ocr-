@@ -50,23 +50,30 @@
 - 已處理的坑：臺↔台 異體字、縣市/行政區同名衝突、段號(N段/中文數字二段)、英文門牌取「號」碼、樓層英譯置前(3F.)。中文標準地址依官方庫輸出（保留正體「臺」，不轉台，此為使用者拍板）。
 - Vision 版路名命中率約 6/7（~86%）。
 
-## 進行中：把雇主欄位接進 Google Sheets（**下次主要工作**）
+## 已完成：雇主欄位接進 Google Sheets（H~O 整合）
 
-Sheets 已由 7 欄擴為 **15 欄**，但 **H~O 目前只是預留、恆為空字串** —— `employer_extract` 尚未接進 `pipeline.py`（pipeline 內沒有 import 它）。
+Sheets 每列 **15 欄**，H~O 由 `pipeline.py` 於寫入前自動填入：
 
-- **已完成的部分**：`pipeline.py` 的 `_row_to_sheet_values` 尾端已 `+ _employer_cols(r)`，並定義 `_EMPLOYER_COL_KEYS` 常數作為**唯一填值點**。欄位規劃（標準／OCR 各佔一欄、中英分開）：
+- 欄位（標準／OCR 各佔一欄、中英分開）：
   - A–G（同前）｜H=雇主名稱_中 I=雇主名稱_英
   - J=雇主地址_中(標準) K=雇主地址_中(OCR) L=雇主地址_英(標準) M=雇主地址_英(OCR)
   - N=郵遞區號 O=雇主電話
-- **下次要做的整合三步**：
-  1. 在 pipeline 對每份 docx 的契約頁跑一次 `employer_extract.extract_employer_fields()`（多一次 Vision，注意成本/流程順序）；
-  2. 把回傳的雇主欄位（key 已對齊 `_EMPLOYER_COL_KEYS`）掛到該 docx 的 row dict 上；
-  3. row 帶了這些 key，`_employer_cols` 就會自動填入，**不必再改組列邏輯**。
+- 實作方式（`pipeline.py`）：
+  - `collect_employer_fields(docx_files)`：主流程步驟 4b 前對每份 docx 跑一次
+    `employer_extract.extract_employer_from_docx()`（契約頁偵測=本機 Tesseract、
+    只有選中那頁送 Vision，**每 docx 一次 Vision 呼叫**），結果存
+    `_EMPLOYER_FIELDS_BY_DOCX` 快取。manual_review 列也擷取（許可證待複核≠雇主資料無效）。
+  - `_employer_cols(r)`：組列時依 `source_docx` 查快取；row dict 自帶同名 key 優先。
+    擷取失敗/找不到契約頁 → 該列 H~O 留空，絕不中斷主流程。
 - **提醒**：Sheet 標題列要手動補上 **E~O**（程式 append 不寫標題列）。
+- 樓層「之N」英譯已支援：`2樓之1` → `2F.-1`（address_db）。
+- **雇主 ROI 截圖**：每份 docx 送 Vision 的契約頁裁切（去紅章**前**原貌）自動存到
+  `scan_results/employer_crops/{docx主檔名}_{圖檔名}`，人工複查 H~O 時直接開圖對照。
 
 ### 一句話喚醒新 session
 
 > 台灣移工 OCR 專案（repo 已 clone，data/AllData.json 已備妥）。permit_lookup 許可證查表、
-> employer_extract 雇主擷取、address_db 地址標準化都已完成；pipeline 的 Sheets 也已預留 H~O 15 欄。
-> 現在要做**最後整合**：把 `employer_extract.extract_employer_fields()` 接進 `pipeline.py`，
-> 讓雇主欄位（key 對齊 `_EMPLOYER_COL_KEYS`）流入 row dict、自動填滿 H~O（見 NOTES「整合三步」）。
+> employer_extract 雇主擷取、address_db 地址標準化、pipeline H~O 整合**全部完成**
+> （含雇主 ROI 截圖存 scan_results/employer_crops 供人工複查），
+> `python pipeline.py` 即可端到端跑 docs/ → Sheets 15 欄。
+> 下一步候選：對 docs/ 新批（32088 起）全跑驗證 H~O 實際寫入品質。

@@ -298,28 +298,42 @@ def _docx_images(docx_path: str) -> list[tuple[str, bytes]]:
 
 
 def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
-                               roi: tuple | None = EMPLOYER_ROI) -> dict:
+                               roi: tuple | None = EMPLOYER_ROI,
+                               crop_dir: str = "") -> dict:
     """端到端:從 docx 找出契約頁 → ROI 裁切 → 去紅章 → Vision → 擷取雇主欄位。
+
+    crop_dir:非空時,把「去紅章前」的 ROI 裁切圖存到該資料夾
+      ({docx主檔名}_{圖檔名}),保留紅章原貌供人工複查 H~O 欄位值。
 
     回傳除五個雇主欄位外,另含:
       _image:實際採用的圖檔名(找不到契約頁則為空)
       _note :流程備註(例如「找不到契約頁」)
+      _crop :已存檔的 ROI 截圖檔名(未存檔則為空)
     """
+    from pathlib import Path
+
     empty = {"雇主名稱_中": "", "雇主名稱_英": "", "地址_中": "",
              "地址_英": "", "電話": ""}
     images = _docx_images(docx_path)
     page = find_contract_image(images)
     if not page:
-        return {**empty, "_image": "", "_note": "找不到契約頁(特徵字命中不足)"}
+        return {**empty, "_image": "", "_note": "找不到契約頁(特徵字命中不足)",
+                "_crop": ""}
 
     name, raw = page
     content = raw
     if roi:
         content = crop_fraction(content, roi)
+    crop_name = ""
+    if crop_dir:
+        d = Path(crop_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        crop_name = f"{Path(docx_path).stem}_{name}"
+        (d / crop_name).write_bytes(content)
     if deink:
         content = deink_red_stamp(content)
     fields = extract_employer_fields(vision_full_text(content, client=client))
-    return {**fields, "_image": name, "_note": ""}
+    return {**fields, "_image": name, "_note": "", "_crop": crop_name}
 
 
 # ═══════════════════════════════════════════════════════════════════════════

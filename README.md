@@ -180,7 +180,7 @@ python pipeline.py --roi mol              # 只掃某個 ROI（mol / permit_uppe
 | O | 雇主電話 | 契約 OCR |
 
 - E/F/G 由 B 欄許可證查名冊補上（**仲介機構**，非雇主）；查無或無值則留空。
-- H~O 為**雇主**資料（契約甲方）。⚠️ **目前 `employer_extract` 尚未接進 pipeline，H~O 一律填空字串預留欄位**；整合完成後才會有值（見 `NOTES.md`「整合三步」）。標準地址（J/L）未命中官方庫時留空，以 OCR 原文（K/M）為準。
+- H~O 為**雇主**資料（契約甲方）：寫入前對每份 docx 的契約頁跑一次 Vision OCR 自動填入；擷取失敗或找不到契約頁時該列留空。標準地址（J/L）未命中官方庫時留空，以 OCR 原文（K/M）為準。
 - **Sheet 標題列需自行補上 E~O 各欄標題**（程式為 append，不會寫標題列）。
 
 ---
@@ -200,9 +200,11 @@ vision_submit 分流
     └─ 人工審查（全無命中）
     │ ③ Vision 判讀 + 三層交叉比對（雙引擎一致才自動 key-in）
     ▼
-④ 許可證查名冊 → 補機構名稱/地址/電話
+④ 許可證查名冊 → 補機構名稱/地址/電話（E~G）
     ▼
-⑤ 批次 atomic 寫入 Google Sheets（keyed-in / manual_review）
+⑤ 契約頁 OCR（employer_extract + address_db）→ 雇主名稱/地址/電話 + 官方譯名/郵遞區號（H~O）
+    ▼
+⑥ 批次 atomic 寫入 Google Sheets（keyed-in / manual_review）
 ```
 
 ---

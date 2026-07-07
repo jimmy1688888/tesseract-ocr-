@@ -229,10 +229,12 @@ def normalize_address(text: str, *, road_cutoff: float = 0.5) -> dict:
             if num:
                 no = num.group(1).replace("之", "-")   # 1之9 → 1-9
                 addr_en = f"No. {no}, {addr_en}"
-            # 樓層:台灣官方英文置於最前,如「3F., No. 15, ...」。
-            flr = re.search(r"(\d+)樓", detail)
+            # 樓層:台灣官方英文置於最前,如「3F., No. 15, ...」;
+            # 樓後的「之N」(增建戶)併入樓層,如「2樓之1」→「2F.-1」。
+            flr = re.search(r"(\d+)樓(?:之(\d+))?", detail)
             if flr:
-                addr_en = f"{flr.group(1)}F., {addr_en}"
+                f_en = f"{flr.group(1)}F." + (f"-{flr.group(2)}" if flr.group(2) else "")
+                addr_en = f"{f_en}, {addr_en}"
 
         cand = {
             "matched": True, "city": city_raw, "city_en": city_eng,
