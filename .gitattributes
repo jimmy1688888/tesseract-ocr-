@@ -1,0 +1,3 @@
+# .bat 由 cmd 解析,必須維持 CRLF 換行(LF 會使 goto/標籤掃描錯亂)
+# 另注意:.bat 內容為 Big5(CP950)編碼,勿用 UTF-8 編輯器另存
+*.bat text eol=crlf

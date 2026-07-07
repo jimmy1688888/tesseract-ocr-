@@ -145,6 +145,16 @@ python pipeline.py --file x.docx --image image2.jpeg   # 指定單張圖
 python pipeline.py --roi mol              # 只掃某個 ROI（mol / permit_upper …）
 ```
 
+### 不熟終端機？雙擊批次檔即可
+
+| 檔案 | 時機 | 動作 |
+|---|---|---|
+| `安裝.bat` | 首次安裝 | 檢查 Python / Tesseract / 語言包 → 裝套件 → 檢查本機檔是否齊全 |
+| `執行.bat` | 日常使用 | 把 .docx 丟進 `docs\` 後雙擊，跑完視窗停留可看結果 |
+| `更新.bat` | 取得新版 | `git pull` + 同步套件（專案需以 `git clone` 取得，ZIP 解壓版無法一鍵更新） |
+
+> 三個 .bat 為 **Big5 編碼 + CRLF 換行**（cmd 原生格式），請勿用 UTF-8 編輯器另存，否則中文會變亂碼。
+
 ---
 
 ## 輸出欄位

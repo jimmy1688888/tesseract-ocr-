@@ -22,6 +22,12 @@
 4. `samples/employer/` — 測試契約圖（含個資，不上版控；自行放置）
 5. `pip install -r requirements.txt`；Tesseract 安裝於 `C:\Program Files\Tesseract-OCR\`
 
+### 同事機（不熟終端機者）
+
+以 `git clone` 取得專案後，日常操作全靠三個批次檔：`安裝.bat`（首次：環境檢查＋裝套件）、
+`執行.bat`（日常：docx 丟 `docs\` 後雙擊）、`更新.bat`（git pull＋同步套件）。
+⚠️ .bat 為 **Big5 編碼＋CRLF**（cmd 原生），勿用 UTF-8 另存；`.gitattributes` 已鎖 `*.bat eol=crlf`。
+
 ## 已完成：許可證 → 仲介機構查表
 
 - `permit_lookup.py`：讀本地 `data/agency_roster.json`，依許可證查 機構名稱/地址/電話。
