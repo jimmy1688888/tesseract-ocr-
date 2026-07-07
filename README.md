@@ -65,10 +65,8 @@
 ### Step 1：Python 套件
 
 ```bash
-pip install pytesseract pillow numpy google-cloud-vision google-api-python-client google-auth
+pip install -r requirements.txt
 ```
-
-> 註：專案內 `requirements.txt` 為舊架構（OCRmyPDF/gspread）殘留，尚待更新，請以上方清單為準。
 
 ### Step 2：Tesseract OCR
 
