@@ -79,17 +79,22 @@ def _best(query: str, items, key, cutoff: float):
 
 
 def _match_city(L: str):
-    """縣市比對:先『完整縣市名』精確含(解嘉義縣/市同名),再去尾字寬鬆,最後模糊。"""
+    """縣市比對:先『完整縣市名』精確含(解嘉義縣/市同名),再去尾字寬鬆,最後模糊。
+
+    回傳 (raw, eng, areas, tier);tier=1 完整名、2 去尾字、3 模糊。
+    tier 3 只看行首 5 字且門檻僅 0.5,行首被印章汙染時易錯配,
+    呼叫端(normalize_address)據此決定是否改用英文行錨定。
+    """
     cities = _load()
     for cn, raw, eng, areas in cities:            # 1. 完整縣市名
         if cn in L:
-            return raw, eng, areas
+            return raw, eng, areas, 1
     for cn, raw, eng, areas in cities:            # 2. 去尾字(缺「市/縣」時)
         core = cn[:-1] if cn[-1] in _CITY_SUFFIX else cn
         if core and core in L:
-            return raw, eng, areas
+            return raw, eng, areas, 2
     _, hit = _best(L[:5], cities, key=lambda x: x[0], cutoff=0.5)  # 3. 模糊
-    return (hit[1], hit[2], hit[3]) if hit else None
+    return (hit[1], hit[2], hit[3], 3) if hit else None
 
 
 def _match_area(L: str, areas: dict):
@@ -104,6 +109,31 @@ def _match_area(L: str, areas: dict):
     items = [(k,) + v for k, v in areas.items()]  # 3. 模糊
     _, hit = _best(L, items, key=lambda x: x[0], cutoff=0.6)
     return (hit[1], hit[2], hit[3], hit[4]) if hit else None
+
+
+def _match_city_area_en(en_text: str):
+    """用英文地址行反查縣市/行政區。
+
+    動機:印章多蓋在中文行首(縣市被毀成「中共 雄市…」),而英文地址的
+    County/City 慣例在行尾,常倖存。只做「官方英文名精確含」不做模糊,
+    並取**最長命中**(避免 Taipei City 誤配進 New Taipei City)。
+
+    回傳 ((city_raw, city_eng, areas), area_v或None);縣市查無回 None。
+    """
+    L = " ".join(en_text.split()).lower()
+    if not L:
+        return None
+    city_hit = None
+    for _cn, raw, eng, areas in _load():
+        if eng.lower() in L and (city_hit is None or len(eng) > len(city_hit[1])):
+            city_hit = (raw, eng, areas)
+    if not city_hit:
+        return None
+    area_hit = None
+    for v in city_hit[2].values():
+        if v[1].lower() in L and (area_hit is None or len(v[1]) > len(area_hit[1])):
+            area_hit = v
+    return city_hit, area_hit
 
 
 # 段號只在數字(阿拉伯或中文一二三…)後確實接『段』時才擷取,
@@ -161,23 +191,116 @@ def _match_road(L: str, roads: list, cutoff: float = 0.5):
     return best_it[2], best_it[3], best_s
 
 
+_EN_ROAD_TOKEN = re.compile(
+    r"([A-Za-z0-9'’.\- ]+?(?:Rd\.|St\.|Blvd\.|Ave\.|Dr\.))(?=\s*,|\s*$)", re.I)
+
+
+def _match_road_en(en_text: str, roads: list, cutoff: float = 0.9):
+    """英文行抽路名 token 對官方英名模糊比對(最後備援,寧缺勿錯)。
+
+    契約上的英譯是仲介自翻,常與官方不同(Tuozi S. St. vs 官方 Tuozinan St.),
+    模糊比對易錯配到同名系路(拕子一街),故門檻預設 0.9。
+    取 Dist./Township 之前、最後一個路名 token(No./Lane/Alley 都在路名之前)。
+    """
+    head = re.split(r"\b(?:Dist|Township)\b", en_text, 1)[0]
+    toks = _EN_ROAD_TOKEN.findall(head)
+    if not toks:
+        return None
+    tok = toks[-1].strip().lower()
+    best, score = None, 0.0
+    for _rn, _base, raw, eng in roads:
+        s = difflib.SequenceMatcher(None, tok, eng.lower()).ratio()
+        if s > score:
+            best, score = (raw, eng), s
+    return (best[0], best[1], score) if best and score >= cutoff else None
+
+
+# 數字與單位間容許空白:Vision 逐詞序列化時,中文與數字交界常被插入
+# 斷詞空格(「名光街 38 號」),實體文件上並沒有,故比對時吸收、輸出時移除。
 _TAIL_RE = re.compile(
-    r"((?:\d+巷)?(?:\d+弄)?\d+(?:之\d+)?(?:[-–]\d+)?號(?:\d+樓)?(?:之\d+)?)"
+    r"((?:\d+\s*巷\s*)?(?:\d+\s*弄\s*)?\d+\s*(?:之\s*\d+)?(?:[-–]\s*\d+)?\s*號"
+    r"(?:\s*\d+\s*樓)?(?:\s*之\s*\d+)?)"
 )
 
 
 def _extract_tail(line: str) -> str:
-    """抓門牌尾巴(…巷…弄…號…樓)。以原始行(非正規化)抓,保留數字。"""
+    """抓門牌尾巴(…巷…弄…號…樓)。以原始行(非正規化)抓,保留數字;去除斷詞空白。"""
     m = _TAIL_RE.search(unicodedata.normalize("NFKC", line))
-    return m.group(1) if m else ""
+    return re.sub(r"\s+", "", m.group(1)) if m else ""
 
 
-def normalize_address(text: str, *, road_cutoff: float = 0.5) -> dict:
-    """把一段(可能雜訊/跨行)的中文地址標準化。
+def _assemble_en(road_eng: str, area_eng: str, city_eng: str, detail: str) -> str:
+    """組官方英文地址:樓層(含樓之N) → No.門牌號 → 路 → 區 → 縣市。"""
+    parts = [p for p in (road_eng, area_eng, city_eng) if p]
+    addr_en = ", ".join(parts)
+    if detail and addr_en:
+        # 英文門牌號取「N號」的號碼(而非 N巷/N弄);無「號」才退回開頭數字。
+        num = re.search(r"(\d+(?:之\d+)?)號", detail) or re.match(r"(\d+(?:之\d+)?)", detail)
+        if num:
+            no = num.group(1).replace("之", "-")   # 1之9 → 1-9
+            addr_en = f"No. {no}, {addr_en}"
+        # 樓層:台灣官方英文置於最前,如「3F., No. 15, ...」;
+        # 樓後的「之N」(增建戶)併入樓層,如「2樓之1」→「2F.-1」。
+        flr = re.search(r"(\d+)樓(?:之(\d+))?", detail)
+        if flr:
+            f_en = f"{flr.group(1)}F." + (f"-{flr.group(2)}" if flr.group(2) else "")
+            addr_en = f"{f_en}, {addr_en}"
+    return addr_en
+
+
+def _line_candidate(line: str, city_raw: str, city_eng: str, areas: dict,
+                    forced_area, road_cutoff: float):
+    """在指定縣市下,對單一中文行比對 區→路→門牌,回傳 (cand, rank)。
+
+    forced_area:給定 (area_raw, area_eng, zip, roads) 時直接採用(英文錨定
+    已確定行政區),否則從行內比對;比不到區則以全縣市路名配。
+    """
+    L = _norm(line)
+    if forced_area:
+        area_raw, area_eng, zipcode, roads = forced_area
+    else:
+        area = _match_area(L, areas)
+        if area:
+            area_raw, area_eng, zipcode, roads = area
+        else:
+            area_raw = area_eng = zipcode = ""
+            roads = [r for v in areas.values() for r in v[3]]  # 缺區 → 全縣市路名
+    # 抓路名前,先把已定位的縣市/區從字串剝掉,避免路名 regex 從行首把
+    # 「彰化縣和美鎮德南」整段吞成路名主幹 → 誤配。
+    cn = _norm(city_raw)
+    rest = L.replace(cn, "", 1)
+    if len(cn) >= 3:
+        rest = rest.replace(cn[1:], "", 1)   # 縣市首字被印章蓋掉的殘留(「雄市」)
+    if area_raw:
+        rest = rest.replace(_norm(area_raw), "", 1)
+    road = _match_road(rest, roads, cutoff=road_cutoff)
+    road_raw, road_eng, rscore = road if road else ("", "", 0.0)
+    detail = _extract_tail(line)
+
+    cand = {
+        "matched": True, "city": city_raw, "city_en": city_eng,
+        "district": area_raw, "district_en": area_eng, "zip": zipcode,
+        "road": road_raw, "road_en": road_eng, "detail": detail,
+        "address_cn": f"{city_raw}{area_raw}{road_raw}{detail}",
+        "address_en": _assemble_en(road_eng, area_eng, city_eng, detail),
+        "road_score": round(rscore, 2),
+    }
+    # 評分:有區 +2、有路 +路分、有號樓 +0.5
+    rank = (2 if area_raw else 0) + rscore + (0.5 if detail else 0)
+    return cand, rank
+
+
+def normalize_address(text: str, *, road_cutoff: float = 0.5,
+                      en_text: str = "") -> dict:
+    """把一段(可能雜訊/跨行)的中文地址標準化;可帶英文地址行輔助錨定。
 
     參數:
-        text: OCR 出的地址字串,可為單行或多行區塊。
+        text: OCR 出的中文地址字串,可為單行或多行區塊。
         road_cutoff: 路名模糊比對門檻(0~1),越高越嚴。
+        en_text: (選)同一地址的 OCR 英文行。印章常蓋在中文行首(縣市被毀),
+            英文縣市/區慣例在行尾而倖存;當中文縣市「僅靠模糊比對」或
+            「完全比不到」時,以英文行反查縣市/區為錨,回頭用中文行配
+            路名與門牌(中文路名通常未被汙染,且門牌數字以中文行最可靠)。
 
     回傳 dict:
         matched(bool)、city/city_en、district/district_en、zip、
@@ -198,57 +321,60 @@ def normalize_address(text: str, *, road_cutoff: float = 0.5) -> dict:
     if not lines:
         lines = [text]
 
+    def _best_over_lines(c_raw, c_eng, c_areas, forced_area):
+        b, br = None, -1.0
+        for line in lines:
+            cand, rank = _line_candidate(line, c_raw, c_eng, c_areas,
+                                         forced_area, road_cutoff)
+            if rank > br:
+                b, br = cand, rank
+        return b
+
     best = None
+    best_rank = -1.0
+    best_tier = 9          # 縣市命中層級:1 完整名 2 去尾字 3 模糊(可疑)
     for line in lines:
-        L = _norm(line)
-        city = _match_city(L)
+        city = _match_city(_norm(line))
         if not city:
             continue
-        city_raw, city_eng, areas = city
-        area = _match_area(L, areas)
-        if area:
-            area_raw, area_eng, zipcode, roads = area
-        else:
-            area_raw = area_eng = zipcode = ""
-            roads = [r for v in areas.values() for r in v[3]]  # 缺區 → 全縣市路名
-        # 抓路名前,先把已定位的縣市/區從字串剝掉,避免路名 regex 從行首把
-        # 「彰化縣和美鎮德南」整段吞成路名主幹 → 誤配。
-        rest = L.replace(_norm(city_raw), "", 1)
-        if area_raw:
-            rest = rest.replace(_norm(area_raw), "", 1)
-        road = _match_road(rest, roads, cutoff=road_cutoff)
-        road_raw, road_eng, rscore = road if road else ("", "", 0.0)
-        detail = _extract_tail(line)
+        city_raw, city_eng, areas, tier = city
+        cand, rank = _line_candidate(line, city_raw, city_eng, areas,
+                                     None, road_cutoff)
+        if rank > best_rank:
+            best, best_rank, best_tier = cand, rank, tier
 
-        addr_cn = f"{city_raw}{area_raw}{road_raw}{detail}"
-        en_parts = [p for p in (road_eng, area_eng, city_eng) if p]
-        addr_en = ", ".join(en_parts)
-        if detail and addr_en:
-            # 英文門牌號取「N號」的號碼(而非 N巷/N弄);無「號」才退回開頭數字。
-            num = re.search(r"(\d+(?:之\d+)?)號", detail) or re.match(r"(\d+(?:之\d+)?)", detail)
-            if num:
-                no = num.group(1).replace("之", "-")   # 1之9 → 1-9
-                addr_en = f"No. {no}, {addr_en}"
-            # 樓層:台灣官方英文置於最前,如「3F., No. 15, ...」;
-            # 樓後的「之N」(增建戶)併入樓層,如「2樓之1」→「2F.-1」。
-            flr = re.search(r"(\d+)樓(?:之(\d+))?", detail)
-            if flr:
-                f_en = f"{flr.group(1)}F." + (f"-{flr.group(2)}" if flr.group(2) else "")
-                addr_en = f"{f_en}, {addr_en}"
+    # ── 英文行錨定 ──────────────────────────────────────────────────────
+    if en_text:
+        anc = _match_city_area_en(en_text)
+        if anc and (best is None or best_tier >= 3):
+            # 中文縣市不可信(模糊命中易被行首汙染帶偏 / 完全比不到)
+            # → 英文縣市(+區)為錨,重跑中文行的路名/門牌比對。
+            (a_raw, a_eng, a_areas), a_area = anc
+            ab = _best_over_lines(a_raw, a_eng, a_areas, a_area)
+            if ab and not ab["road"]:
+                # 中文行也配不到路 → 英文路名 token 高門檻備援
+                roads = a_area[3] if a_area else \
+                    [r for v in a_areas.values() for r in v[3]]
+                hit = _match_road_en(en_text, roads)
+                if hit:
+                    ab["road"], ab["road_en"] = hit[0], hit[1]
+                    ab["road_score"] = round(hit[2], 2)
+                    ab["address_cn"] = (f"{ab['city']}{ab['district']}"
+                                        f"{ab['road']}{ab['detail']}")
+                    ab["address_en"] = _assemble_en(
+                        ab["road_en"], ab["district_en"],
+                        ab["city_en"], ab["detail"])
+            if ab:
+                best = ab
+        elif anc and best is not None:
+            # 中文縣市可信但比不到區,英文錨同縣市且有區 → 補區重配路名
+            (a_raw, a_eng, a_areas), a_area = anc
+            if a_area and best["city"] == a_raw and not best["district"]:
+                ab = _best_over_lines(a_raw, a_eng, a_areas, a_area)
+                if ab:
+                    best = ab
 
-        cand = {
-            "matched": True, "city": city_raw, "city_en": city_eng,
-            "district": area_raw, "district_en": area_eng, "zip": zipcode,
-            "road": road_raw, "road_en": road_eng, "detail": detail,
-            "address_cn": addr_cn, "address_en": addr_en,
-            "road_score": round(rscore, 2),
-        }
-        # 評分:有區 +2、有路 +路分、有號樓 +0.5
-        rank = (2 if area_raw else 0) + rscore + (0.5 if detail else 0)
-        if best is None or rank > best[0]:
-            best = (rank, cand)
-
-    return best[1] if best else dict(empty)
+    return best if best else dict(empty)
 
 
 if __name__ == "__main__":  # 簡易自測

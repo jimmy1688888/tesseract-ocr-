@@ -179,7 +179,7 @@ def extract_employer_fields(text: str) -> dict:
     seg = lines[start:]
 
     # ── 地址:中文靠行政區+街道 pattern;英文靠地址關鍵字 ──
-    addr_cn = addr_en = ""
+    addr_cn = addr_en = en_hint = ""
     for idx, l in enumerate(seg):
         if not addr_cn and _has_cjk(l) and CN_ADDR.search(l):
             addr_cn = LABEL_WORDS.sub("", l).lstrip(":： ").strip()
@@ -189,6 +189,11 @@ def extract_employer_fields(text: str) -> dict:
             if idx + 1 < len(seg) and re.fullmatch(r"[A-Za-z.()\s]{2,8}", seg[idx + 1]):
                 en = en + " " + seg[idx + 1]
             addr_en = re.sub(r"^Alamat\s*[:：]?\s*", "", en, flags=re.I).strip()
+        # 錨定線索:紅章殘影常把中文字黏進英文地址行(「司賜聼12.Ln.18…」),
+        # 這種行不能當 地址_英 輸出,但行尾的英文縣市/區仍完好,
+        # 留給 address_db 的英文錨定反查用(不寫入任何輸出欄位)。
+        if not en_hint and _has_cjk(l) and EN_ADDR_KW.search(l) and len(l) > 12:
+            en_hint = l
 
     # ── 名稱:雇主區塊前段,排除地址/標籤,依中日韓/拉丁分中英 ──
     name_cn = name_en = ""
@@ -205,10 +210,12 @@ def extract_employer_fields(text: str) -> dict:
                     and not BOILERPLATE.search(cand_en) and not EN_ADDR_KW.search(cand_en)
                     and len(cand_en) > 2):
                 name_en = cand_en
-        # 中文名:有中日韓字、非地址、去標籤字
+        # 中文名:有中日韓字、非地址(中式或英式)、去標籤字。
+        # EN_ADDR_KW 檢查:紅章殘影字有時會黏在英文地址行首(「司賜聼12.Ln.18…」),
+        # 該行含 CJK 又無中文縣市字,若只擋 CN_ADDR 會被誤收為中文名。
         if not name_cn:
             core = re.sub(r".*[:：]", "", l).strip()
-            if _has_cjk(core) and not CN_ADDR.search(core):
+            if _has_cjk(core) and not CN_ADDR.search(core) and not EN_ADDR_KW.search(core):
                 cand = LABEL_WORDS.sub("", core)
                 cand = re.sub(r"Nama.*", "", cand, flags=re.I).strip(" ()（）:：")
                 if cand and _has_cjk(cand):
@@ -221,17 +228,19 @@ def extract_employer_fields(text: str) -> dict:
         "地址_英": addr_en,
         "電話": phone,
     }
-    _standardize_address(fields, addr_cn or "")
+    _standardize_address(fields, addr_cn or "", en_hint=en_hint)
     return fields
 
 
-def _standardize_address(fields: dict, raw_cn: str) -> None:
+def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
     """用官方地址庫(address_db)校正地址,非破壞式補上標準欄位。
 
     - 新增:地址_中_標準、地址_英_標準、郵遞區號、地址_比對(是否命中)。
     - 回填:原 OCR 地址_英 為空時,以官方英文譯名補上。
     - 保守:縣市+行政區都命中才回填標準中文;僅命中縣市時只補郵遞/英文,
       不覆寫地址_中,避免把「有 OCR 原文」誤換成「資訊較少的標準串」。
+    - 英文錨定:OCR 英文地址行一併傳入 normalize_address(en_text=…);
+      印章蓋掉中文行首縣市時,以行尾倖存的英文縣市/區反查糾錯。
     庫或資料缺失時安靜跳過(try/except),絕不影響既有流程。
     """
     fields.setdefault("地址_中_標準", "")
@@ -242,7 +251,8 @@ def _standardize_address(fields: dict, raw_cn: str) -> None:
         return
     try:
         from address_db import normalize_address
-        r = normalize_address(raw_cn)
+        r = normalize_address(
+            raw_cn, en_text=fields.get("地址_英", "") or en_hint)
     except Exception:
         return
     if not r.get("matched"):
