@@ -46,8 +46,12 @@ BOILERPLATE = re.compile(
 EMPLOYER_ROI = (0.0, 0.0, 1.0, 0.35)
 
 # 契約頁特徵字:用來從 docx 多張圖中辨識「哪一張是勞動契約頁」。
+# 標題大字(PERJANJIAN KERJA/MAJIKAN DENGAN)常被紅章毀成讀不出,
+# 故也收雇主區塊的標籤詞(Nama Perusahaan=公司雇主、Nomor Telepon、Alamat)
+# 與結尾樣板(SELANJUTNYA/PIHAK PERTAMA),提高破損掃描的辨識韌性。
 CONTRACT_MARKERS = re.compile(
-    r"PERJANJIAN\s*KERJA|MAJIKAN\s*DENGAN|Nama\s*Majikan|MOL\s*License"
+    r"PERJANJIAN\s*KERJA|MAJIKAN\s*DENGAN|Nama\s*Majikan|Nama\s*Perusahaan"
+    r"|Nomor\s*Telepon|SELANJUTNYA|PIHAK\s*PERTAMA|Alamat|MOL\s*License"
     r"|勞動契約|甲方名稱",
     re.I,
 )
@@ -314,9 +318,11 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
 
     crop_dir:非空時,把「去紅章前」的 ROI 裁切圖存到該資料夾
       ({docx主檔名}_{圖檔名}),保留紅章原貌供人工複查 H~O 欄位值。
+      **每份 docx 都會存**:找不到契約頁時存「最高分候選頁」(全零分則退
+      image2 慣例位置),欄位留空但截圖必在,人工審核不會沒圖可看。
 
     回傳除五個雇主欄位外,另含:
-      _image:實際採用的圖檔名(找不到契約頁則為空)
+      _image:實際採用(或候選)的圖檔名
       _note :流程備註(例如「找不到契約頁」)
       _crop :已存檔的 ROI 截圖檔名(未存檔則為空)
     """
@@ -325,12 +331,19 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
     empty = {"雇主名稱_中": "", "雇主名稱_英": "", "地址_中": "",
              "地址_英": "", "電話": ""}
     images = _docx_images(docx_path)
-    page = find_contract_image(images)
-    if not page:
-        return {**empty, "_image": "", "_note": "找不到契約頁(特徵字命中不足)",
-                "_crop": ""}
+    if not images:
+        return {**empty, "_image": "", "_note": "docx 無內嵌圖", "_crop": ""}
 
-    name, raw = page
+    # 一次算完各圖分數(自然排序,同分取前者=max 的預設行為)
+    scored = [(score_contract_page(b), n, b)
+              for n, b in sorted(images, key=lambda x: _natural_key(x[0]))]
+    best_s, name, raw = max(scored, key=lambda t: t[0])
+    found = best_s >= 2
+    if not found and best_s == 0:
+        # 全零分:退 image2(樣本慣例上契約頁多在第 2 張),沒有再用第一張
+        name, raw = next(((n, b) for _s, n, b in scored
+                          if n.startswith("image2.")), (name, raw))
+
     content = raw
     if roi:
         content = crop_fraction(content, roi)
@@ -340,6 +353,13 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
         d.mkdir(parents=True, exist_ok=True)
         crop_name = f"{Path(docx_path).stem}_{name}"
         (d / crop_name).write_bytes(content)
+
+    if not found:
+        # 特徵不足不送 Vision(頁面身分不明,抽出的欄位不可信),只留截圖
+        return {**empty, "_image": name,
+                "_note": f"找不到契約頁(特徵字命中不足,最高分 {best_s});已存候選頁截圖",
+                "_crop": crop_name}
+
     if deink:
         content = deink_red_stamp(content)
     fields = extract_employer_fields(vision_full_text(content, client=client))

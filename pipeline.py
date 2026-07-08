@@ -1642,7 +1642,8 @@ def collect_employer_fields(docx_files) -> None:
             continue
         _EMPLOYER_FIELDS_BY_DOCX[name] = fields
         if fields.get("_note"):
-            logger.info(f"  {name}: {fields['_note']} → H~O 留空")
+            logger.info(f"  {name}: {fields['_note']} → H~O 留空"
+                        f"（截圖 {fields.get('_crop', '') or '無'}）")
         else:
             logger.info(
                 f"  {name}: 雇主={fields.get('雇主名稱_中', '')!r}"
