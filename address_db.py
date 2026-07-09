@@ -161,34 +161,43 @@ def _seg_to_arabic(seg: str) -> str:
 
 def _match_road(L: str, roads: list, cutoff: float = 0.5):
     """路名比對。回傳 (road_raw, road_eng, score) 或 None。
-    優先『含段號的完整路名精確配』,否則以路名主幹模糊配、再套回該段的官方英文。"""
+    優先『含段號的完整路名精確配』,否則以路名主幹模糊配、再套回該段的官方英文;
+    regex 路徑失敗時,以官方路名『子字串精確含』收尾——鄉村地名型路名(枋子林、
+    廣興)與巷型正式路名(后尾巷)沒有 路/街/道 後綴,regex 抓不到,但官方庫有收。"""
     m = _ROAD_RE.search(L)
-    if not m:
-        return None
-    road_core = _norm(m.group(1))                 # 例:辛亥路
-    seg_num = _seg_to_arabic(m.group(2))           # 7 / 二→2 / 十二→12(可能為 None)
-    # 1. 有段號 → 直接組出「辛亥路7段」做精確配,拿到正確段別英文
-    if seg_num:
-        want = f"{road_core}{seg_num}段"
-        for rn, base, raw, eng in roads:
-            if rn == want:
-                return raw, eng, 1.0
-    # 2. 以路名主幹模糊配(比對各路的去段主幹)
-    best_s, best_it = 0.0, None
-    for it in roads:
-        s = difflib.SequenceMatcher(None, road_core, it[1]).ratio()
-        if s > best_s:
-            best_s, best_it = s, it
-    if best_it is None or best_s < cutoff:
-        return None
-    base_hit = best_it[1]
-    # 3. 主幹配到後,若原文有段號,優先回傳「該主幹的第 N 段」官方條目
-    if seg_num:
-        want = f"{base_hit}{seg_num}段"
-        for rn, base, raw, eng in roads:
-            if rn == want:
-                return raw, eng, best_s
-    return best_it[2], best_it[3], best_s
+    if m:
+        road_core = _norm(m.group(1))              # 例:辛亥路
+        seg_num = _seg_to_arabic(m.group(2))       # 7 / 二→2 / 十二→12(可能為 None)
+        # 1. 有段號 → 直接組出「辛亥路7段」做精確配,拿到正確段別英文
+        if seg_num:
+            want = f"{road_core}{seg_num}段"
+            for rn, base, raw, eng in roads:
+                if rn == want:
+                    return raw, eng, 1.0
+        # 2. 以路名主幹模糊配(比對各路的去段主幹)
+        best_s, best_it = 0.0, None
+        for it in roads:
+            s = difflib.SequenceMatcher(None, road_core, it[1]).ratio()
+            if s > best_s:
+                best_s, best_it = s, it
+        if best_it is not None and best_s >= cutoff:
+            base_hit = best_it[1]
+            # 3. 主幹配到後,若原文有段號,優先回傳「該主幹的第 N 段」官方條目
+            if seg_num:
+                want = f"{base_hit}{seg_num}段"
+                for rn, base, raw, eng in roads:
+                    if rn == want:
+                        return raw, eng, best_s
+            return best_it[2], best_it[3], best_s
+    # 4. 收尾:官方路名子字串精確含,取最長命中(對官方清單精確比對,無誤配
+    #    風險;較長條目如「后尾一橫巷」只有真的出現在行內才會蓋過「后尾巷」)。
+    hit = None
+    for rn, base, raw, eng in roads:
+        if len(rn) >= 2 and rn in L and (hit is None or len(rn) > len(hit[0])):
+            hit = (rn, raw, eng)
+    if hit:
+        return hit[1], hit[2], 1.0
+    return None
 
 
 _EN_ROAD_TOKEN = re.compile(
@@ -217,10 +226,11 @@ def _match_road_en(en_text: str, roads: list, cutoff: float = 0.9):
 
 # 數字與單位間容許空白:Vision 逐詞序列化時,中文與數字交界常被插入
 # 斷詞空格(「名光街 38 號」),實體文件上並沒有,故比對時吸收、輸出時移除。
-# 門牌支援多號列表(工廠連棟「11.13.15.17號」),點/頓/逗號分隔皆收。
+# 門牌支援多號列表(工廠連棟「11.13.15.17號」),點/頓/逗號分隔皆收;
+# 樓層支援中文數字(「三樓之2」)。
 _TAIL_RE = re.compile(
     r"((?:\d+\s*巷\s*)?(?:\d+\s*弄\s*)?\d+(?:\s*[.、,，]\s*\d+)*\s*(?:之\s*\d+)?"
-    r"(?:[-–]\s*\d+)?\s*號(?:\s*\d+\s*樓)?(?:\s*之\s*\d+)?)"
+    r"(?:[-–]\s*\d+)?\s*號(?:\s*[0-9一二三四五六七八九十]+\s*樓)?(?:\s*之\s*\d+)?)"
 )
 
 
@@ -242,18 +252,24 @@ def _assemble_en(road_eng: str, area_eng: str, city_eng: str, detail: str) -> st
         alley = re.search(r"(\d+)弄", detail)
         if alley:
             addr_en = f"Aly. {alley.group(1)}, {addr_en}"
-        # 英文門牌號取「N號」的號碼(而非 N巷/N弄);支援多號列表(11.13.15.17);
-        # 無「號」才退回開頭數字。
-        num = (re.search(r"(\d+(?:[.、,，]\d+)*(?:之\d+)?)號", detail)
-               or re.match(r"(\d+(?:之\d+)?)", detail))
+        # 英文門牌號取「N號」的號碼(而非 N巷/N弄);支援多號列表(11.13.15.17)
+        # 與「號之N」後綴(41號之8 → No. 41-8);無「號」才退回開頭數字。
+        num = re.search(r"(\d+(?:[.、,，]\d+)*(?:之\d+)?)號(?:之(\d+))?", detail)
         if num:
             no = num.group(1).replace("之", "-")   # 1之9 → 1-9
+            if num.group(2):
+                no += f"-{num.group(2)}"           # 41號之8 → 41-8
             addr_en = f"No. {no}, {addr_en}"
+        else:
+            head = re.match(r"(\d+(?:之\d+)?)", detail)
+            if head:
+                addr_en = f"No. {head.group(1).replace('之', '-')}, {addr_en}"
         # 樓層:台灣官方英文置於最前,如「3F., No. 15, ...」;
-        # 樓後的「之N」(增建戶)併入樓層,如「2樓之1」→「2F.-1」。
-        flr = re.search(r"(\d+)樓(?:之(\d+))?", detail)
+        # 樓後的「之N」(增建戶)併入樓層(2樓之1 → 2F.-1);中文數字樓層轉阿拉伯。
+        flr = re.search(r"([0-9一二三四五六七八九十]+)樓(?:之(\d+))?", detail)
         if flr:
-            f_en = f"{flr.group(1)}F." + (f"-{flr.group(2)}" if flr.group(2) else "")
+            f_en = f"{_seg_to_arabic(flr.group(1))}F." \
+                   + (f"-{flr.group(2)}" if flr.group(2) else "")
             addr_en = f"{f_en}, {addr_en}"
     return addr_en
 
