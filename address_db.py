@@ -217,9 +217,10 @@ def _match_road_en(en_text: str, roads: list, cutoff: float = 0.9):
 
 # 數字與單位間容許空白:Vision 逐詞序列化時,中文與數字交界常被插入
 # 斷詞空格(「名光街 38 號」),實體文件上並沒有,故比對時吸收、輸出時移除。
+# 門牌支援多號列表(工廠連棟「11.13.15.17號」),點/頓/逗號分隔皆收。
 _TAIL_RE = re.compile(
-    r"((?:\d+\s*巷\s*)?(?:\d+\s*弄\s*)?\d+\s*(?:之\s*\d+)?(?:[-–]\s*\d+)?\s*號"
-    r"(?:\s*\d+\s*樓)?(?:\s*之\s*\d+)?)"
+    r"((?:\d+\s*巷\s*)?(?:\d+\s*弄\s*)?\d+(?:\s*[.、,，]\s*\d+)*\s*(?:之\s*\d+)?"
+    r"(?:[-–]\s*\d+)?\s*號(?:\s*\d+\s*樓)?(?:\s*之\s*\d+)?)"
 )
 
 
@@ -230,12 +231,21 @@ def _extract_tail(line: str) -> str:
 
 
 def _assemble_en(road_eng: str, area_eng: str, city_eng: str, detail: str) -> str:
-    """組官方英文地址:樓層(含樓之N) → No.門牌號 → 路 → 區 → 縣市。"""
+    """組官方英文地址:樓層(含樓之N) → No.門牌號 → Aly.弄 → Ln.巷 → 路 → 區 → 縣市。"""
     parts = [p for p in (road_eng, area_eng, city_eng) if p]
     addr_en = ", ".join(parts)
     if detail and addr_en:
-        # 英文門牌號取「N號」的號碼(而非 N巷/N弄);無「號」才退回開頭數字。
-        num = re.search(r"(\d+(?:之\d+)?)號", detail) or re.match(r"(\d+(?:之\d+)?)", detail)
+        # 巷/弄:官方縮寫 Ln./Aly.,順序為 No. → Aly. → Ln. → 路。
+        lane = re.search(r"(\d+)巷", detail)
+        if lane:
+            addr_en = f"Ln. {lane.group(1)}, {addr_en}"
+        alley = re.search(r"(\d+)弄", detail)
+        if alley:
+            addr_en = f"Aly. {alley.group(1)}, {addr_en}"
+        # 英文門牌號取「N號」的號碼(而非 N巷/N弄);支援多號列表(11.13.15.17);
+        # 無「號」才退回開頭數字。
+        num = (re.search(r"(\d+(?:[.、,，]\d+)*(?:之\d+)?)號", detail)
+               or re.match(r"(\d+(?:之\d+)?)", detail))
         if num:
             no = num.group(1).replace("之", "-")   # 1之9 → 1-9
             addr_en = f"No. {no}, {addr_en}"

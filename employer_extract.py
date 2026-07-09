@@ -22,6 +22,16 @@ from PIL import Image, ImageOps
 CJK        = re.compile(r"[一-鿿]")
 # 台灣電話:0 開頭,可含一個 '-'。前後不接其他數字,避免抓到統編等長數字。
 PHONE      = re.compile(r"(?<!\d)(0\d{1,3}-?\d{6,8})(?!\d)")
+# 括號區碼格式:(04)7775-863、(02) 2371-7608。統一正規化成「區碼-號碼」。
+PHONE_PAREN = re.compile(r"\((0\d{1,3})\)\s*(\d{3,4})\s*-?\s*(\d{3,4})(?!\d)")
+
+
+def _phones_in(line: str) -> list[str]:
+    """抓一行內的電話候選。括號區碼正規化為「04-7775863」;一般格式原樣。"""
+    out = list(PHONE.findall(line))
+    for area, a, b in PHONE_PAREN.findall(line):
+        out.append(f"{area}-{a}{b}")
+    return out
 CN_ADDR    = re.compile(r"[縣市].{0,20}?[路街道段巷弄號樓]")
 EN_ADDR_KW = re.compile(
     r"\b(No\.|Rd\.|St\.|Dist\.|Lane|Alley|Sec\.|Village|Township|County|City|Taiwan)\b",
@@ -157,18 +167,6 @@ def extract_employer_fields(text: str) -> dict:
     """從 Vision 全文擷取雇主欄位。回傳 dict(缺項為空字串)。"""
     lines = [l.strip() for l in text.splitlines() if l.strip()]
 
-    # ── 電話:出現兩次者為雇主(電話 + Nomor Telepon 各一);否則取最常見 ──
-    counts: dict[str, int] = {}
-    for l in lines:
-        for m in PHONE.findall(l):
-            counts[m] = counts.get(m, 0) + 1
-    phone = ""
-    dup = [p for p, c in counts.items() if c >= 2]
-    if dup:
-        phone = max(dup, key=lambda p: counts[p])
-    elif counts:
-        phone = max(counts, key=lambda p: counts[p])
-
     # ── 定位雇主區塊起點(跳過標題之上的仲介 block)──
     start = 0
     for i, l in enumerate(lines):
@@ -181,6 +179,21 @@ def extract_employer_fields(text: str) -> dict:
                 start = i + 1
                 break
     seg = lines[start:]
+
+    # ── 電話:只統計雇主區塊內。仲介框在區塊上方,其電話絕不能混入——
+    #    雇主電話被格式/紅章毀掉時,全文統計的 fallback 會把仲介電話
+    #    誤當雇主電話(32098 實例),故寧可留空也不取區塊外的號碼。
+    #    出現兩次者為雇主(電話 + Nomor Telepon 各一);否則取最常見。
+    counts: dict[str, int] = {}
+    for l in seg:
+        for m in _phones_in(l):
+            counts[m] = counts.get(m, 0) + 1
+    phone = ""
+    dup = [p for p, c in counts.items() if c >= 2]
+    if dup:
+        phone = max(dup, key=lambda p: counts[p])
+    elif counts:
+        phone = max(counts, key=lambda p: counts[p])
 
     # ── 地址:中文靠行政區+街道 pattern;英文靠地址關鍵字 ──
     addr_cn = addr_en = en_hint = ""
