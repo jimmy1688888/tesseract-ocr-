@@ -36,8 +36,9 @@ _AREA_SUFFIX = "區鄉鎮市"
 
 
 def _norm(s: str) -> str:
-    """NFKC(全形→半形) + 臺→台 + 去空白。比對前一律過這關。"""
-    s = unicodedata.normalize("NFKC", s or "").replace("臺", "台")
+    """NFKC(全形→半形) + 臺→台 + 鍾→鐘 + 去空白。比對前一律過這關。
+       鍾/鐘為常見異體互換(官方庫「鍾山新村」vs OCR/慣用「鐘山新村」)。"""
+    s = unicodedata.normalize("NFKC", s or "").replace("臺", "台").replace("鍾", "鐘")
     return re.sub(r"\s+", "", s)
 
 
@@ -138,7 +139,11 @@ def _match_city_area_en(en_text: str):
 
 # 段號只在數字(阿拉伯或中文一二三…)後確實接『段』時才擷取,
 # 避免把「德南路201巷」的 201 誤當段號。中文數字會轉成阿拉伯以對上官方庫。
-_ROAD_RE = re.compile(r"([一-鿿A-Za-z]{1,8}?[路街道大道])(?:\s*([0-9一二三四五六七八九十]+)\s*段)?")
+# 結尾字用群組交替「大道|路|街|道」,不可寫成字元類 [路街道大道]——
+# 字元類會拆成 {路,街,道,大} 四個單字,「大」被當結尾害「大眾東路」
+# 被切成「…大」(31620 教訓,台灣大道的段別也因此誤配)。
+_ROAD_RE = re.compile(
+    r"([一-鿿A-Za-z]{1,8}?(?:大道|路|街|道))(?:\s*([0-9一二三四五六七八九十]+)\s*段)?")
 
 _CN_NUM = {c: i for i, c in enumerate("零一二三四五六七八九", 0)}
 
@@ -159,6 +164,13 @@ def _seg_to_arabic(seg: str) -> str:
     return str(_CN_NUM.get(seg, seg))
 
 
+def _dir_before_suffix(name: str):
+    """路名結尾(路/街/道/大道)前一字若為方向字(東西南北)則回傳之,否則 None。
+       中山「北」路、拕子「南」街是不同於中山路/拕子街的實體道路。"""
+    m = re.search(r"([東西南北])(?:大道|路|街|道)$", name)
+    return m.group(1) if m else None
+
+
 def _match_road(L: str, roads: list, cutoff: float = 0.5):
     """路名比對。回傳 (road_raw, road_eng, score) 或 None。
     優先『含段號的完整路名精確配』,否則以路名主幹模糊配、再套回該段的官方英文;
@@ -174,12 +186,24 @@ def _match_road(L: str, roads: list, cutoff: float = 0.5):
             for rn, base, raw, eng in roads:
                 if rn == want:
                     return raw, eng, 1.0
-        # 2. 以路名主幹模糊配(比對各路的去段主幹)
+        # 2. 以路名主幹模糊配(比對各路的去段主幹)。
+        #    方向字防護:結尾前的東西南北必須一致——「大眾東路」不可
+        #    模糊配到「大眾路/大眾北路」(不同實體道路,配錯比留空糟)。
+        core_dir = _dir_before_suffix(road_core)
         best_s, best_it = 0.0, None
         for it in roads:
+            if _dir_before_suffix(it[1]) != core_dir:
+                continue
             s = difflib.SequenceMatcher(None, road_core, it[1]).ratio()
-            if s > best_s:
-                best_s, best_it = s, it
+            if s <= best_s:
+                continue
+            # 主幹防護:候選路名主幹(去方向字/結尾字)須真的出現在原文,
+            # 除非整體相似度極高——「大眾東路」不可配到「大吉東路」
+            # (方向相同但主幹不同=另一條路,配錯比留空糟)。
+            stem = re.sub(r"[東西南北]?(?:大道|路|街|道)$", "", it[1])
+            if stem and stem not in road_core and s < 0.75:
+                continue
+            best_s, best_it = s, it
         if best_it is not None and best_s >= cutoff:
             base_hit = best_it[1]
             # 3. 主幹配到後,若原文有段號,優先回傳「該主幹的第 N 段」官方條目
