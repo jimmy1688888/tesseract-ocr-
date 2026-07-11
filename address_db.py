@@ -453,8 +453,48 @@ def normalize_address(text: str, *, road_cutoff: float = 0.5,
     return best if best else dict(empty)
 
 
-if __name__ == "__main__":  # 簡易自測
-    for t in [
+def find_roads(keyword: str, city_kw: str = "", area_kw: str = "") -> list:
+    """查官方庫(含自建補充)路名:關鍵字子字串比對,經 _norm 正規化
+       (臺/台、鍾/鐘異體、全半形都吸收)。回傳 [(縣市, 區, 路名, 英譯, 郵遞)]。"""
+    kw = _norm(keyword)
+    out = []
+    for _cn, c_raw, _ce, areas in _load():
+        if city_kw and _norm(city_kw) not in _norm(c_raw):
+            continue
+        for v in areas.values():
+            a_raw, _ae, zipc, roads = v
+            if area_kw and _norm(area_kw) not in _norm(a_raw):
+                continue
+            for rn, _b, raw, eng in roads:
+                if kw in rn:
+                    out.append((c_raw, a_raw, raw, eng, zipc))
+    return out
+
+
+if __name__ == "__main__":
+    import sys
+
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if args:
+        # 查詢模式:python address_db.py <路名關鍵字> [縣市] [行政區]
+        # 例:python address_db.py 長發        → 全國含「長發」的路
+        #    python address_db.py 大眾 宜蘭 五結 → 限縣市/區
+        hits = find_roads(args[0], args[1] if len(args) > 1 else "",
+                          args[2] if len(args) > 2 else "")
+        if hits:
+            print(f"找到 {len(hits)} 筆含「{args[0]}」的路名:")
+            for c, a, r, e, z in hits[:50]:
+                print(f"  {c}{a} {r}  ({e})  郵遞 {z}")
+            if len(hits) > 50:
+                print(f"  …(僅列前 50 筆,加縣市/區參數縮小範圍)")
+        else:
+            print(f"官方庫(含自建補充)查無含「{args[0]}」的路名"
+                  + (f"(範圍:{args[1] if len(args) > 1 else '全國'}"
+                     f"{args[2] if len(args) > 2 else ''})"))
+            print("→ 確認 OCR 拼字無誤後,可加進 data/custom_roads.json")
+        sys.exit(0)
+
+    for t in [  # 無參數 → 簡易自測
         "宜蘭縣羅東鎮新群里新群一路16號有效",
         "台北市文山區辛亥路7段69巷15號3樓",
         "嘉義縣水上鄉寬士村崎子頭1之9號",

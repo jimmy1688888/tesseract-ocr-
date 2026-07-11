@@ -19,6 +19,9 @@
    政府開放資料未收錄的新路（如大園區長發一路、新屋區富聯路）加在這裡，
    `address_db._load()` 會自動併入對應行政區；**不要直接改 AllData.json**
    （重新下載會洗掉手改）。格式見檔內既有條目。
+   加之前先查庫確認真的沒有：`python address_db.py <路名關鍵字> [縣市] [行政區]`
+   （經正規化比對，臺/台、鍾/鐘異體都吸收，比手動搜 JSON 可靠）。
+   具名巷（后尾巷型）可加；數字巷（文化路100巷型）不要加，巷弄由門牌尾巴處理。
 4. `data/AllData.json` — 全國門牌地址庫（2.4MB，供 `address_db.py` 地址標準化）
    - 來源：data.gov.tw 全國「縣市→行政區→路街」中英對照 JSON。
    - **最省事作法：直接把舊機的 `data/AllData.json` 複製過來**（此檔 gitignore、內容穩定、不常變）。三個本機檔（service_account / agency_roster / AllData）都建議一起用隨身碟或雲端硬碟帶過來，比重新下載可靠。

@@ -240,6 +240,7 @@ test_*.py, conftest.py # pytest 測試（decide / verify / aggregate / helpers�
 docs/                  # 輸入 .docx（不進版控）
 data/agency_roster.json# 仲介名冊（自行下載，不進版控）
 data/AllData.json      # 全國門牌地址庫（自行下載/複製，不進版控）
+data/custom_roads.json # 自建補充路名（官方庫缺的新路加這裡，進版控）
 scan_results/          # matches.csv 與裁切圖（不進版控）
 service_account.json   # Google 金鑰（不進版控）
 ```
@@ -269,6 +270,25 @@ Tesseract 沒裝或路徑不對。確認已安裝，並檢查 `pipeline.py` 頂�
 
 **Q5：想重跑後段而不重掃**
 `scan_results/matches.csv` 已保留 Tesseract 結果，可只跑 vision_submit → Sheets 段落（見程式內 `build_vision_queue`）。
+
+**Q6：J 欄（標準地址）空白但 K 欄有值——路名不在官方庫怎麼辦？**
+
+先用查詢指令確認庫內真的沒有（**不要手動搜 JSON**：庫用「臺」「鍾」等正體字，
+拿 OCR 的「台」「鐘」去搜會誤判；指令走程式同一套正規化，異體字自動吸收）：
+
+```bash
+python address_db.py <路名關鍵字> [縣市] [行政區]
+
+python address_db.py 長發              # 全國含「長發」的路
+python address_db.py 大眾 宜蘭 五結     # 限縣市/行政區
+```
+
+查無、且確認 K 欄的 OCR 拼字沒錯 → 在 **`data/custom_roads.json`** 加一條
+（照檔內既有格式：縣市/行政區/路名/英譯，英譯用郵局拼音如 `Changfa 1st Rd.`），
+下次執行自動生效。注意：
+- **具名巷**（如「后尾巷」）可以加，英譯結尾用 `Ln.`
+- **數字巷**（如「文化路100巷」）**不要加**——巷弄由門牌自動處理，缺的話加主路即可
+- 官方庫日後收錄同名路時不會重複，補充條目可留著
 
 ---
 
