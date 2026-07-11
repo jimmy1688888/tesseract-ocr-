@@ -29,6 +29,9 @@ from functools import lru_cache
 from pathlib import Path
 
 _DB_PATH = Path(__file__).with_name("data") / "AllData.json"
+# 自建補充路名:政府開放資料未收錄的新路(如 長發一路/富聯路)。
+# 不直接改 AllData.json(原檔重新下載會洗掉手改),補充檔小、進版控、跨機同步。
+_CUSTOM_PATH = Path(__file__).with_name("data") / "custom_roads.json"
 
 # 縣市 / 行政區 尾字(用於判斷是否需去尾字做寬鬆比對)
 _CITY_SUFFIX = "市縣"
@@ -65,7 +68,30 @@ def _load() -> list:
                 a["AreaName"], a["AreaEngName"], a["ZipCode"], roads,
             )
         cities.append((_norm(c["CityName"]), c["CityName"], c["CityEngName"], areas))
+    _merge_custom_roads(cities)
     return cities
+
+
+def _merge_custom_roads(cities) -> None:
+    """把自建補充路名(data/custom_roads.json)併入對應行政區的路名清單。
+       檔案缺失/格式錯誤安靜跳過;已存在同名路(官方檔更新後收錄了)不重複加。"""
+    try:
+        entries = json.loads(_CUSTOM_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    for e in entries:
+        try:
+            city = next(c for c in cities if c[1] == e["CityName"])
+            area = city[3].get(_norm(e["AreaName"]))
+            if not area:
+                continue
+            roads = area[3]
+            rn = _norm(e["RoadName"])
+            if any(r[0] == rn for r in roads):
+                continue
+            roads.append((rn, _strip_seg(rn), e["RoadName"], e["RoadEngName"]))
+        except (StopIteration, KeyError):
+            continue
 
 
 def _best(query: str, items, key, cutoff: float):

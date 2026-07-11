@@ -15,7 +15,11 @@
 2. `data/agency_roster.json` — 仲介名冊
    - 手動下載：瀏覽器開 `https://apiservice.mol.gov.tw/OdService/download/A17000000J-020001-QHy`（data.gov.tw dataset 6682 的 JSON），存到 `data/agency_roster.json`
    - 不在程式內連網下載（mol.gov.tw 憑證缺 Subject Key Identifier，Python SSL 會擋）
-3. `data/AllData.json` — 全國門牌地址庫（2.4MB，供 `address_db.py` 地址標準化）
+3. `data/custom_roads.json` — **自建補充路名**（進版控，clone 即有，不用另外準備）。
+   政府開放資料未收錄的新路（如大園區長發一路、新屋區富聯路）加在這裡，
+   `address_db._load()` 會自動併入對應行政區；**不要直接改 AllData.json**
+   （重新下載會洗掉手改）。格式見檔內既有條目。
+4. `data/AllData.json` — 全國門牌地址庫（2.4MB，供 `address_db.py` 地址標準化）
    - 來源：data.gov.tw 全國「縣市→行政區→路街」中英對照 JSON。
    - **最省事作法：直接把舊機的 `data/AllData.json` 複製過來**（此檔 gitignore、內容穩定、不常變）。三個本機檔（service_account / agency_roster / AllData）都建議一起用隨身碟或雲端硬碟帶過來，比重新下載可靠。
    - 缺此檔時 `address_db` 會安靜跳過，雇主地址標準欄留空，不中斷主流程。

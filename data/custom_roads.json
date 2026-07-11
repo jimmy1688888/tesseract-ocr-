@@ -1,0 +1,16 @@
+[
+  {
+    "CityName": "桃園市",
+    "AreaName": "大園區",
+    "RoadName": "長發一路",
+    "RoadEngName": "Changfa 1st Rd.",
+    "_note": "31622 實例;政府開放資料 AllData.json 未收錄,自建補充"
+  },
+  {
+    "CityName": "桃園市",
+    "AreaName": "新屋區",
+    "RoadName": "富聯路",
+    "RoadEngName": "Fulian Rd.",
+    "_note": "31684 實例;政府開放資料 AllData.json 未收錄,自建補充"
+  }
+]
