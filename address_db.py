@@ -38,10 +38,33 @@ _CITY_SUFFIX = "市縣"
 _AREA_SUFFIX = "區鄉鎮市"
 
 
+_CN_NUM = {c: i for i, c in enumerate("零一二三四五六七八九", 0)}
+
+
+def _seg_to_arabic(seg: str) -> str:
+    """段號轉阿拉伯:'二'→'2'、'十'→'10'、'十二'→'12'。純阿拉伯原樣回傳。"""
+    if seg is None:
+        return None
+    if seg.isdigit():
+        return seg
+    if seg == "十":
+        return "10"
+    if "十" in seg:                       # 十X / X十 / X十Y
+        a, _, b = seg.partition("十")
+        tens = _CN_NUM.get(a, 1) if a else 1
+        ones = _CN_NUM.get(b, 0) if b else 0
+        return str(tens * 10 + ones)
+    return str(_CN_NUM.get(seg, seg))
+
+
 def _norm(s: str) -> str:
-    """NFKC(全形→半形) + 臺→台 + 鍾→鐘 + 去空白。比對前一律過這關。
-       鍾/鐘為常見異體互換(官方庫「鍾山新村」vs OCR/慣用「鐘山新村」)。"""
+    """NFKC(全形→半形) + 臺→台 + 鍾→鐘 + 去空白 + 段號統一阿拉伯。
+       比對前一律過這關。鍾/鐘為常見異體互換(官方庫「鍾山新村」vs OCR/慣用
+       「鐘山新村」);段號統一是因契約慣用國字(「一段」)而官方庫全為
+       阿拉伯(「1段」),不統一則子字串精確比對必漏接。"""
     s = unicodedata.normalize("NFKC", s or "").replace("臺", "台").replace("鍾", "鐘")
+    s = re.sub(r"([0-9一二三四五六七八九十]+)段",
+               lambda m: _seg_to_arabic(m.group(1)) + "段", s)
     return re.sub(r"\s+", "", s)
 
 
@@ -171,23 +194,11 @@ def _match_city_area_en(en_text: str):
 _ROAD_RE = re.compile(
     r"([一-鿿A-Za-z]{1,8}?(?:大道|路|街|道))(?:\s*([0-9一二三四五六七八九十]+)\s*段)?")
 
-_CN_NUM = {c: i for i, c in enumerate("零一二三四五六七八九", 0)}
-
-
-def _seg_to_arabic(seg: str) -> str:
-    """段號轉阿拉伯:'二'→'2'、'十'→'10'、'十二'→'12'。純阿拉伯原樣回傳。"""
-    if seg is None:
-        return None
-    if seg.isdigit():
-        return seg
-    if seg == "十":
-        return "10"
-    if "十" in seg:                       # 十X / X十 / X十Y
-        a, _, b = seg.partition("十")
-        tens = _CN_NUM.get(a, 1) if a else 1
-        ones = _CN_NUM.get(b, 0) if b else 0
-        return str(tens * 10 + ones)
-    return str(_CN_NUM.get(seg, seg))
+# 段號必抓版:核心非貪婪會在第一個結尾字就停,「國道路1段」被抓成「國道」、
+# 段號漏失(公道五路/鐵道路/光明六路東 同型)。段號設為必要條件時,
+# regex 會被迫延伸核心直到段號真的接上 → 核心=國道路、段=1。先試此版。
+_ROAD_SEG_RE = re.compile(
+    r"([一-鿿A-Za-z]{1,8}?(?:大道|路|街|道))\s*([0-9一二三四五六七八九十]+)\s*段")
 
 
 def _dir_before_suffix(name: str):
@@ -199,20 +210,35 @@ def _dir_before_suffix(name: str):
 
 def _match_road(L: str, roads: list, cutoff: float = 0.5):
     """路名比對。回傳 (road_raw, road_eng, score) 或 None。
-    優先『含段號的完整路名精確配』,否則以路名主幹模糊配、再套回該段的官方英文;
-    regex 路徑失敗時,以官方路名『子字串精確含』收尾——鄉村地名型路名(枋子林、
-    廣興)與巷型正式路名(后尾巷)沒有 路/街/道 後綴,regex 抓不到,但官方庫有收。"""
-    m = _ROAD_RE.search(L)
+    優先序:①含段號的完整路名精確配(段號必抓版 regex 優先,救回
+    國道路/公道五路 這型核心會被非貪婪切錯的路名)→ ②官方路名『子字串
+    精確含』(對官方清單精確比對、取最長,無誤配風險;段號已在 _norm 統一
+    阿拉伯,「一段」原文也能含到「1段」條目)→ ③路名主幹模糊配(OCR 殘缺
+    時的備援)。鄉村地名型(枋子林)與巷型(后尾巷)無 路/街/道 後綴,
+    regex 抓不到,靠②。"""
+    m = _ROAD_SEG_RE.search(L) or _ROAD_RE.search(L)
     if m:
         road_core = _norm(m.group(1))              # 例:辛亥路
-        seg_num = _seg_to_arabic(m.group(2))       # 7 / 二→2 / 十二→12(可能為 None)
+        seg_num = _seg_to_arabic(m.group(2)) if m.lastindex >= 2 else None
         # 1. 有段號 → 直接組出「辛亥路7段」做精確配,拿到正確段別英文
         if seg_num:
             want = f"{road_core}{seg_num}段"
             for rn, base, raw, eng in roads:
                 if rn == want:
                     return raw, eng, 1.0
-        # 2. 以路名主幹模糊配(比對各路的去段主幹)。
+    # 2. 官方路名子字串精確含,取最長命中(精確比對無誤配風險;放在模糊配
+    #    之前,路名完整倖存時一定拿到正確條目——模糊配對「光明六路東」型
+    #    路名會配到同主幹的錯誤段別)。
+    hit = None
+    for rn, base, raw, eng in roads:
+        if len(rn) >= 2 and rn in L and (hit is None or len(rn) > len(hit[0])):
+            hit = (rn, raw, eng)
+    if hit:
+        return hit[1], hit[2], 1.0
+    if m:
+        road_core = _norm(m.group(1))
+        seg_num = _seg_to_arabic(m.group(2)) if m.lastindex >= 2 else None
+        # 3. 以路名主幹模糊配(比對各路的去段主幹)。
         #    方向字防護:結尾前的東西南北必須一致——「大眾東路」不可
         #    模糊配到「大眾路/大眾北路」(不同實體道路,配錯比留空糟)。
         core_dir = _dir_before_suffix(road_core)
@@ -232,21 +258,13 @@ def _match_road(L: str, roads: list, cutoff: float = 0.5):
             best_s, best_it = s, it
         if best_it is not None and best_s >= cutoff:
             base_hit = best_it[1]
-            # 3. 主幹配到後,若原文有段號,優先回傳「該主幹的第 N 段」官方條目
+            # 主幹配到後,若原文有段號,優先回傳「該主幹的第 N 段」官方條目
             if seg_num:
                 want = f"{base_hit}{seg_num}段"
                 for rn, base, raw, eng in roads:
                     if rn == want:
                         return raw, eng, best_s
             return best_it[2], best_it[3], best_s
-    # 4. 收尾:官方路名子字串精確含,取最長命中(對官方清單精確比對,無誤配
-    #    風險;較長條目如「后尾一橫巷」只有真的出現在行內才會蓋過「后尾巷」)。
-    hit = None
-    for rn, base, raw, eng in roads:
-        if len(rn) >= 2 and rn in L and (hit is None or len(rn) > len(hit[0])):
-            hit = (rn, raw, eng)
-    if hit:
-        return hit[1], hit[2], 1.0
     return None
 
 
