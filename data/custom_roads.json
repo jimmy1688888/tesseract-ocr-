@@ -12,5 +12,12 @@
     "RoadName": "富聯路",
     "RoadEngName": "Fulian Rd.",
     "_note": "31684 實例;政府開放資料 AllData.json 未收錄,自建補充"
+  },
+  {
+    "CityName": "彰化縣",
+    "AreaName": "二林鎮",
+    "RoadName": "自由路",
+    "RoadEngName": "Ziyou Rd.",
+    "_note": "32197 實例;政府開放資料 AllData.json 未收錄,自建補充"
   }
 ]
