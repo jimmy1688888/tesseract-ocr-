@@ -148,14 +148,24 @@ def _match_city(L: str):
 
 
 def _match_area(L: str, areas: dict):
-    """行政區比對:先『完整區名』精確含(解宜蘭縣→宜蘭市誤配),再去尾字,最後模糊。"""
+    """行政區比對:先『完整區名』精確含(解宜蘭縣→宜蘭市誤配),再去尾字,最後模糊。
+       精確含一律取**最長命中**:「安南區」包含子字串「南區」,取先命中會
+       配到錯誤的區(郵遞區號、路名清單整組跟著歪),與英文錨定的
+       Taipei/New Taipei 防護同理。"""
+    hit = None
     for an, v in areas.items():                   # 1. 完整區名(含 區/鎮/鄉/市)
-        if an in L:
-            return v
+        if an in L and (hit is None or len(an) > len(hit[0])):
+            hit = (an, v)
+    if hit:
+        return hit[1]
+    hit = None
     for an, v in areas.items():                   # 2. 去尾字
         core = an[:-1] if an[-1] in _AREA_SUFFIX else an
-        if core and len(core) >= 2 and core in L:
-            return v
+        if core and len(core) >= 2 and core in L and \
+           (hit is None or len(core) > len(hit[0])):
+            hit = (core, v)
+    if hit:
+        return hit[1]
     items = [(k,) + v for k, v in areas.items()]  # 3. 模糊
     _, hit = _best(L, items, key=lambda x: x[0], cutoff=0.6)
     return (hit[1], hit[2], hit[3], hit[4]) if hit else None
