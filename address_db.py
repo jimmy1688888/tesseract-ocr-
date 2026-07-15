@@ -104,7 +104,8 @@ def _merge_custom_roads(cities) -> None:
         return
     for e in entries:
         try:
-            city = next(c for c in cities if c[1] == e["CityName"])
+            # 用正規化名比對(臺/台等價),手動新增寫「台中市」也能對上官方「臺中市」
+            city = next(c for c in cities if c[0] == _norm(e["CityName"]))
             area = city[3].get(_norm(e["AreaName"]))
             if not area:
                 continue

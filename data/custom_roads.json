@@ -19,5 +19,12 @@
     "RoadName": "自由路",
     "RoadEngName": "Ziyou Rd.",
     "_note": "32197 實例;政府開放資料 AllData.json 未收錄,自建補充"
+  },
+  {
+    "CityName": "臺中市",
+    "AreaName": "梧棲區",
+    "RoadName": "民和路１段",
+    "RoadEngName": "Sec. 1, Minhe Rd.",
+    "_note": "32225 實例;政府開放資料 AllData.json 未收錄,自建補充"
   }
 ]
