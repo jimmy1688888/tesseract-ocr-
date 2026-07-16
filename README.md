@@ -22,6 +22,7 @@
 - [輸出欄位](#輸出欄位)
 - [處理流程](#處理流程)
 - [仲介欄位與雇主欄位的處理原理（交接說明）](#仲介欄位與雇主欄位的處理原理交接說明)
+- [許可證選值流程（B 欄）——以 32201 為實例](#許可證選值流程b-欄以-32201-為實例)
 - [參數調整](#參數調整)
 - [檔案結構](#檔案結構)
 - [常見問題](#常見問題)
@@ -292,6 +293,76 @@ E~G 空，先確認 `data/agency_roster.json` 存在、再確認 B 欄有值且�
 - J/L/N 空但 K 有值 → 官方庫涵蓋問題，走 Q6 的 `python address_db.py 路名` 查證，
   確認缺路就補 `data/custom_roads.json`（格式規範見 Q6）。
 - 名稱欄（H）錯字/亂碼 → 幾乎都是紅章蓋名，看截圖人工修正即可，OCR 救不了。
+
+---
+
+## 許可證選值流程（B 欄）——以 32201 為實例
+
+B 欄的值怎麼選出來的？核心設計原則一句話：
+
+> **任何值要「自動」寫入，必須有兩個以上互相獨立的證據；
+> 只有單一證據時，一律送 Vision 求第二證據或標人工審查。**
+
+「獨立證據」有三種形態：①同文件兩個區域各自印的號碼互相吻合（mol ROI ↔
+permit ROI 交叉）②同一號碼在多組前處理設定下重複讀到（多數票）
+③兩個不同 OCR 引擎讀到同值（Tesseract ↔ Vision）。
+
+### 第一層：檔案層分流（每份 docx 判一次）
+
+Tesseract 掃完全部圖片後（每張圖 × 多組前處理 config × mol/permit 三個 ROI），
+依整份 docx 的命中情形分流。**large docx**（圖片數 > 3）的分支：
+
+| # | 狀況 | 去向 | 為何如此設計 |
+|---|---|---|---|
+| A | mol 與 permit 兩 ROI 讀到**同一值**，最高信心夠高 | **直接 key-in** | 文件兩處獨立印刷互證，等同雙重確認 |
+| A' | 同上但信心不足 | 送 Vision | 值可信但讀得勉強，要第二引擎背書 |
+| A'' | mol 與 permit 都有值但**不同**（衝突） | 送 Vision | 值衝突絕不自動選邊；以 permit ROI 最早圖為候選（permit ROI 目的明確，mol 僅輔助） |
+| A2 | 僅 permit 有值，**多數票**（同值讀到 ≥2 次）且平均信心 > `CONF_VOTE_MIN`(45) | **直接 key-in** | 多組 config／上下兩 ROI 重複讀到同值，重複性本身就是第二證據；門檻可低於單次讀值的 55，因為多數票已是多重證據 |
+| B | permit 有命中但**無多數**（各次讀到的值湊不齊 2 票） | 送 Vision | 單次判讀不可信，取信心最高者當候選送驗 |
+| C | 其餘標了 vision_review 的（僅 mol 信心低、互證吻合但信心低…） | 送 Vision | 同上，單一證據不足 |
+| D | **全部圖片無命中** | **人工審查**（不送 Vision） | 沒有候選值可交叉驗證，Vision 讀到也只是單引擎，照原則仍要人工——不如省下 API 呼叫 |
+
+**small docx**（圖片數 ≤ 3，版面固定）較簡單：mol 多數票且平均信心 >
+`CONF_MOL_VOTE_MIN`(50) → 直接 key-in；其餘有值 → 送 Vision；全無命中 → 人工審查。
+
+### 第二層：送 Vision 件的交叉比對（verify_vision_result）
+
+送 Vision 的件，拿 Vision 讀值與 Tesseract 候選值比對，五種結果：
+
+| 等級 | 意義 | 去向 |
+|---|---|---|
+| CONFIRMED | 雙引擎**完全一致** | 自動 key-in |
+| LIKELY_OCR_CONFUSION | **差 1 字元**（0/O、5/S 型混淆） | 人工審查，**不自動填任何一方的值**，兩候選都寫進 reason |
+| VISION_ONLY | Tesseract 無候選，僅 Vision 有值 | 人工審查（單引擎） |
+| DISAGREEMENT | 差 2 字元以上 | 人工審查 |
+| FORMAT_INVALID | Vision 無值或非 4 位數格式 | 人工審查 |
+
+歷史成功清單（upload_log.csv 累積）只用來在 reason 補一句「此值歷史出現過」
+幫人工排優先順序，**不作為自動採用的依據**——避免歷史錯值自我強化。
+
+### 實例：32201.docx 走的是哪條路
+
+`scan_results/matches.csv` 中 32201 的真實紀錄：
+
+```
+docx_class = large          （圖片數 > 3）
+image_name = image5.jpeg    （命中圖）
+mol        = （空）          ← mol ROI 全部沒讀到
+id         = 2674           ← permit ROI 讀到
+id_from_vote = Y            ← 多數票產生（≥2 次讀到 2674）
+id_conf    = 67.1           ← 得票各次的平均信心
+hit_roi    = permit_upper   ／ hit_config = 紅通道_2x_中值3
+```
+
+逐層對照：mol 無值 → 走「僅 permit」線；`id_from_vote=Y` 且
+平均信心 67.1 > 門檻 45 → 命中**規則 A2**：多數票即第二證據，
+**直接 key-in、不送 Vision**。寫入 Sheets 時 status=`keyed-in`、
+reason=`permit多數票_高信心_最早圖(image5.jpeg) conf=67.1`，
+B 欄 = 2674，E~G 由 2674 查名冊自動補上。
+
+> 追查任何一筆的選值過程：先看 Sheets 的 **D 欄 reason**（分流理由都寫在這），
+> 再開 `scan_results/matches.csv` 對 `mol / id / *_from_vote / *_conf / note`
+> 欄位，即可完整還原該筆走過的分支。
 
 ---
 
