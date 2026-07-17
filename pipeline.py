@@ -94,7 +94,10 @@ def _permit_lookup() -> "PermitLookup | None":
 INPUT_DIR  = Path("./docs")
 OUTPUT_DIR = Path("./scan_results")
 TESS_LANG  = "ind+eng"
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
+# 含 .gif:部分 docx 把契約頁存成 GIF(image2.gif/image3.gif),漏收會讓
+# 整份只剩護照 JPEG、契約頁被靜默略過(32254-32262 教訓)。PIL 原生可讀,
+# 後續 .convert("RGB") 會處理調色盤/灰階,Tesseract 與 Vision 都吃得下。
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif"}
 
 # Google Sheets
 SPREADSHEET_ID = "1zL5sRhaJHHXd-FBcY7rEm28Sfhz48l32gBwn-ATHalM"

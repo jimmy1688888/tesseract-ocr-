@@ -318,7 +318,8 @@ def _docx_images(docx_path: str) -> list[tuple[str, bytes]]:
     """讀 docx 內嵌圖(word/media/*),回傳 (檔名, bytes) 清單。"""
     import zipfile
     from pathlib import Path
-    exts = {".jpg", ".jpeg", ".png"}
+    # 含 .gif:契約頁有時存成 GIF(image2.gif),漏收會只剩護照 JPEG(32254 教訓)。
+    exts = {".jpg", ".jpeg", ".png", ".gif"}
     with zipfile.ZipFile(docx_path) as z:
         return [(Path(n).name, z.read(n)) for n in z.namelist()
                 if n.startswith("word/media/") and Path(n).suffix.lower() in exts]
