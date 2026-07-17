@@ -56,15 +56,27 @@ BOILERPLATE = re.compile(
 EMPLOYER_ROI = (0.0, 0.0, 1.0, 0.35)
 
 # 契約頁特徵字:用來從 docx 多張圖中辨識「哪一張是勞動契約頁」。
-# 標題大字(PERJANJIAN KERJA/MAJIKAN DENGAN)常被紅章毀成讀不出,
-# 故也收雇主區塊的標籤詞(Nama Perusahaan=公司雇主、Nomor Telepon、Alamat)
-# 與結尾樣板(SELANJUTNYA/PIHAK PERTAMA),提高破損掃描的辨識韌性。
-CONTRACT_MARKERS = re.compile(
-    r"PERJANJIAN\s*KERJA|MAJIKAN\s*DENGAN|Nama\s*Majikan|Nama\s*Perusahaan"
-    r"|Nomor\s*Telepon|SELANJUTNYA|PIHAK\s*PERTAMA|Alamat|MOL\s*License"
-    r"|勞動契約|甲方名稱",
+# 分兩類加權計分,以區辨「雇主資料表」與「簽名頁」:
+#   FORM_LABELS(權重 2):只出現在雇主資料表的欄位標籤(雇主/甲方名稱、
+#     Nama Majikan/Perusahaan/Pemberi Kerja、Alamat、Nomor Telepon、
+#     招募許可函號、MOL License)。這正是我們要抽資料的那頁。
+#   PROSE_MARKERS(權重 1):樣板文字,簽名頁的長段 prose 也密集出現
+#     (PERJANJIAN KERJA、PIHAK PERTAMA、SELANJUTNYA、MAJIKAN DENGAN、勞動契約)。
+# 只數總命中會讓 prose 密集的簽名頁壓過真正的資料表(32262 農業契約教訓:
+# image3 簽名頁 prose 命中 4 > image2 資料表 2 → 選錯頁、名稱抽到樣板字)。
+# 加權後資料表(欄位標籤×2)穩定勝出;標題被紅章毀時仍有 FORM 標籤撐分。
+_FORM_LABELS = re.compile(
+    r"Nama\s*Majikan|Nama\s*Perusahaan|Pemberi\s*Kerja|Nomor\s*Telepon"
+    r"|Alamat|MOL\s*License|招募許可|甲方名稱|雇主名[稱称]",
     re.I,
 )
+_PROSE_MARKERS = re.compile(
+    r"PERJANJIAN\s*KERJA|MAJIKAN\s*DENGAN|PIHAK\s*PERTAMA|SELANJUTNYA|勞動契約",
+    re.I,
+)
+# 向後相容:保留舊名(外部若引用),等同兩類聯集。
+CONTRACT_MARKERS = re.compile(
+    _FORM_LABELS.pattern + "|" + _PROSE_MARKERS.pattern, re.I)
 
 
 def _has_cjk(s: str) -> bool:
@@ -110,8 +122,10 @@ def _tesseract_top_text(image_bytes: bytes, top_frac: float = 0.35) -> str:
 
 
 def score_contract_page(image_bytes: bytes) -> int:
-    """一張圖的「契約頁特徵字」命中數。越高越可能是勞動契約頁。"""
-    return len(CONTRACT_MARKERS.findall(_tesseract_top_text(image_bytes)))
+    """一張圖的契約頁分數:欄位標籤(FORM)×2 + 樣板(PROSE)×1。
+    加權讓「雇主資料表」壓過只有 prose 的簽名頁(見 CONTRACT_MARKERS 註解)。"""
+    text = _tesseract_top_text(image_bytes)
+    return 2 * len(_FORM_LABELS.findall(text)) + len(_PROSE_MARKERS.findall(text))
 
 
 def find_contract_image(images: list[tuple[str, bytes]],
