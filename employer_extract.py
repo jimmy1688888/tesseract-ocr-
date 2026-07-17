@@ -24,6 +24,8 @@ CJK        = re.compile(r"[一-鿿]")
 PHONE      = re.compile(r"(?<!\d)(0\d{1,3}-?\d{6,8})(?!\d)")
 # 括號區碼格式:(04)7775-863、(02) 2371-7608。統一正規化成「區碼-號碼」。
 PHONE_PAREN = re.compile(r"\((0\d{1,3})\)\s*(\d{3,4})\s*-?\s*(\d{3,4})(?!\d)")
+# 電話標籤行(不含「傳真」,避免傳真號被當電話):優先取此類行上的號碼。
+PHONE_LINE_LABEL = re.compile(r"電話|Nomor\s*Telepon", re.I)
 
 
 def _phones_in(line: str) -> list[str]:
@@ -197,17 +199,24 @@ def extract_employer_fields(text: str) -> dict:
     # ── 電話:只統計雇主區塊內。仲介框在區塊上方,其電話絕不能混入——
     #    雇主電話被格式/紅章毀掉時,全文統計的 fallback 會把仲介電話
     #    誤當雇主電話(32098 實例),故寧可留空也不取區塊外的號碼。
-    #    出現兩次者為雇主(電話 + Nomor Telepon 各一);否則取最常見。
-    counts: dict[str, int] = {}
+    #    優先「電話/Nomor Telepon 標籤行」上的號碼:農業契約地址含地號
+    #    (0075-0010…)會被 PHONE regex 誤當電話,標籤行優先可避開(32262 教訓);
+    #    標籤行取不到才退回全區塊。出現兩次者(電話+Nomor Telepon 各一)優先。
+    labeled_counts: dict[str, int] = {}
+    all_counts: dict[str, int] = {}
     for l in seg:
+        on_label = bool(PHONE_LINE_LABEL.search(l))
         for m in _phones_in(l):
-            counts[m] = counts.get(m, 0) + 1
+            all_counts[m] = all_counts.get(m, 0) + 1
+            if on_label:
+                labeled_counts[m] = labeled_counts.get(m, 0) + 1
+    pool = labeled_counts or all_counts
     phone = ""
-    dup = [p for p, c in counts.items() if c >= 2]
+    dup = [p for p, c in pool.items() if c >= 2]
     if dup:
-        phone = max(dup, key=lambda p: counts[p])
-    elif counts:
-        phone = max(counts, key=lambda p: counts[p])
+        phone = max(dup, key=lambda p: pool[p])
+    elif pool:
+        phone = max(pool, key=lambda p: pool[p])
 
     # ── 地址:中文靠行政區+街道 pattern;英文靠地址關鍵字 ──
     addr_cn = addr_en = en_hint = ""
