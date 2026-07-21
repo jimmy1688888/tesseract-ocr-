@@ -353,31 +353,27 @@ def _docx_images(docx_path: str) -> list[tuple[str, bytes]]:
 # 標記即停的區塊,結構性排除右側/下方的印尼仲介電話。
 _TW_AGENCY_LABEL = re.compile(r"[台臺]灣仲介|Agen(?:cy|si)\s*Taiwan", re.I)
 _ID_AGENCY_LABEL = re.compile(r"印尼仲介|P3MI|Agen(?:cy|si)\s*Indonesia|Perwakilan", re.I)
-# 仲介公司名的常見字尾/關鍵字(用來從區塊挑出中文機構名)。
-_AGENCY_NAME_KW = re.compile(r"有限公司|股份有限公司|人力|顧問|企業|仲介|資源|開發|國際")
 
 
-def agency_block_from_next_page(docx_path: str, client=None) -> dict:
-    """全無命中救援:取「契約頁的次一頁」左半邊的『台灣仲介公司』區塊。
+def agency_phones_from_next_page(docx_path: str, client=None) -> list[str]:
+    """全無命中救援:取「契約頁的次一頁」左半邊『台灣仲介公司』區塊的電話候選。
 
     雙重隔離只取台灣仲介(不誤取右側/下方印尼 P3MI):
       ① 幾何:只裁左半邊。
       ② 語意:錨定『台灣仲介』標記,遇『印尼仲介/P3MI』標記即停。
-    回傳 {"phones": [台灣電話候選(排傳真、保序)], "name": OCR 台仲名稱}。
-    找不到契約頁/無次頁 → 皆空。
+    回傳台灣電話候選(排傳真、去重保序);找不到契約頁/無次頁 → 空清單。
     """
-    empty = {"phones": [], "name": ""}
     imgs = _docx_images(docx_path)
     if not imgs:
-        return empty
+        return []
     ordered = sorted(imgs, key=lambda x: _natural_key(x[0]))
     page = find_contract_image(imgs)
     if not page:
-        return empty
+        return []
     names = [n for n, _ in ordered]
     ci = names.index(page[0])
     if ci + 1 >= len(ordered):
-        return empty                       # 契約頁是最後一張,無次頁
+        return []                          # 契約頁是最後一張,無次頁
     img = ImageOps.exif_transpose(
         Image.open(BytesIO(ordered[ci + 1][1])).convert("RGB"))
     w, h = img.size
@@ -396,14 +392,6 @@ def agency_block_from_next_page(docx_path: str, client=None) -> dict:
                     if _ID_AGENCY_LABEL.search(lines[i])), len(lines))
         block = lines[start:end]
 
-    # 名稱:區塊內第一個含機構關鍵字的中文行(去括號註記與標記字)。
-    name = ""
-    for l in block:
-        if _has_cjk(l) and _AGENCY_NAME_KW.search(l) and not _TW_AGENCY_LABEL.search(l):
-            name = re.sub(r"[（(].*?[)）]", "", l)
-            name = re.sub(r"\s+", "", name).strip()
-            break
-
     # 電話:區塊內切掉「傳真/Fax」後段,抽台灣電話;去重保序。
     seen: set[str] = set()
     phones: list[str] = []
@@ -413,7 +401,7 @@ def agency_block_from_next_page(docx_path: str, client=None) -> dict:
             if ph not in seen:
                 seen.add(ph)
                 phones.append(ph)
-    return {"phones": phones, "name": name}
+    return phones
 
 
 def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
