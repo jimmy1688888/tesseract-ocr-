@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
+from collections import defaultdict
 from pathlib import Path
 
 # 手動更新用:瀏覽器開此連結下載 JSON,覆蓋 ROSTER_PATH
@@ -121,6 +123,24 @@ def build_indices(records: list[dict]) -> tuple[dict[int, dict], dict[str, dict]
     return main_index, branch_index
 
 
+def _norm_phone(phone: str) -> str:
+    """電話正規化:去掉所有非數字(02-2727-6999 → 0227276999),供反查比對。"""
+    return re.sub(r"\D", "", str(phone or ""))
+
+
+def build_phone_index(records: list[dict]) -> dict[str, list[dict]]:
+    """建「正規化電話 → 有效機構列」索引,供全無命中時以仲介電話反查許可證。
+    只收目前有效者;同電話多家(約 2.6%)保留全部,由呼叫端判定模糊不採用。"""
+    idx: dict[str, list[dict]] = defaultdict(list)
+    for rec in records:
+        if not _is_active(rec):
+            continue
+        n = _norm_phone(rec.get("電話"))
+        if n:
+            idx[n].append(_info(rec))
+    return idx
+
+
 class PermitLookup:
     """許可證查表器。建構一次、重複查詢。"""
 
@@ -128,6 +148,7 @@ class PermitLookup:
         if records is None:
             records = fetch_roster()
         self.main_index, self.branch_index = build_indices(records)
+        self.phone_index = build_phone_index(records)
 
     def lookup(self, permit: str) -> dict | None:
         """回傳 {機構名稱, 機構地址, 電話, 許可證, 有效};查無 → None。
@@ -143,12 +164,24 @@ class PermitLookup:
             return self.branch_index.get(_branch_key(base, suffix))
         return self.main_index.get(base)
 
+    def lookup_by_phone(self, phone: str) -> dict | None:
+        """電話反查機構。正規化後唯一命中「一個許可證」才回傳(避免模糊);
+        查無、或同電話對到多個許可證 → None。用於全無命中救援:
+        契約次一頁的仲介電話 → 回推許可證 + 機構名稱/地址/電話。"""
+        n = _norm_phone(phone)
+        if not n:
+            return None
+        hits = self.phone_index.get(n, [])
+        by_permit = {h["許可證"]: h for h in hits}   # 同機構歷史多列去重
+        return next(iter(by_permit.values())) if len(by_permit) == 1 else None
+
 
 if __name__ == "__main__":
     import sys
 
     pl = PermitLookup()
-    print(f"名冊索引筆數:{len(pl.index)}")
+    print(f"名冊索引筆數:母公司 {len(pl.main_index)}／分公司 {len(pl.branch_index)}"
+          f"／電話 {len(pl.phone_index)}")
     for permit in sys.argv[1:] or ["2340", "2639", "0001", "99999"]:
         info = pl.lookup(permit)
         if info:

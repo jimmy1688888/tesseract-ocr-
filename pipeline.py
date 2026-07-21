@@ -1656,6 +1656,47 @@ def collect_employer_fields(docx_files) -> None:
             )
 
 
+def rescue_manual_review_via_agency_phone(manual_review: list[dict]) -> int:
+    """全無命中救援:對每筆 manual_review(全無命中),掃契約次一頁左半邊的
+    仲介電話 → 反查名冊 → 回推許可證,寫回該筆的 final_value 與 reason。
+    許可證有值後,_row_to_sheet_values 會自動經 _agency_cols 補上 E~G 機構欄。
+    回傳成功救回的筆數。名冊/Vision 缺失時安靜跳過,不影響主流程。"""
+    pl = _permit_lookup()
+    if pl is None or not manual_review:
+        return 0
+    try:
+        from employer_extract import agency_phones_from_next_page
+        client = get_vision_client()
+    except Exception as e:
+        logger.warning(f"  ⚠ 電話反查救援不可用(略過):{e!r}")
+        return 0
+    rescued = 0
+    for item in manual_review:
+        docx_path = INPUT_DIR / item["source_docx"]
+        if not docx_path.exists():
+            continue
+        try:
+            phones = agency_phones_from_next_page(str(docx_path), client=client)
+        except Exception as e:
+            logger.warning(f"  ⚠ {item['source_docx']} 次頁電話擷取失敗:{e!r}")
+            continue
+        for ph in phones:
+            info = pl.lookup_by_phone(ph)
+            if info:
+                item["final_value"] = info["許可證"]
+                item["reason"] = (
+                    f"{item['reason']}；[電話反查救回] 次頁仲介電話 {ph} → "
+                    f"許可證 {info['許可證']}／{info['機構名稱']}(仍請人工核對)"
+                )
+                logger.info(
+                    f"  ↻ {item['source_docx']} 全無命中救回:電話 {ph} → "
+                    f"許可證 {info['許可證']}／{info['機構名稱']}"
+                )
+                rescued += 1
+                break
+    return rescued
+
+
 def _employer_cols(r) -> list[str]:
     """依 _EMPLOYER_COL_KEYS 取雇主 8 欄:row 自帶的 key 優先,否則查 docx 快取。"""
     if isinstance(r, dict):
@@ -1974,10 +2015,21 @@ def main(opts: argparse.Namespace) -> None:
     logger.info("── 步驟 4b 前置：雇主資料擷取（契約頁 OCR → H~O 欄）──")
     collect_employer_fields(docx_files)
 
+    # ── 步驟 4b 前置②：全無命中救援（次頁仲介電話 → 反查名冊 → 回推許可證）──
+    # 全無命中原本 B 欄空、只能人工;改送 Vision 掃契約次一頁左半邊的仲介電話,
+    # 反查名冊回推許可證。救回者仍標 manual_review、D 欄註明,供人工快速核對。
+    if manual_review:
+        logger.info("── 步驟 4b 前置②：全無命中 → 次頁仲介電話反查名冊 ──")
+        n_rescued = rescue_manual_review_via_agency_phone(manual_review)
+        logger.info(f"  電話反查救回 {n_rescued}/{len(manual_review)} 筆(填許可證+機構欄)")
+
     logger.info("── 步驟 4b：合併批次寫入 Google Sheets（atomic）──")
     auto_keyin_batch = keyin_items + vision_auto_keyin   # VisionQueueItem + dict 混合,_row_to_sheet_values 兼容
     review_batch = vision_review_rows + [
-        {"source_docx": d["source_docx"], "candidate_value": "", "reason": d["reason"]}
+        # 電話反查救回的許可證放 candidate_value,_agency_cols 會據此補 E~G。
+        {"source_docx": d["source_docx"],
+         "candidate_value": d.get("final_value", ""),
+         "reason": d["reason"]}
         for d in manual_review
     ]
     written = write_sheets_batched([

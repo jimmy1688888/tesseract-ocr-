@@ -348,6 +348,43 @@ def _docx_images(docx_path: str) -> list[tuple[str, bytes]]:
                 if n.startswith("word/media/") and Path(n).suffix.lower() in exts]
 
 
+def agency_phones_from_next_page(docx_path: str, client=None) -> list[str]:
+    """全無命中救援:取「契約頁的次一頁」左半邊,抽仲介電話候選。
+
+    契約簽名頁(次一頁)左半邊有「台灣仲介公司(Agency Taiwan)」區塊,含仲介
+    名稱/地址/電話。回傳電話候選(排除傳真號、去重保序),供呼叫端反查名冊
+    回推許可證。找不到契約頁/無次頁/該區無電話 → 回空清單。
+    """
+    imgs = _docx_images(docx_path)
+    if not imgs:
+        return []
+    ordered = sorted(imgs, key=lambda x: _natural_key(x[0]))
+    page = find_contract_image(imgs)
+    if not page:
+        return []
+    names = [n for n, _ in ordered]
+    ci = names.index(page[0])
+    if ci + 1 >= len(ordered):
+        return []                          # 契約頁是最後一張,無次頁
+    next_bytes = ordered[ci + 1][1]
+    img = ImageOps.exif_transpose(Image.open(BytesIO(next_bytes)).convert("RGB"))
+    w, h = img.size
+    left = img.crop((0, 0, int(w * 0.5), h))
+    buf = BytesIO()
+    left.save(buf, format="PNG")
+    text = vision_full_text(buf.getvalue(), client=client)
+    # 逐行:切掉「傳真/Fax」之後的部分(傳真號不要),再抽電話;去重保序。
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in text.splitlines():
+        head = re.split(r"傳真|Fax", line, maxsplit=1)[0]
+        for ph in _phones_in(head):
+            if ph not in seen:
+                seen.add(ph)
+                out.append(ph)
+    return out
+
+
 def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
                                roi: tuple | None = EMPLOYER_ROI,
                                crop_dir: str = "") -> dict:
