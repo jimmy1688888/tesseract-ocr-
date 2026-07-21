@@ -164,16 +164,19 @@ class PermitLookup:
             return self.branch_index.get(_branch_key(base, suffix))
         return self.main_index.get(base)
 
-    def lookup_by_phone(self, phone: str) -> dict | None:
-        """電話反查機構。正規化後唯一命中「一個許可證」才回傳(避免模糊);
-        查無、或同電話對到多個許可證 → None。用於全無命中救援:
-        契約次一頁的仲介電話 → 回推許可證 + 機構名稱/地址/電話。"""
+    def agencies_by_phone(self, phone: str) -> list[dict]:
+        """電話反查機構:回傳所有命中的有效機構(依許可證去重),0/1/多筆皆可能。
+        用於全無命中救援——多筆(同電話多家台仲)時由呼叫端列出供人工擇一。"""
         n = _norm_phone(phone)
         if not n:
-            return None
-        hits = self.phone_index.get(n, [])
-        by_permit = {h["許可證"]: h for h in hits}   # 同機構歷史多列去重
-        return next(iter(by_permit.values())) if len(by_permit) == 1 else None
+            return []
+        by_permit = {h["許可證"]: h for h in self.phone_index.get(n, [])}
+        return list(by_permit.values())
+
+    def lookup_by_phone(self, phone: str) -> dict | None:
+        """電話反查:唯一命中才回傳,查無或多家(模糊)→ None。"""
+        m = self.agencies_by_phone(phone)
+        return m[0] if len(m) == 1 else None
 
 
 if __name__ == "__main__":

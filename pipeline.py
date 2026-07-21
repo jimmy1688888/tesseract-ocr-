@@ -1656,16 +1656,35 @@ def collect_employer_fields(docx_files) -> None:
             )
 
 
+def _agency_name_similar(ocr_name: str, roster_name: str) -> bool:
+    """OCR 機構名是否與名冊機構名相符(只比中文字)。
+    互為子字串即符合;否則要求名冊名的『品牌前綴(前2字)』出現在 OCR 名中。
+    不可只靠 difflib 相似度——「A人力資源有限公司」與「B人力資源有限公司」
+    共用通用字尾,相似度會偏高而誤判兩家不同機構為同一家,消歧時很危險。"""
+    a = re.sub(r"[^一-鿿]", "", ocr_name or "")
+    b = re.sub(r"[^一-鿿]", "", roster_name or "")
+    if not a or not b:
+        return False
+    if a in b or b in a:
+        return True
+    brand = b[:2]                     # 品牌名通常在前2字(優肯/灃康),具鑑別力
+    return bool(brand) and brand in a
+
+
 def rescue_manual_review_via_agency_phone(manual_review: list[dict]) -> int:
-    """全無命中救援:對每筆 manual_review(全無命中),掃契約次一頁左半邊的
-    仲介電話 → 反查名冊 → 回推許可證,寫回該筆的 final_value 與 reason。
-    許可證有值後,_row_to_sheet_values 會自動經 _agency_cols 補上 E~G 機構欄。
-    回傳成功救回的筆數。名冊/Vision 缺失時安靜跳過,不影響主流程。"""
+    """全無命中救援:掃契約次一頁左半邊的『台灣仲介』區塊,以電話反查名冊
+    回推許可證,並用該區塊的機構名稱交叉核對。寫回 final_value / reason,
+    _agency_cols 會據許可證自動補 E~G。回傳成功救回筆數(不含多家待人工者)。
+
+    - 電話唯一命中 → 救回;名稱與名冊不符時 reason 加註提醒。
+    - 同電話命中多家台仲 → 先以區塊名稱消歧;仍無法唯一 → 不填 B,
+      把命中的每一家(許可證/名稱)列進 reason,標人工擇一(需求 3)。
+    名冊/Vision 缺失時安靜跳過,不影響主流程。"""
     pl = _permit_lookup()
     if pl is None or not manual_review:
         return 0
     try:
-        from employer_extract import agency_phones_from_next_page
+        from employer_extract import agency_block_from_next_page
         client = get_vision_client()
     except Exception as e:
         logger.warning(f"  ⚠ 電話反查救援不可用(略過):{e!r}")
@@ -1676,24 +1695,56 @@ def rescue_manual_review_via_agency_phone(manual_review: list[dict]) -> int:
         if not docx_path.exists():
             continue
         try:
-            phones = agency_phones_from_next_page(str(docx_path), client=client)
+            block = agency_block_from_next_page(str(docx_path), client=client)
         except Exception as e:
-            logger.warning(f"  ⚠ {item['source_docx']} 次頁電話擷取失敗:{e!r}")
+            logger.warning(f"  ⚠ {item['source_docx']} 次頁仲介區擷取失敗:{e!r}")
             continue
+        phones, ocr_name = block["phones"], block["name"]
+
+        # 逐一評估電話,擇最佳結果:唯一命中 > 名稱消歧 > 多家待人工。
+        best = None   # ("single"|"disambig", info, ph) 或 ("ambig", matches, ph)
         for ph in phones:
-            info = pl.lookup_by_phone(ph)
-            if info:
-                item["final_value"] = info["許可證"]
-                item["reason"] = (
-                    f"{item['reason']}；[電話反查救回] 次頁仲介電話 {ph} → "
-                    f"許可證 {info['許可證']}／{info['機構名稱']}(仍請人工核對)"
-                )
-                logger.info(
-                    f"  ↻ {item['source_docx']} 全無命中救回:電話 {ph} → "
-                    f"許可證 {info['許可證']}／{info['機構名稱']}"
-                )
-                rescued += 1
-                break
+            matches = pl.agencies_by_phone(ph)
+            if not matches:
+                continue
+            if len(matches) == 1:
+                best = ("single", matches[0], ph)
+                break                                     # 最佳,直接採用
+            named = [m for m in matches if _agency_name_similar(ocr_name, m["機構名稱"])]
+            if len(named) == 1:
+                if best is None or best[0] == "ambig":
+                    best = ("disambig", named[0], ph)     # 名稱消歧,續找有無唯一命中
+            elif best is None:
+                best = ("ambig", matches, ph)             # 暫記多家,續找更好的
+
+        if best is None:
+            continue
+        kind, payload, ph = best
+        if kind in ("single", "disambig"):
+            info = payload
+            xnote = "" if _agency_name_similar(ocr_name, info["機構名稱"]) \
+                else f"(區塊名稱「{ocr_name}」與名冊略有出入,請核對)"
+            tag = "唯一命中" if kind == "single" else "多家以名稱消歧"
+            item["final_value"] = info["許可證"]
+            item["reason"] = (
+                f"{item['reason']}；[電話反查救回·{tag}] 次頁台仲電話 {ph} → "
+                f"許可證 {info['許可證']}／{info['機構名稱']}{xnote}(仍請人工核對)"
+            )
+            logger.info(
+                f"  ↻ {item['source_docx']} 全無命中救回({tag}):電話 {ph} → "
+                f"許可證 {info['許可證']}／{info['機構名稱']}"
+            )
+            rescued += 1
+        else:  # ambig:同電話多家台仲,列出供人工擇一,不自動填 B
+            cand = "、".join(f"{m['許可證']}／{m['機構名稱']}" for m in payload)
+            item["reason"] = (
+                f"{item['reason']}；[電話反查·需人工擇一] 台仲電話 {ph} 命中"
+                f"{len(payload)} 家:{cand}"
+            )
+            logger.info(
+                f"  ⚠ {item['source_docx']} 電話 {ph} 命中 {len(payload)} 家台仲,"
+                f"列出供人工擇一:{cand}"
+            )
     return rescued
 
 

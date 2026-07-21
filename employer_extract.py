@@ -348,41 +348,72 @@ def _docx_images(docx_path: str) -> list[tuple[str, bytes]]:
                 if n.startswith("word/media/") and Path(n).suffix.lower() in exts]
 
 
-def agency_phones_from_next_page(docx_path: str, client=None) -> list[str]:
-    """全無命中救援:取「契約頁的次一頁」左半邊,抽仲介電話候選。
+# 台灣/印尼仲介區塊標記(次頁左半)。台印電話都以 0 開頭、格式會重疊,無法靠
+# 純格式區分,故改「標記錨定」:只取『台灣仲介』標記之後、遇『印尼仲介/P3MI』
+# 標記即停的區塊,結構性排除右側/下方的印尼仲介電話。
+_TW_AGENCY_LABEL = re.compile(r"[台臺]灣仲介|Agen(?:cy|si)\s*Taiwan", re.I)
+_ID_AGENCY_LABEL = re.compile(r"印尼仲介|P3MI|Agen(?:cy|si)\s*Indonesia|Perwakilan", re.I)
+# 仲介公司名的常見字尾/關鍵字(用來從區塊挑出中文機構名)。
+_AGENCY_NAME_KW = re.compile(r"有限公司|股份有限公司|人力|顧問|企業|仲介|資源|開發|國際")
 
-    契約簽名頁(次一頁)左半邊有「台灣仲介公司(Agency Taiwan)」區塊,含仲介
-    名稱/地址/電話。回傳電話候選(排除傳真號、去重保序),供呼叫端反查名冊
-    回推許可證。找不到契約頁/無次頁/該區無電話 → 回空清單。
+
+def agency_block_from_next_page(docx_path: str, client=None) -> dict:
+    """全無命中救援:取「契約頁的次一頁」左半邊的『台灣仲介公司』區塊。
+
+    雙重隔離只取台灣仲介(不誤取右側/下方印尼 P3MI):
+      ① 幾何:只裁左半邊。
+      ② 語意:錨定『台灣仲介』標記,遇『印尼仲介/P3MI』標記即停。
+    回傳 {"phones": [台灣電話候選(排傳真、保序)], "name": OCR 台仲名稱}。
+    找不到契約頁/無次頁 → 皆空。
     """
+    empty = {"phones": [], "name": ""}
     imgs = _docx_images(docx_path)
     if not imgs:
-        return []
+        return empty
     ordered = sorted(imgs, key=lambda x: _natural_key(x[0]))
     page = find_contract_image(imgs)
     if not page:
-        return []
+        return empty
     names = [n for n, _ in ordered]
     ci = names.index(page[0])
     if ci + 1 >= len(ordered):
-        return []                          # 契約頁是最後一張,無次頁
-    next_bytes = ordered[ci + 1][1]
-    img = ImageOps.exif_transpose(Image.open(BytesIO(next_bytes)).convert("RGB"))
+        return empty                       # 契約頁是最後一張,無次頁
+    img = ImageOps.exif_transpose(
+        Image.open(BytesIO(ordered[ci + 1][1])).convert("RGB"))
     w, h = img.size
     left = img.crop((0, 0, int(w * 0.5), h))
     buf = BytesIO()
     left.save(buf, format="PNG")
-    text = vision_full_text(buf.getvalue(), client=client)
-    # 逐行:切掉「傳真/Fax」之後的部分(傳真號不要),再抽電話;去重保序。
+    lines = [l.strip() for l in vision_full_text(buf.getvalue(), client=client)
+             .splitlines() if l.strip()]
+
+    # 錨定台灣仲介區塊:標記之後 → 遇印尼仲介標記(或結尾)為止。
+    start = next((i for i, l in enumerate(lines) if _TW_AGENCY_LABEL.search(l)), None)
+    if start is None:
+        block = lines                      # 無標記 → 退回整個左半(仍主要是台仲)
+    else:
+        end = next((i for i in range(start + 1, len(lines))
+                    if _ID_AGENCY_LABEL.search(lines[i])), len(lines))
+        block = lines[start:end]
+
+    # 名稱:區塊內第一個含機構關鍵字的中文行(去括號註記與標記字)。
+    name = ""
+    for l in block:
+        if _has_cjk(l) and _AGENCY_NAME_KW.search(l) and not _TW_AGENCY_LABEL.search(l):
+            name = re.sub(r"[（(].*?[)）]", "", l)
+            name = re.sub(r"\s+", "", name).strip()
+            break
+
+    # 電話:區塊內切掉「傳真/Fax」後段,抽台灣電話;去重保序。
     seen: set[str] = set()
-    out: list[str] = []
-    for line in text.splitlines():
-        head = re.split(r"傳真|Fax", line, maxsplit=1)[0]
+    phones: list[str] = []
+    for l in block:
+        head = re.split(r"傳真|Fax", l, maxsplit=1)[0]
         for ph in _phones_in(head):
             if ph not in seen:
                 seen.add(ph)
-                out.append(ph)
-    return out
+                phones.append(ph)
+    return {"phones": phones, "name": name}
 
 
 def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
