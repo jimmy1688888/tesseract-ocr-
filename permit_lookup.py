@@ -124,8 +124,13 @@ def build_indices(records: list[dict]) -> tuple[dict[int, dict], dict[str, dict]
 
 
 def _norm_phone(phone: str) -> str:
-    """電話正規化:去掉所有非數字(02-2727-6999 → 0227276999),供反查比對。"""
-    return re.sub(r"\D", "", str(phone or ""))
+    """電話正規化:去掉所有非數字(02-2727-6999 → 0227276999),供反查比對。
+    國際格式 +886(去非數字後為 886…)還原為國內前導 0:886227276999 → 0227276999。
+    國內號一律 0 開頭、無 886 前綴,故此轉換只會命中國際格式,不誤傷國內號。"""
+    n = re.sub(r"\D", "", str(phone or ""))
+    if n.startswith("886"):
+        n = "0" + n[3:].lstrip("0")   # 去國碼、還原單一前導 0(容 +886-02… 這種多寫 0)
+    return n
 
 
 def build_phone_index(records: list[dict]) -> dict[str, list[dict]]:

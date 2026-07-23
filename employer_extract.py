@@ -24,15 +24,23 @@ CJK        = re.compile(r"[一-鿿]")
 PHONE      = re.compile(r"(?<!\d)(0\d{1,3}-?\d{6,8})(?!\d)")
 # 括號區碼格式:(04)7775-863、(02) 2371-7608。統一正規化成「區碼-號碼」。
 PHONE_PAREN = re.compile(r"\((0\d{1,3})\)\s*(\d{3,4})\s*-?\s*(\d{3,4})(?!\d)")
+# 國際格式 +886 / 886:國碼後省略市話/手機的前導 0(+886 2 2727 6999 = 02-27276999、
+# +886 912 345 678 = 0912345678),抓國碼後的數字段(容分隔),交呼叫端補 0 還原國內號。
+PHONE_INTL = re.compile(r"(?<!\d)\+?886[\s.-]*([\d][\d\s.-]{6,12}\d)")
 # 電話標籤行(不含「傳真」,避免傳真號被當電話):優先取此類行上的號碼。
 PHONE_LINE_LABEL = re.compile(r"電話|Nomor\s*Telepon", re.I)
 
 
 def _phones_in(line: str) -> list[str]:
-    """抓一行內的電話候選。括號區碼正規化為「04-7775863」;一般格式原樣。"""
+    """抓一行內的電話候選。括號區碼正規化為「04-7775863」;
+    +886 國際格式還原為國內「0…」格式(去國碼、補前導 0);一般格式原樣。"""
     out = list(PHONE.findall(line))
     for area, a, b in PHONE_PAREN.findall(line):
         out.append(f"{area}-{a}{b}")
+    for m in PHONE_INTL.finditer(line):
+        digits = re.sub(r"\D", "", m.group(1)).lstrip("0")  # 去 886 後分隔與冗餘前導 0
+        if 8 <= len(digits) <= 9:                  # 市話8 / 手機9(皆已省前導 0)
+            out.append("0" + digits)               # 補回國內前導 0 → 與名冊格式一致
     return out
 CN_ADDR    = re.compile(r"[縣市].{0,20}?[路街道段巷弄號樓]")
 EN_ADDR_KW = re.compile(
