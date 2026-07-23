@@ -38,6 +38,45 @@ class TestPhonesInIntl:
         assert _phones_in("統一編號 88612345") == []
 
 
+def _digits(phones):
+    """把電話候選去分隔,便於不管輸出帶不帶連字號都能比對。"""
+    return {"".join(c for c in p if c.isdigit()) for p in phones}
+
+
+class TestPhonesInDomesticSeparators:
+    """_phones_in:國內號號段間可夾連字號/空白(涵蓋雙連字號 02-2727-6999)。"""
+
+    def test_double_hyphen_landline(self):
+        assert "0227276999" in _digits(_phones_in("電話: 02-2727-6999"))
+
+    def test_double_hyphen_mobile(self):
+        assert "0912345678" in _digits(_phones_in("0912-345-678"))
+
+    def test_double_hyphen_central_landline(self):
+        assert "0477758631" in _digits(_phones_in("04-7775-8631"))
+
+    def test_space_separated(self):
+        assert "0227276999" in _digits(_phones_in("02 2727 6999"))
+
+    def test_single_hyphen_still_works(self):
+        assert "0477758631" in _digits(_phones_in("04-77758631"))
+
+    def test_no_separator_still_works(self):
+        assert "0227276999" in _digits(_phones_in("0227276999"))
+
+    def test_reject_tax_id(self):
+        """統編(8碼、不 0 開頭)不應被當電話。"""
+        assert _phones_in("統一編號 12345678") == []
+
+    def test_reject_loan_amount(self):
+        """放款編號(0075-0010,8碼)不應被當電話。"""
+        assert _phones_in("放款金額 0075-0010") == []
+
+    def test_reject_long_account(self):
+        """過長帳號不應被當電話。"""
+        assert _phones_in("帳號 0123-4567-8901-2345") == []
+
+
 class TestNormPhoneIntl:
     """_norm_phone:去分隔 + 886 前綴還原為國內前導 0。"""
 
