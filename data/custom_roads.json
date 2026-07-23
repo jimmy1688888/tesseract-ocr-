@@ -27,4 +27,19 @@
     "RoadEngName": "Sec. 1, Minhe Rd.",
     "_note": "32225 實例;政府開放資料 AllData.json 未收錄,自建補充"
   }
+  ,
+  {
+    "CityName": "嘉義縣",
+    "AreaName": "溪口鄉",
+    "RoadName": "柴林村",
+    "RoadEngName": "TSAI LIN TSUN",
+    "_note": "32319 實例;政府開放資料 AllData.json 未收錄,自建補充"
+  },
+  {
+    "CityName": "桃園市",
+    "AreaName": "新屋區",
+    "RoadName": "警訓路",
+    "RoadEngName": "Jingxun Rd.",
+    "_note": "32353 實例;政府開放資料 AllData.json 未收錄,自建補充"
+  }
 ]
