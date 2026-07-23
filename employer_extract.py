@@ -357,20 +357,33 @@ def _docx_images(docx_path: str) -> list[tuple[str, bytes]]:
                 if n.startswith("word/media/") and Path(n).suffix.lower() in exts]
 
 
-# 台灣/印尼仲介區塊標記(次頁左半)。台印電話都以 0 開頭、格式會重疊,無法靠
-# 純格式區分,故改「標記錨定」:只取『台灣仲介』標記之後、遇『印尼仲介/P3MI』
-# 標記即停的區塊,結構性排除右側/下方的印尼仲介電話。
+# 台灣/印尼仲介區塊標記。台印電話都以 0 開頭、格式會重疊,無法靠純格式區分,
+# 故用「標記錨定」切出台仲區塊。台仲區塊在次頁左右不定(32345 在右、32324 在左),
+# 不能靠幾何裁半;改為整頁 OCR(仍只 1 次 Vision),以『台灣仲介』欄位標籤錨定起點、
+# 到其後的仲介標籤或印尼電話標籤(Telp/Telepon)為止,結構性排除印尼電話。
 _TW_AGENCY_LABEL = re.compile(r"[台臺]灣仲介|Agen(?:cy|si)\s*Taiwan", re.I)
 _ID_AGENCY_LABEL = re.compile(r"印尼仲介|P3MI|Agen(?:cy|si)\s*Indonesia|Perwakilan", re.I)
+# 印尼電話標籤(Telp/Telepon):台仲用「電話」、印尼用 Telp,作為區塊下界的補強
+# (當印尼仲介欄位標籤本身 OCR 糊掉沒對上時,仍能在印尼電話行前收尾)。
+_ID_PHONE_LABEL = re.compile(r"\bTelp(?:on|epon)?\b", re.I)
+
+
+def _is_agency_label_line(line: str, pat: re.Pattern) -> bool:
+    """是否為「仲介欄位標籤」行(表格欄名),而非內文 prose 誤配。
+    真標籤短(甲/乙欄名,如『台灣仲介公司(Agency Taiwan):』),prose 是長句、以句號結尾
+    (『…另一份由台灣仲介公司存查。』『oleh agency Taiwan dan…』)——以長度+非句號濾除。"""
+    s = line.strip()
+    return bool(pat.search(s)) and len(s) <= 40 and not s.endswith(("。", "．", "."))
 
 
 def agency_phones_from_next_page(docx_path: str, client=None) -> list[str]:
-    """全無命中救援:取「契約頁的次一頁」左半邊『台灣仲介公司』區塊的電話候選。
+    """全無命中救援:取「契約頁的次一頁」『台灣仲介公司』區塊的電話候選。
 
-    雙重隔離只取台灣仲介(不誤取右側/下方印尼 P3MI):
-      ① 幾何:只裁左半邊。
-      ② 語意:錨定『台灣仲介』標記,遇『印尼仲介/P3MI』標記即停。
-    回傳台灣電話候選(排傳真、去重保序);找不到契約頁/無次頁 → 空清單。
+    只取台灣仲介、不誤取印尼 P3MI(台印電話格式重疊,無法靠格式分):
+      整頁 OCR(1 次 Vision)→ 以『台灣仲介』欄位標籤(短、非句號)錨定起點 →
+      到其後的仲介欄位標籤 / 印尼電話標籤(Telp)為止 → 抽區塊內電話(排傳真)。
+    台仲區塊在左在右皆可(靠標籤而非位置);找不到真台仲標籤 → 空清單(不猜、不誤抓)。
+    回傳台灣電話候選(去重保序);找不到契約頁/無次頁 → 空清單。
     """
     imgs = _docx_images(docx_path)
     if not imgs:
@@ -385,21 +398,21 @@ def agency_phones_from_next_page(docx_path: str, client=None) -> list[str]:
         return []                          # 契約頁是最後一張,無次頁
     img = ImageOps.exif_transpose(
         Image.open(BytesIO(ordered[ci + 1][1])).convert("RGB"))
-    w, h = img.size
-    left = img.crop((0, 0, int(w * 0.5), h))
     buf = BytesIO()
-    left.save(buf, format="PNG")
+    img.save(buf, format="PNG")            # 整頁(台仲可能在右半),仍只 1 次 Vision
     lines = [l.strip() for l in vision_full_text(buf.getvalue(), client=client)
              .splitlines() if l.strip()]
 
-    # 錨定台灣仲介區塊:標記之後 → 遇印尼仲介標記(或結尾)為止。
-    start = next((i for i, l in enumerate(lines) if _TW_AGENCY_LABEL.search(l)), None)
+    # 錨定台灣仲介欄位標籤(濾掉 prose 誤配)→ 到其後「仲介欄位標籤 / 印尼電話標籤」為止。
+    start = next((i for i, l in enumerate(lines)
+                  if _is_agency_label_line(l, _TW_AGENCY_LABEL)), None)
     if start is None:
-        block = lines                      # 無標記 → 退回整個左半(仍主要是台仲)
-    else:
-        end = next((i for i in range(start + 1, len(lines))
-                    if _ID_AGENCY_LABEL.search(lines[i])), len(lines))
-        block = lines[start:end]
+        return []                          # 無真台仲標籤 → 不猜(避免誤抓印尼電話)
+    end = next((i for i in range(start + 1, len(lines))
+                if _is_agency_label_line(lines[i], _ID_AGENCY_LABEL)
+                or _is_agency_label_line(lines[i], _TW_AGENCY_LABEL)
+                or _ID_PHONE_LABEL.search(lines[i])), len(lines))
+    block = lines[start:end]
 
     # 電話:區塊內切掉「傳真/Fax」後段,抽台灣電話;去重保序。
     seen: set[str] = set()
