@@ -120,6 +120,10 @@ SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 CONF_KEY_IN       = 55   # 高於此值直接 key-in；低於則標記送 Google Vision
 CONF_VOTE_MIN     = 45   # permit 多數票平均信心低於此值才送 Vision
 CONF_MOL_VOTE_MIN = 50   # small docx mol 多數票平均信心高於此值直接 key-in
+# 單一判讀(非多數票:small mol 單一命中 / large permit 部分命中)且信心低於此值,
+# 送 Vision 覆核仍失敗時,才比照「全無命中」走契約次頁台仲電話反查名冊救援;
+# 信心 ≥ 此值者維持原本 Vision 覆核邏輯、不走電話救援。
+CONF_NOVOTE_RESCUE_MAX = 50
 
 # ─── prefilter ────────────────────────────────────────────────────────────
 SMALL_DOCX_THRESHOLD = 3   # 圖片數 ≤ 此值 → "small"
@@ -206,6 +210,11 @@ class VisionQueueItem:
     reason: str
     direct_keyin: bool = False
     candidate_conf: float = 0.0
+    # 非多數票且低信心的「單一判讀」(small mol 單一命中 / large permit 部分命中,
+    # 且 conf < CONF_NOVOTE_RESCUE_MAX)。conf 太低代表該 ROI 位置本身品質不佳,
+    # 再用 Vision 掃同一個位置意義不大 → 直接改走契約次頁台仲電話反查名冊救援
+    # (略過 ROI 的 Vision 覆核,不多花那一格額度),唯一命中則覆寫填 B。
+    no_vote_rescue: bool = False
 
 
 # ─── CSV 欄位順序（同時供寫入與讀取使用，避免兩端走樣） ───────────────────
@@ -1085,14 +1094,17 @@ def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
     # 規則B：permit 部分命中無多數（用 status 判斷，不再依賴 note 文字）
     partial_rows = [r for r in rows if r.status == ResultStatus.PERMIT_PARTIAL]
     for r in partial_rows:
+        cand_conf = r.id_conf or r.final_conf
         queue.append(VisionQueueItem(
             source_docx     = r.source_docx,
             image_name      = r.image_name,
             img_path        = r.permit_crop or _best_img_path(r),
             candidate_value = r.id or r.final_value,
-            candidate_conf  = r.id_conf or r.final_conf,
+            candidate_conf  = cand_conf,
             reason          = "permit部分命中無多數",
             direct_keyin    = False,
+            # conf < 門檻 → 該位置品質差,略過 ROI Vision,改走次頁電話反查救援
+            no_vote_rescue  = cand_conf < CONF_NOVOTE_RESCUE_MAX,
         ))
 
     # 規則C：其餘 vision_review=True
@@ -1165,6 +1177,10 @@ def process_small_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
                 candidate_conf  = r.final_conf,
                 reason          = _describe_vision_reason(r),
                 direct_keyin    = False,
+                # 單一判讀(非多數票)且 conf < 門檻 → 略過 ROI Vision,改走次頁電話反查。
+                # mol 多數票但信心低者不算單一判讀,維持原 Vision 覆核。
+                no_vote_rescue  = (not r.mol_from_vote)
+                                  and r.final_conf < CONF_NOVOTE_RESCUE_MAX,
             ))
         # 其他 row(非 winner、無觸發旗標)刻意 skip:winner 已代表整個 docx。
 
@@ -1656,16 +1672,24 @@ def collect_employer_fields(docx_files) -> None:
             )
 
 
-def rescue_manual_review_via_agency_phone(manual_review: list[dict]) -> int:
-    """全無命中救援:掃契約次一頁左半邊『台灣仲介』區塊的電話,反查名冊回推
-    許可證,寫回 final_value / reason;_agency_cols 會據許可證自動補 E~G。
+def rescue_manual_review_via_agency_phone(
+        items: list[dict], value_key: str = "final_value") -> int:
+    """電話反查救援:整頁 OCR 契約次一頁(1 次 Vision),以『台灣仲介』欄位標籤
+    錨定區塊(台仲在左在右皆可,靠標籤非位置)取其電話,反查名冊回推許可證,
+    覆寫回 items[value_key] / reason;_agency_cols 會據許可證自動補 E~G。
     回傳成功救回筆數(不含多家待人工者)。
+
+    兩種呼叫情境共用:
+      - 全無命中(value_key="final_value"):原本 B 欄空,救回填入許可證。
+      - 非多數票低信心單一判讀(value_key="candidate_value"):ROI 品質差,
+        略過 ROI Vision 直接反查;唯一命中則覆寫原候選值(填 B)。
 
     - 電話唯一命中 → 救回(仍標 manual_review,D 欄註明供人工核對)。
     - 同電話命中多家台仲 → 不填 B,把每家(許可證/名稱)列進 reason,人工擇一。
-    名冊/Vision 缺失時安靜跳過,不影響主流程。"""
+    名冊/Vision 缺失時安靜跳過,不影響主流程。
+    同一 docx 的次頁只送一次 Vision(phone_cache),多列共用不重複計費。"""
     pl = _permit_lookup()
-    if pl is None or not manual_review:
+    if pl is None or not items:
         return 0
     try:
         from employer_extract import agency_phones_from_next_page
@@ -1674,14 +1698,22 @@ def rescue_manual_review_via_agency_phone(manual_review: list[dict]) -> int:
         logger.warning(f"  ⚠ 電話反查救援不可用(略過):{e!r}")
         return 0
     rescued = 0
-    for item in manual_review:
-        docx_path = INPUT_DIR / item["source_docx"]
+    phone_cache: dict[str, list[str]] = {}   # source_docx → phones(避免重複送 Vision)
+    for item in items:
+        docx_name = item["source_docx"]
+        docx_path = INPUT_DIR / docx_name
         if not docx_path.exists():
             continue
-        try:
-            phones = agency_phones_from_next_page(str(docx_path), client=client)
-        except Exception as e:
-            logger.warning(f"  ⚠ {item['source_docx']} 次頁電話擷取失敗:{e!r}")
+        if docx_name in phone_cache:
+            phones = phone_cache[docx_name]
+        else:
+            try:
+                phones = agency_phones_from_next_page(str(docx_path), client=client)
+            except Exception as e:
+                logger.warning(f"  ⚠ {docx_name} 次頁電話擷取失敗:{e!r}")
+                phones = []
+            phone_cache[docx_name] = phones
+        if not phones:
             continue
 
         # 逐一評估電話,擇最佳:唯一命中優先,否則暫記第一個多家(待人工)。
@@ -1701,13 +1733,13 @@ def rescue_manual_review_via_agency_phone(manual_review: list[dict]) -> int:
         kind, payload, ph = best
         if kind == "single":
             info = payload
-            item["final_value"] = info["許可證"]
+            item[value_key] = info["許可證"]
             item["reason"] = (
                 f"{item['reason']}；[電話反查救回] 次頁台仲電話 {ph} → "
                 f"許可證 {info['許可證']}／{info['機構名稱']}(仍請人工核對)"
             )
             logger.info(
-                f"  ↻ {item['source_docx']} 全無命中救回:電話 {ph} → "
+                f"  ↻ {docx_name} 電話反查救回:電話 {ph} → "
                 f"許可證 {info['許可證']}／{info['機構名稱']}"
             )
             rescued += 1
@@ -2000,7 +2032,20 @@ def main(opts: argparse.Namespace) -> None:
 
     vision_auto_keyin: list[dict] = []     # 雙引擎一致(CONFIRMED) → 自動寫
     vision_review_rows: list[dict] = []    # 任何不一致 → 人工審查
+    novote_rescue: list[dict] = []         # 單一判讀低信心:略過 ROI Vision,改走次頁電話反查
     for item in vision_items:
+        # 單一判讀且 conf 過低(ROI 位置品質差)→ 不再掃同一位置,直接改走契約次頁
+        # 台仲電話反查救援(比照全無命中);那格 ROI Vision 額度省下來。
+        if item.no_vote_rescue:
+            novote_rescue.append({
+                "source_docx":     item.source_docx,
+                "candidate_value": item.candidate_value,   # 種子:電話查無時保留原候選值
+                "reason": (
+                    f"[單一判讀低信心 conf={item.candidate_conf:.1f}<{CONF_NOVOTE_RESCUE_MAX},"
+                    f"略過 ROI Vision 改走次頁電話反查] {item.reason}"
+                ),
+            })
+            continue
         if not item.img_path or not Path(item.img_path).exists():
             logger.warning(f"  ⚠ 找不到圖檔：{item.img_path}（{item.source_docx}）")
             continue
@@ -2043,16 +2088,25 @@ def main(opts: argparse.Namespace) -> None:
     collect_employer_fields(docx_files)
 
     # ── 步驟 4b 前置②：全無命中救援（次頁仲介電話 → 反查名冊 → 回推許可證）──
-    # 全無命中原本 B 欄空、只能人工;改送 Vision 掃契約次一頁左半邊的仲介電話,
-    # 反查名冊回推許可證。救回者仍標 manual_review、D 欄註明,供人工快速核對。
+    # 全無命中原本 B 欄空、只能人工;改整頁 OCR 契約次一頁(1 次 Vision)、以『台灣仲介』
+    # 標籤錨定取電話(台仲在左在右皆可),反查名冊回推許可證。救回者仍標 manual_review、
+    # D 欄註明,供人工快速核對。
     if manual_review:
         logger.info("── 步驟 4b 前置②：全無命中 → 次頁仲介電話反查名冊 ──")
         n_rescued = rescue_manual_review_via_agency_phone(manual_review)
         logger.info(f"  電話反查救回 {n_rescued}/{len(manual_review)} 筆(填許可證+機構欄)")
 
+    # ── 步驟 4b 前置③：非多數票低信心單一判讀救援（比照全無命中,覆寫填 B）──
+    # 這些列在步驟 4a 已「略過 ROI Vision」,此處才首次送次頁 Vision 反查名冊;
+    # 唯一命中 → 覆寫 candidate_value(B)、_agency_cols 補 E~G,仍標 manual_review。
+    if novote_rescue:
+        logger.info("── 步驟 4b 前置③：非多數票低信心 → 次頁仲介電話反查名冊(覆寫填 B)──")
+        n_nv = rescue_manual_review_via_agency_phone(novote_rescue, value_key="candidate_value")
+        logger.info(f"  單一判讀電話反查救回 {n_nv}/{len(novote_rescue)} 筆")
+
     logger.info("── 步驟 4b：合併批次寫入 Google Sheets（atomic）──")
     auto_keyin_batch = keyin_items + vision_auto_keyin   # VisionQueueItem + dict 混合,_row_to_sheet_values 兼容
-    review_batch = vision_review_rows + [
+    review_batch = vision_review_rows + novote_rescue + [
         # 電話反查救回的許可證放 candidate_value,_agency_cols 會據此補 E~G。
         {"source_docx": d["source_docx"],
          "candidate_value": d.get("final_value", ""),
@@ -2067,7 +2121,8 @@ def main(opts: argparse.Namespace) -> None:
         f"  本次寫入彙總:auto_keyin={len(auto_keyin_batch)} 筆"
         f"(其中 Tesseract 直接 {len(keyin_items)} 筆 + Vision 確認 {len(vision_auto_keyin)} 筆) "
         f"/ manual_review={len(review_batch)} 筆"
-        f"(其中 Vision 交叉比對失敗 {len(vision_review_rows)} 筆 + 全無命中 {len(manual_review)} 件)"
+        f"(其中 Vision 交叉比對失敗 {len(vision_review_rows)} 筆 "
+        f"+ 單一判讀電話反查 {len(novote_rescue)} 筆 + 全無命中 {len(manual_review)} 件)"
         f"(實際寫入 Sheets:{written} 筆)"
     )
 
