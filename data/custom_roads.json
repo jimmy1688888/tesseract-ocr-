@@ -41,5 +41,12 @@
     "RoadName": "警訓路",
     "RoadEngName": "Jingxun Rd.",
     "_note": "32353 實例;政府開放資料 AllData.json 未收錄,自建補充"
+  },
+  {
+    "CityName": "臺中市",
+    "AreaName": "南屯區",
+    "RoadName": "益昌二街",
+    "RoadEngName": "Yichang 2nd St.",
+    "_note": "32370 實例;政府開放資料 AllData.json 未收錄,自建補充"
   }
 ]
