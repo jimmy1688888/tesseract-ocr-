@@ -382,6 +382,27 @@ _ID_AGENCY_LABEL = re.compile(r"印尼仲介|P3MI|Agen(?:cy|si)\s*Indonesia|Perw
 # 印尼電話標籤(Telp/Telepon):台仲用「電話」、印尼用 Telp,作為區塊下界的補強
 # (當印尼仲介欄位標籤本身 OCR 糊掉沒對上時,仍能在印尼電話行前收尾)。
 _ID_PHONE_LABEL = re.compile(r"\bTelp(?:on|epon)?\b", re.I)
+# 乙方標籤:台印仲介兩欄並排時,台仲標籤緊接印尼標籤、資料排在其後並與印尼交錯,
+# 原定界圈不到資料 → 放寬到「乙方(PIHAK KEDUA)」或頁尾。
+_PARTY_B_LABEL = re.compile(r"乙方|PIHAK\s*KEDUA", re.I)
+# 印尼資料行特徵(印尼地址/機構詞/國際電話):放寬區塊後,用來把印尼行排除,
+# 只留台灣仲介的名稱/地址/電話(台印在同段交錯時的特徵分離)。
+_ID_LINE = re.compile(
+    r"JL\.|JALAN|KELURAHAN|KECAMATAN|\bKEC\b|\bKOTA\b|PROVINSI|DESA|DUSUN|"
+    r"PPTKIS|P3MI|Pengirim|Perwakilan|\bNTB\b|LOMBOK|MATARAM|JAKARTA|"
+    r"\bTelp(?:on|epon)?\b|\+62", re.I)
+
+
+def _deink_next_page_png(image_bytes: bytes) -> bytes:
+    """次頁去紅章前處理(比照 scan 的『紅通道_2x_中值3』):取紅色通道使紅章呈白、
+    黑字保留,再 2x 放大+對比拉伸+中值去雜,讓被章蓋/交錯的台仲字更清晰。
+    回傳 PNG bytes 供 Vision;preprocess 於 pipeline,延遲 import 避免循環。"""
+    from pipeline import preprocess
+    cfg = {"channel": "R", "scale": 2, "median": 3, "contrast": (2, 98), "psm": 3}
+    img = preprocess(image_bytes, cfg)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _is_agency_label_line(line: str, pat: re.Pattern) -> bool:
@@ -416,11 +437,9 @@ def _agency_block_lines(docx_path: str, client=None) -> list[str]:
     ci = names.index(page[0])
     if ci + 1 >= len(ordered):
         return []                          # 契約頁是最後一張,無次頁
-    img = ImageOps.exif_transpose(
-        Image.open(BytesIO(ordered[ci + 1][1])).convert("RGB"))
-    buf = BytesIO()
-    img.save(buf, format="PNG")            # 整頁(台仲可能在右半),仍只 1 次 Vision
-    lines = [l.strip() for l in vision_full_text(buf.getvalue(), client=client)
+    # 去紅章前處理後整頁送 Vision(仍只 1 次;台仲可能在右半,不裁切)。
+    png = _deink_next_page_png(ordered[ci + 1][1])
+    lines = [l.strip() for l in vision_full_text(png, client=client)
              .splitlines() if l.strip()]
 
     start = next((i for i, l in enumerate(lines)
@@ -431,14 +450,22 @@ def _agency_block_lines(docx_path: str, client=None) -> list[str]:
                 if _is_agency_label_line(lines[i], _ID_AGENCY_LABEL)
                 or _is_agency_label_line(lines[i], _TW_AGENCY_LABEL)
                 or _ID_PHONE_LABEL.search(lines[i])), len(lines))
+    # 台仲標籤與印尼標籤相鄰(兩欄並排版面)→ 原定界只圈到標籤行、圈不到資料。
+    # 放寬到「乙方標籤 / 頁尾」的較大範圍,抽取端再用 _ID_LINE 排除印尼行。
+    if end - start <= 2:
+        end = next((i for i in range(start + 1, len(lines))
+                    if _PARTY_B_LABEL.search(lines[i])), len(lines))
     return lines[start:end]
 
 
 def _phones_in_block(block: list[str]) -> list[str]:
-    """區塊內抽台灣電話:切掉「傳真/Fax」後段;去重保序。"""
+    """區塊內抽台灣電話:排除印尼行(交錯版面),切掉「傳真/Fax」後段;去重保序。
+    台灣電話為 0 開頭格式,印尼 +62 本就不被 _phones_in 抓,再加 _ID_LINE 雙保險。"""
     seen: set[str] = set()
     phones: list[str] = []
     for l in block:
+        if _ID_LINE.search(l):
+            continue
         head = re.split(r"傳真|Fax", l, maxsplit=1)[0]
         for ph in _phones_in(head):
             if ph not in seen:
@@ -464,8 +491,10 @@ def _clean_agency_name(s: str) -> str:
 
 def _name_in_block(block: list[str]) -> str:
     """區塊內挑「台仲機構名稱」:標籤冒號後的值 or 含機構關鍵字的中文行;
-    去掉標籤詞(台灣仲介公司/Agency Taiwan)與前後英文/符號雜訊,排除地址行。"""
+    去掉標籤詞(台灣仲介公司/Agency Taiwan)與前後英文/符號雜訊,排除印尼行與地址行。"""
     for l in block:
+        if _ID_LINE.search(l):             # 交錯版面:排除印尼機構/地址行
+            continue
         core = re.sub(r".*[:：]", "", l).strip() or l   # 冒號後的值;無冒號取整行
         core = _clean_agency_name(_AGENCY_LABEL_WORD.sub("", core))
         if (core and _AGENCY_NAME_KW.search(core)
@@ -475,8 +504,11 @@ def _name_in_block(block: list[str]) -> str:
 
 
 def _address_in_block(block: list[str]) -> str:
-    """區塊內挑「台仲地址」:去『地址/Alamat』標籤後,取含縣市+街道 pattern 的中文行。"""
+    """區塊內挑「台仲地址」:去『地址/Alamat』標籤後,取含縣市+街道 pattern 的中文行;
+    排除印尼行(交錯版面)。註:台仲地址若僅為英文,CN_ADDR 抓不到 → 回空(改靠名稱反查)。"""
     for l in block:
+        if _ID_LINE.search(l):
+            continue
         core = re.sub(r".*(地址|Alamat)\s*[:：]", "", l, flags=re.I)
         if _has_cjk(core) and CN_ADDR.search(core):
             return LABEL_WORDS.sub("", core).lstrip(":： ").strip()

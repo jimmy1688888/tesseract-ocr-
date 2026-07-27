@@ -1685,9 +1685,10 @@ def rescue_manual_review_via_agency_phone(
         略過 ROI Vision 直接反查;命中則覆寫原候選值(填 B)。
 
     反查優先序(結果一律 manual_review、D 欄註明管道供人工核對):
-      ① 電話唯一命中 → 最可靠,直接填 B。
-      ② (電話後備)名稱、地址各與名冊比「相似度」,取相似度(CONF)高者填 B。
-      ③ 電話命中多家、且名稱/地址也救不回 → 不填 B,列出各家供人工擇一。
+      ① 電話精確唯一命中 → 最可靠,直接填 B。
+      ② 電話前綴唯一命中(OCR 少 1~2 碼容錯)→ 填 B;比通用後段名稱可靠,故排名稱前。
+      ③ (後備)名稱、地址各比名冊相似度,取相似度(CONF)高者填 B。
+      ④ 電話多家、且前綴/名稱/地址皆救不回 → 不填 B,列出各家供人工擇一。
     名冊/Vision 缺失時安靜跳過,不影響主流程。
     同一 docx 的次頁只送一次 Vision(block_cache),多列共用不重複計費。"""
     pl = _permit_lookup()
@@ -1728,7 +1729,7 @@ def rescue_manual_review_via_agency_phone(
             elif phone_best is None:
                 phone_best = ("ambig", matches, ph)
 
-        # ① 電話唯一命中 → 填 B(最可靠管道)
+        # ① 電話精確唯一命中 → 填 B(最可靠管道)
         if phone_best and phone_best[0] == "single":
             info, ph = phone_best[1], phone_best[2]
             item[value_key] = info["許可證"]
@@ -1741,7 +1742,26 @@ def rescue_manual_review_via_agency_phone(
             rescued += 1
             continue
 
-        # ② 電話後備:名稱、地址各與名冊比相似度,取「相似度(CONF)高者」填 B
+        # ② 電話『前綴』唯一命中(OCR 少 1~2 碼容錯;比通用後段名稱可靠,故排在名稱前)
+        prefix_hit = None
+        for ph in block["phones"]:
+            mp = pl.agencies_by_phone_prefix(ph)
+            if len(mp) == 1:
+                prefix_hit = (mp[0], ph)
+                break
+        if prefix_hit:
+            info, ph = prefix_hit
+            item[value_key] = info["許可證"]
+            item["reason"] = (
+                f"{item['reason']}；[電話前綴反查救回·電話OCR可能少碼] 次頁台仲電話 {ph} "
+                f"前綴唯一命中 → 許可證 {info['許可證']}／{info['機構名稱']}(仍請人工核對)"
+            )
+            logger.info(f"  ↻ {docx_name} 電話前綴反查救回:{ph} → "
+                        f"{info['許可證']}／{info['機構名稱']}")
+            rescued += 1
+            continue
+
+        # ③ 電話後備:名稱、地址各與名冊比相似度,取「相似度(CONF)高者」填 B
         cand_n = pl.best_by_name(block["name"]) if block.get("name") else None
         cand_a = pl.best_by_address(block["address"]) if block.get("address") else None
         picks = [(c, lbl) for c, lbl in ((cand_n, "名稱"), (cand_a, "地址")) if c]
@@ -1758,7 +1778,7 @@ def rescue_manual_review_via_agency_phone(
             rescued += 1
             continue
 
-        # ③ 電話多家(模糊)且名稱/地址也救不回 → 列出台仲供人工擇一,不填 B
+        # ④ 電話多家(模糊)且前綴/名稱/地址都救不回 → 列出台仲供人工擇一,不填 B
         if phone_best and phone_best[0] == "ambig":
             matches, ph = phone_best[1], phone_best[2]
             cand = "、".join(f"{m['許可證']}／{m['機構名稱']}" for m in matches)

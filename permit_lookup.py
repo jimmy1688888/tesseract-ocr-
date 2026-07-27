@@ -229,6 +229,22 @@ class PermitLookup:
         by_permit = {h["許可證"]: h for h in self.phone_index.get(n, [])}
         return list(by_permit.values())
 
+    def agencies_by_phone_prefix(self, phone: str, min_len: int = 8) -> list[dict]:
+        """電話『前綴』反查(OCR 少碼容錯):以「一方為另一方前綴且共同長度 ≥ min_len」
+        比對,回傳去重後的有效機構(0/1/多筆);呼叫端只在唯一命中時採用。
+        比精確反查寬鬆,故設 8 碼門檻——台灣市話/手機正規化後 9~10 碼,容許少 1~2 碼,
+        又足夠長以避免誤命中(如 32401:022371760 少一碼,前綴唯一命中正確機構)。"""
+        q = _norm_phone(phone)
+        if len(q) < min_len:
+            return []
+        hits: dict[str, dict] = {}
+        for np_, ags in self.phone_index.items():
+            short, lng = (q, np_) if len(q) <= len(np_) else (np_, q)
+            if len(short) >= min_len and lng.startswith(short):
+                for a in ags:
+                    hits[a["許可證"]] = a
+        return list(hits.values())
+
     def lookup_by_phone(self, phone: str) -> dict | None:
         """電話反查:唯一命中才回傳,查無或多家(模糊)→ None。"""
         m = self.agencies_by_phone(phone)
