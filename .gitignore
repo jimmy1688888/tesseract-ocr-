@@ -120,6 +120,13 @@ comparison.png              # 前處理對比圖（除錯用）
 *_ocr.pdf                   # OCR 後 PDF
 results_backup.csv
 
+# ── Agent skills（個人開發工具，隨時可重裝，不進版控）──────────────────────
+# 這些是 markdown 設定檔，同事跑 執行.bat 完全用不到（不需要 Node.js）。
+# skills-lock.json 刻意「保留」版控：它記錄裝了哪些 skill 與版本雜湊，換機可據以重裝。
+# 真正該共用的 agent 設定在 docs/agents/（見上方 !docs/agents/）。
+.claude/skills/
+.agents/skills/
+
 # ── 其他 ──────────────────────────────────────────────────────────────────
 .mypy_cache/
 .dmypy.json

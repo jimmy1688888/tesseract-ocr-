@@ -84,10 +84,47 @@ Sheets 每列 **15 欄**，H~O 由 `pipeline.py` 於寫入前自動填入：
 - **雇主 ROI 截圖**：每份 docx 送 Vision 的契約頁裁切（去紅章**前**原貌）自動存到
   `scan_results/employer_crops/{docx主檔名}_{圖檔名}`，人工複查 H~O 時直接開圖對照。
 
+## 已完成：全無命中 → 仲介電話反查名冊（救援路徑）
+
+許可證 OCR 全無命中時，過去只能直接人工。現在改走**獨立證據管道**：從契約次頁的
+仲介欄位反查名冊，救回許可證號。詳解見 README 專節，此處只記脈絡。
+
+- **觸發**：許可證 OCR 全無命中，或「單一 conf」者（mol 無多數票、large permit 無多數票）
+  → **不再重掃同一 ROI 區段**，直接走救援。
+- **取值**：次頁**整頁** OCR（仍只 1 次 Vision — Vision 按張計費，整頁與裁半同額度），
+  取得 `{phones, name, address}`；`block_cache` 去重。次頁也走去紅章
+  （`_deink_next_page_png`，比照紅通道_2x_中值3）。
+- **台仲區塊定界**：台仲在次頁**左右不定**（32345 在右、32324 在左），原「只裁左半」的
+  幾何隔離會在台仲於右側時剛好裁到印尼那格。改為**整頁語意錨定**：
+  `_is_agency_label_line`（短行 + 非句號結尾）找起點，`_ID_LINE` 排除印尼行做台印分離；
+  台仲與印尼標籤兩欄並排時，定界放寬到乙方／頁尾。
+- **名冊反查四級優先序**（`pipeline` rescue）：
+  1. 電話精確
+  2. **電話前綴容錯** — OCR 少 1~2 碼，一方為另一方前綴、共同 ≥8 碼、唯一命中才採用
+  3. 名稱／地址相似度 — `best_by_name` 0.78、`best_by_address` 0.72（quick_ratio 粗篩加速）
+  4. 多家並列
+  電話前綴刻意**排在名稱之前**：通用後段名稱容易誤命中。
+- **電話格式容錯**：`+886` 國際格式、號段間雙連字號／空白（`02-2727-6999`）。
+- **設計原則**：這是獨立證據管道，命中後**仍標 `manual_review`**，並在 D 欄 `reason`
+  記錄是走哪個管道命中的（追查用）。
+- **實測**：32401 交錯版面電話少一碼 → 電話前綴唯一命中 3759 伯樂（避開名稱誤命中的飛越）；
+  32397 電話空 → 地址相似度 1.00 命中 2449，雇主名稱括號經 `_balance_brackets` 補齊成對。
+- **已知限制**：電話被紅章蓋死就救不回（但保證**不會誤抓成印尼機構**）。
+- **⚠️ 待觀察**：commit `80057f4` 留下的問題 —「有多數票但 conf 低」的案子目前行為未定案，
+  尚未驗證是否該一併走救援。
+
+## 目前狀態（2026-07-27）
+
+- 分支 `main`，與 origin 同步，工作區乾淨。`python -m pytest -q` → **147 passed**。
+- `.claude/skills/`、`.agents/skills/` 已加入 .gitignore（個人工具，同事不需要，也不需裝 Node.js）；
+  `skills-lock.json` 保留版控供換機重裝。共用的 agent 設定在 `docs/agents/`。
+
 ### 一句話喚醒新 session
 
 > 台灣移工 OCR 專案（repo 已 clone，data/AllData.json 已備妥）。permit_lookup 許可證查表、
-> employer_extract 雇主擷取、address_db 地址標準化、pipeline H~O 整合**全部完成**
+> employer_extract 雇主擷取、address_db 地址標準化、pipeline H~O 整合、
+> 全無命中→仲介電話反查救援**全部完成**
 > （含雇主 ROI 截圖存 scan_results/employer_crops 供人工複查），
-> `python pipeline.py` 即可端到端跑 docs/ → Sheets 15 欄。
-> 下一步候選：對 docs/ 新批（32088 起）全跑驗證 H~O 實際寫入品質。
+> `python pipeline.py` 即可端到端跑 docs/ → Sheets 15 欄。147 測試全過。
+> 下一步候選：(1) 對 docs/ 新批（32088 起）全跑驗證 H~O 實際寫入品質；
+> (2) 釐清 `80057f4` 留下的「有多數票但 conf 低」該不該走救援。
