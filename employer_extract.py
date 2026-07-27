@@ -94,6 +94,21 @@ def _has_cjk(s: str) -> bool:
     return bool(CJK.search(s))
 
 
+def _balance_brackets(s: str) -> str:
+    """補齊不成對的括號。擷取名稱時 strip 頭尾會剝掉單邊括號(如「某公司(股)」
+    尾端 ) 被剝成「某公司(股」),或 OCR 漏讀一邊,寫進 Sheets 就少一邊。
+    全形（）與半形()分別配對:開比閉多 → 尾端補閉;閉比開多 → 頭端補開。"""
+    if not s:
+        return s
+    for op, cl in (("（", "）"), ("(", ")")):
+        diff = s.count(op) - s.count(cl)
+        if diff > 0:
+            s = s + cl * diff
+        elif diff < 0:
+            s = op * (-diff) + s
+    return s
+
+
 def _natural_key(name: str):
     """image2 < image10 的自然排序鍵(避免字典序把 image10 排到 image2 前)。"""
     m = re.search(r"(\d+)", name)
@@ -271,8 +286,9 @@ def extract_employer_fields(text: str) -> dict:
                     name_cn = cand
 
     fields = {
-        "雇主名稱_中": name_cn,
-        "雇主名稱_英": name_en,
+        # 補齊不成對括號:擷取時 strip 或 OCR 可能只留單邊,寫進 Sheets 會缺一邊。
+        "雇主名稱_中": _balance_brackets(name_cn),
+        "雇主名稱_英": _balance_brackets(name_en),
         "地址_中": addr_cn,
         "地址_英": addr_en,
         "電話": phone,
@@ -376,14 +392,18 @@ def _is_agency_label_line(line: str, pat: re.Pattern) -> bool:
     return bool(pat.search(s)) and len(s) <= 40 and not s.endswith(("。", "．", "."))
 
 
-def agency_phones_from_next_page(docx_path: str, client=None) -> list[str]:
-    """全無命中救援:取「契約頁的次一頁」『台灣仲介公司』區塊的電話候選。
+# 台仲名稱關鍵字(用來從區塊挑出「機構名稱」行);與標籤詞(台灣仲介公司)區隔。
+_AGENCY_NAME_KW    = re.compile(r"(公司|人力|仲介|企業|顧問|管理|服務|股份|有限)")
+_AGENCY_LABEL_WORD = re.compile(
+    r"[台臺]灣仲介公司|[台臺]灣仲介|Agen(?:cy|si)\s*Taiwan", re.I)
 
-    只取台灣仲介、不誤取印尼 P3MI(台印電話格式重疊,無法靠格式分):
-      整頁 OCR(1 次 Vision)→ 以『台灣仲介』欄位標籤(短、非句號)錨定起點 →
-      到其後的仲介欄位標籤 / 印尼電話標籤(Telp)為止 → 抽區塊內電話(排傳真)。
-    台仲區塊在左在右皆可(靠標籤而非位置);找不到真台仲標籤 → 空清單(不猜、不誤抓)。
-    回傳台灣電話候選(去重保序);找不到契約頁/無次頁 → 空清單。
+
+def _agency_block_lines(docx_path: str, client=None) -> list[str]:
+    """取「契約頁次一頁」的『台灣仲介』區塊文字行(整頁 1 次 Vision,靠標籤錨定)。
+
+    台印電話/名稱格式重疊,無法靠格式或幾何位置分,故以『台灣仲介』欄位標籤
+    (短、非句號)錨定起點 → 到其後的仲介欄位標籤 / 印尼電話標籤(Telp)為止。
+    台仲在左在右皆可;找不到契約頁/無次頁/無真台仲標籤 → 空清單(不猜、不誤抓)。
     """
     imgs = _docx_images(docx_path)
     if not imgs:
@@ -403,18 +423,19 @@ def agency_phones_from_next_page(docx_path: str, client=None) -> list[str]:
     lines = [l.strip() for l in vision_full_text(buf.getvalue(), client=client)
              .splitlines() if l.strip()]
 
-    # 錨定台灣仲介欄位標籤(濾掉 prose 誤配)→ 到其後「仲介欄位標籤 / 印尼電話標籤」為止。
     start = next((i for i, l in enumerate(lines)
                   if _is_agency_label_line(l, _TW_AGENCY_LABEL)), None)
     if start is None:
-        return []                          # 無真台仲標籤 → 不猜(避免誤抓印尼電話)
+        return []                          # 無真台仲標籤 → 不猜(避免誤抓印尼資料)
     end = next((i for i in range(start + 1, len(lines))
                 if _is_agency_label_line(lines[i], _ID_AGENCY_LABEL)
                 or _is_agency_label_line(lines[i], _TW_AGENCY_LABEL)
                 or _ID_PHONE_LABEL.search(lines[i])), len(lines))
-    block = lines[start:end]
+    return lines[start:end]
 
-    # 電話:區塊內切掉「傳真/Fax」後段,抽台灣電話;去重保序。
+
+def _phones_in_block(block: list[str]) -> list[str]:
+    """區塊內抽台灣電話:切掉「傳真/Fax」後段;去重保序。"""
     seen: set[str] = set()
     phones: list[str] = []
     for l in block:
@@ -424,6 +445,60 @@ def agency_phones_from_next_page(docx_path: str, client=None) -> list[str]:
                 seen.add(ph)
                 phones.append(ph)
     return phones
+
+
+def _clean_agency_name(s: str) -> str:
+    """清掉台仲中文名前後黏到的英文/符號雜訊(英文名 CO.,LTD 斷行黏進來,
+    如 'LTD(裕倉國際開發有限公司' → '裕倉國際開發有限公司')。
+    掐頭到第一個中文字、去尾到最後一個中文字或右括號,保留中間的『(股)』等。
+    無中文 → 空字串。反查用 _norm_name 會去標點,此清理主要讓輸出/比對更乾淨。"""
+    m = re.search(r"[一-鿿]", s)
+    if not m:
+        return ""
+    s = s[m.start():]
+    tail = None
+    for mm in re.finditer(r"[一-鿿）)]", s):
+        tail = mm
+    return s[:tail.end()] if tail else s
+
+
+def _name_in_block(block: list[str]) -> str:
+    """區塊內挑「台仲機構名稱」:標籤冒號後的值 or 含機構關鍵字的中文行;
+    去掉標籤詞(台灣仲介公司/Agency Taiwan)與前後英文/符號雜訊,排除地址行。"""
+    for l in block:
+        core = re.sub(r".*[:：]", "", l).strip() or l   # 冒號後的值;無冒號取整行
+        core = _clean_agency_name(_AGENCY_LABEL_WORD.sub("", core))
+        if (core and _AGENCY_NAME_KW.search(core)
+                and not CN_ADDR.search(core) and len(core) >= 4):
+            return core
+    return ""
+
+
+def _address_in_block(block: list[str]) -> str:
+    """區塊內挑「台仲地址」:去『地址/Alamat』標籤後,取含縣市+街道 pattern 的中文行。"""
+    for l in block:
+        core = re.sub(r".*(地址|Alamat)\s*[:：]", "", l, flags=re.I)
+        if _has_cjk(core) and CN_ADDR.search(core):
+            return LABEL_WORDS.sub("", core).lstrip(":： ").strip()
+    return ""
+
+
+def agency_block_from_next_page(docx_path: str, client=None) -> dict:
+    """電話備援用:回契約次頁台仲區塊的 {phones, name, address}(整頁 1 次 Vision)。
+    找不到區塊 → 皆空。名稱/地址供名冊相似度反查(電話查無時的後備管道)。"""
+    block = _agency_block_lines(docx_path, client=client)
+    if not block:
+        return {"phones": [], "name": "", "address": ""}
+    return {
+        "phones":  _phones_in_block(block),
+        "name":    _name_in_block(block),
+        "address": _address_in_block(block),
+    }
+
+
+def agency_phones_from_next_page(docx_path: str, client=None) -> list[str]:
+    """(相容保留)只取台仲區塊電話候選,等同 agency_block_from_next_page()['phones']。"""
+    return agency_block_from_next_page(docx_path, client=client)["phones"]
 
 
 def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,

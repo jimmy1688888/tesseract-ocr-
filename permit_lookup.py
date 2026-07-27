@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import re
@@ -146,6 +147,47 @@ def build_phone_index(records: list[dict]) -> dict[str, list[dict]]:
     return idx
 
 
+# ── 名稱／地址反查(電話反查的後備管道)─────────────────────────────────────
+# 電話是精確反查;名稱/地址靠 OCR,會有誤字,故改用「正規化後相似度」比對,
+# 取相似度最高且達門檻者當候選(仍一律 manual_review,由人工核對)。
+NAME_MATCH_MIN = 0.78   # 機構名稱相似度門檻(名稱獨特,設較高避免誤命中)
+ADDR_MATCH_MIN = 0.72   # 機構地址相似度門檻(地址長、雜訊多,略放寬但仍保守)
+
+
+def _norm_name(s: str) -> str:
+    """機構名稱正規化:只留中英數(去空白/括號/標點),英文轉大寫,供相似度比對。"""
+    return re.sub(r"[^0-9A-Za-z一-鿿]", "", str(s or "")).upper()
+
+
+def _norm_addr(s: str) -> str:
+    """地址正規化:去空白與常見標點/括號,全形數字轉半形,供相似度比對。"""
+    s = str(s or "").translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+    return re.sub(r"[\s,，、.。\-—()（）:：]", "", s).upper()
+
+
+def _best_match(query: str, records: list[tuple[str, dict]], min_ratio: float) -> dict | None:
+    """在 (正規化字串, info) 清單中找與 query 相似度最高者;達門檻才回傳。
+    回傳 info 複本並附 _ratio;查無或未達門檻 → None。"""
+    if len(query) < 4:
+        return None                       # 太短不比(易誤命中)
+    best, best_r = None, 0.0
+    sm = difflib.SequenceMatcher()
+    sm.set_seq2(query)
+    for norm, info in records:
+        if not norm:
+            continue
+        sm.set_seq1(norm)
+        # quick_ratio 為 ratio 的上界,先粗篩省去多數精算
+        if sm.quick_ratio() <= best_r:
+            continue
+        r = sm.ratio()
+        if r > best_r:
+            best, best_r = info, r
+    if best is not None and best_r >= min_ratio:
+        return {**best, "_ratio": round(best_r, 3)}
+    return None
+
+
 class PermitLookup:
     """許可證查表器。建構一次、重複查詢。"""
 
@@ -154,6 +196,15 @@ class PermitLookup:
             records = fetch_roster()
         self.main_index, self.branch_index = build_indices(records)
         self.phone_index = build_phone_index(records)
+        # 名稱/地址反查索引:只收目前有效機構的 (正規化字串, info)。
+        self._name_records: list[tuple[str, dict]] = []
+        self._addr_records: list[tuple[str, dict]] = []
+        for rec in records:
+            if not _is_active(rec):
+                continue
+            info = _info(rec)
+            self._name_records.append((_norm_name(info["機構名稱"]), info))
+            self._addr_records.append((_norm_addr(info["機構地址"]), info))
 
     def lookup(self, permit: str) -> dict | None:
         """回傳 {機構名稱, 機構地址, 電話, 許可證, 有效};查無 → None。
@@ -182,6 +233,16 @@ class PermitLookup:
         """電話反查:唯一命中才回傳,查無或多家(模糊)→ None。"""
         m = self.agencies_by_phone(phone)
         return m[0] if len(m) == 1 else None
+
+    def best_by_name(self, name: str, min_ratio: float = NAME_MATCH_MIN) -> dict | None:
+        """仲介名稱反查:與名冊「機構名稱」正規化後比相似度,取最高且達門檻者。
+        回傳 info(附 _ratio 相似度);查無/未達門檻 → None。電話後備管道。"""
+        return _best_match(_norm_name(name), self._name_records, min_ratio)
+
+    def best_by_address(self, address: str, min_ratio: float = ADDR_MATCH_MIN) -> dict | None:
+        """仲介地址反查:與名冊「機構地址」正規化後比相似度,取最高且達門檻者。
+        回傳 info(附 _ratio 相似度);查無/未達門檻 → None。電話後備管道。"""
+        return _best_match(_norm_addr(address), self._addr_records, min_ratio)
 
 
 if __name__ == "__main__":
