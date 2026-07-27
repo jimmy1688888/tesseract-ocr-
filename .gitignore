@@ -12,7 +12,10 @@ service_account.json
 secrets/
 
 # ── 專案資料夾（內容是個別使用者的資料，不適合上版控）─────────────────────
-docs/
+docs/*
+# agent skills 設定檔（無個資）納入版控；docs/ 其餘（真實契約）仍忽略
+!docs/agents/
+!docs/agents/**
 work/
 output/
 *.docx
