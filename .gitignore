@@ -19,6 +19,9 @@ docs/*
 # 架構決策紀錄（無個資）同樣納入版控
 !docs/adr/
 !docs/adr/**
+# 架構檢視存檔（無個資）——供後續維護參考
+!docs/reviews/
+!docs/reviews/**
 work/
 output/
 *.docx
