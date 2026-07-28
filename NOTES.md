@@ -113,9 +113,44 @@ Sheets 每列 **15 欄**，H~O 由 `pipeline.py` 於寫入前自動填入：
 - **⚠️ 待觀察**：commit `80057f4` 留下的問題 —「有多數票但 conf 低」的案子目前行為未定案，
   尚未驗證是否該一併走救援。
 
-## 目前狀態（2026-07-27）
+## 已完成：台灣文字正規化收歸 address_db（2026-07-28）
 
-- 分支 `main`，與 origin 同步，工作區乾淨。`python -m pytest -q` → **147 passed**。
+`address_db` 與 `permit_lookup` 原本各有一套「地址正規化」且**行為不一致**：前者折疊
+臺→台、一段→1段，後者兩者都不做——偏偏後者才是反查救援比相似度用的那一套。名冊機構
+地址 38% 用官方體例的「臺」而契約 OCR 印的是「台」，名冊自身段號也國字／阿拉伯各半
+（308／313 筆），等於每次比對都憑空被扣分。
+
+- `address_db._norm` 升為公開 **`fold_variants`**（**行為一行未改**，只是換名字；
+  它同時是 address_db 自己建索引用的函式，維持行為不變是硬約束）。
+- `permit_lookup._norm_addr` ／ `_norm_name` 都先過 `fold_variants`；原本自行處理全形
+  數字的 `str.maketrans` 已刪（NFKC 已涵蓋）。
+- **門檻刻意不動**（`ADDR_MATCH_MIN` 0.72 ／ `NAME_MATCH_MIN` 0.78）。折疊會系統性推高
+  所有相似度，但實測**誤配對門檻不敏感**：拉到 0.88 只少 2 件誤配卻少救 104 件。
+  若日後看到「折疊後沒調門檻」以為是漏改——是刻意的，數據見 ADR-0002。
+- 實測（真實名冊 2,121 家、樣本 300 筆，模擬契約寫法＋OCR 損壞）：乾淨輸入命中率
+  **不變**（本來就 100%），OCR 損壞 15%／20% 時分別多救回 13／25 件，誤配 +0／+1。
+  改善全部來自把原本掉在門檻以下的正確答案拉過門檻。
+  **這次改動不修正任何既有的錯誤答案**，買的是紅章咬字時的餘裕。
+- ⚠ `fold_variants` 是**比對用**中間字串，會把「臺」寫成「台」，**不可拿去填 Sheets
+  的 J 欄**；要輸出標準地址一律用 `normalize_address()`（它保留官方正體「臺」）。
+  `test_address_norm.py::TestNotForOutput` 釘住這條界線。
+
+### 新增的文件慣例（換手時先讀這兩處）
+
+- **`CONTEXT.md`**（repo 根目錄）：領域詞彙表——許可證／仲介機構／雇主／名冊／契約頁／
+  多數票／獨立證據管道／反查救援／異體折疊／地址標準化…，每個詞附 `_Avoid_` 列出
+  **不該用**的同義詞。寫 issue、commit、測試命名時照這裡的用語，別漂移。
+- **`docs/adr/`**：架構決策紀錄。目前兩份——0001（正規化歸屬與被否決的方案）、
+  0002（門檻維持 0.72 的實測依據）。`.gitignore` 的 `docs/*` 原本只白名單
+  `docs/agents/`，已補上 `!docs/adr/`，否則 ADR 寫了也進不了版控。
+
+## 目前狀態（2026-07-28）
+
+- 分支 `main`，與 origin 同步，工作區乾淨。`python -m pytest -q` → **183 passed**
+  （原 147 ＋ 本次新增 36：`test_address_norm.py` 22、`test_agency_rescue.py` 14）。
+- `test_agency_rescue.py` 示範了一個一直存在但沒人用的測試入口：
+  `PermitLookup(records)` **接受注入的名冊清單**，故反查行為可用三筆手寫假名冊測完，
+  不需要 `data/agency_roster.json`、不連網。
 - `.claude/skills/`、`.agents/skills/` 已加入 .gitignore（個人工具，同事不需要，也不需裝 Node.js）；
   `skills-lock.json` 保留版控供換機重裝。共用的 agent 設定在 `docs/agents/`。
 
@@ -125,6 +160,12 @@ Sheets 每列 **15 欄**，H~O 由 `pipeline.py` 於寫入前自動填入：
 > employer_extract 雇主擷取、address_db 地址標準化、pipeline H~O 整合、
 > 全無命中→仲介電話反查救援**全部完成**
 > （含雇主 ROI 截圖存 scan_results/employer_crops 供人工複查），
-> `python pipeline.py` 即可端到端跑 docs/ → Sheets 15 欄。147 測試全過。
+> `python pipeline.py` 即可端到端跑 docs/ → Sheets 15 欄。183 測試全過。
+> 領域詞彙見 `CONTEXT.md`，架構決策見 `docs/adr/`。
 > 下一步候選：(1) 對 docs/ 新批（32088 起）全跑驗證 H~O 實際寫入品質；
-> (2) 釐清 `80057f4` 留下的「有多數票但 conf 低」該不該走救援。
+> (2) 釐清 `80057f4` 留下的「有多數票但 conf 低」該不該走救援；
+> (3) 架構檢視還有幾項未動的候選，最有份量的是「仲介反查台仲區塊切出純函式 seam」
+>     （`_agency_block_lines` 目前把 docx 解壓＋選頁＋去紅章＋Vision＋定界五件事綁在
+>     一起，導致最常改的定界規則只能靠真實 docx＋Vision 才測得到）與「許可證文字
+>     判讀兩套實作」（`find_permits` vs `run_google_vision` 內嵌的 regex 走訪，
+>     兩引擎交叉比對其實沒共用同一套判讀）。
