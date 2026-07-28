@@ -25,6 +25,11 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+# 台灣文字正規化的唯一來源(臺/台、鍾/鐘、全半形、段號寫法)。
+# address_db 只依賴標準函式庫、且 import 時不讀任何資料檔,故可安全頂層 import
+# ——即使 data/AllData.json 缺席也不影響本模組。見 docs/adr/0001。
+from address_db import fold_variants
+
 # 手動更新用:瀏覽器開此連結下載 JSON,覆蓋 ROSTER_PATH
 ROSTER_JSON_URL = "https://apiservice.mol.gov.tw/OdService/download/A17000000J-020001-QHy"
 ROSTER_PATH = Path(__file__).with_name("data") / "agency_roster.json"
@@ -155,14 +160,24 @@ ADDR_MATCH_MIN = 0.72   # 機構地址相似度門檻(地址長、雜訊多,略�
 
 
 def _norm_name(s: str) -> str:
-    """機構名稱正規化:只留中英數(去空白/括號/標點),英文轉大寫,供相似度比對。"""
-    return re.sub(r"[^0-9A-Za-z一-鿿]", "", str(s or "")).upper()
+    """機構名稱正規化:先異體折疊,再只留中英數(去空白/括號/標點),英文轉大寫。
+
+    折疊的實測效益在名稱側很小(名冊僅 8 筆機構名稱含「臺」,多數登記為「台」),
+    納入是為了讓名稱與地址共用同一套規則——只改一邊等於把「兩套正規化」
+    這個問題留一半。實測折疊後正規化撞名 0 → 0,不會把兩家不同機構併成同鍵。"""
+    return re.sub(r"[^0-9A-Za-z一-鿿]", "", fold_variants(str(s or ""))).upper()
 
 
 def _norm_addr(s: str) -> str:
-    """地址正規化:去空白與常見標點/括號,全形數字轉半形,供相似度比對。"""
-    s = str(s or "").translate(str.maketrans("０１２３４５６７８９", "0123456789"))
-    return re.sub(r"[\s,，、.。\-—()（）:：]", "", s).upper()
+    """地址正規化:先異體折疊(臺→台、一段→1段、全形→半形),再去空白與標點/括號。
+
+    折疊委由 address_db.fold_variants,不在此另寫一套:名冊機構地址 38% 用官方
+    體例的「臺」、契約 OCR 印的是「台」,名冊自身的段號也是國字/阿拉伯各半
+    (308 / 313 筆),不折疊等於在每次比對憑空扣掉相似度。實測乾淨輸入下命中率
+    不變(本來就 100%),但 OCR 受損 20% 時多救回 25 件、誤配僅 +1。見 ADR-0002。
+
+    註:全形數字由 fold_variants 的 NFKC 一併處理,故不需再自行 translate。"""
+    return re.sub(r"[\s,，、.。\-—()（）:：]", "", fold_variants(str(s or ""))).upper()
 
 
 def _best_match(query: str, records: list[tuple[str, dict]], min_ratio: float) -> dict | None:

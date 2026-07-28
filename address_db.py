@@ -12,6 +12,17 @@ OCR 出來的地址常缺字、跨行、無英文、無郵遞區號。本模組�
     # r["road_en"]    == "Xinqun 1st Rd."
     # r["zip"]        == "265"
 
+    from address_db import fold_variants        # 異體折疊(比對用,不可輸出)
+    fold_variants("臺北市中山北路一段")          # → "台北市中山北路1段"
+
+本模組是「台灣文字正規化」的唯一擁有者:臺/台、鍾/鐘、全半形、段號寫法
+一律在 fold_variants 收斂。permit_lookup 反查名冊時比對機構地址／名稱,
+也呼叫同一個函式,不另寫一套(見 docs/adr/0001)。
+
+兩個公開函式用途不同,別混用:
+  - fold_variants(s)      → 比對用中間字串(會把「臺」變「台」,不可輸出)
+  - normalize_address(t)  → 可輸出的官方標準地址(address_cn 保留正體「臺」)
+
 設計重點(對應 OCR 常見失誤):
   - 臺↔台 異體字統一。
   - 縣市/行政區同名衝突(嘉義縣vs嘉義市、宜蘭縣vs宜蘭市):先比對「完整名稱」。
@@ -57,11 +68,22 @@ def _seg_to_arabic(seg: str) -> str:
     return str(_CN_NUM.get(seg, seg))
 
 
-def _norm(s: str) -> str:
-    """NFKC(全形→半形) + 臺→台 + 鍾→鐘 + 去空白 + 段號統一阿拉伯。
-       比對前一律過這關。鍾/鐘為常見異體互換(官方庫「鍾山新村」vs OCR/慣用
-       「鐘山新村」);段號統一是因契約慣用國字(「一段」)而官方庫全為
-       阿拉伯(「1段」),不統一則子字串精確比對必漏接。"""
+def fold_variants(s: str) -> str:
+    """台灣地址／機構名稱的「異體折疊」:把同一個字的不同寫法收斂成一種。
+
+    NFKC(全形→半形) + 臺→台 + 鍾→鐘 + 去空白 + 段號統一阿拉伯。
+    比對前一律過這關。鍾/鐘為常見異體互換(官方庫「鍾山新村」vs OCR/慣用
+    「鐘山新村」);段號統一是因契約慣用國字(「一段」)而官方庫全為
+    阿拉伯(「1段」),不統一則子字串精確比對必漏接。
+
+    ⚠ 這是**比對用**的中間字串,不是可輸出的地址——它會把「臺」寫成「台」,
+    直接填進 Sheets 的 J 欄就不符官方寫法。要輸出標準地址請用
+    normalize_address(),它回傳的 address_cn 才是照官方庫原樣組出來的。
+
+    公開的原因:permit_lookup 反查名冊時要用同一套折疊規則比對機構地址／
+    名稱,否則名冊的「臺北市…1段」與契約 OCR 的「台北市…一段」會被算成
+    不相似(名冊地址 38% 含「臺」,而契約印的是「台」)。見 ADR-0001。
+    """
     s = unicodedata.normalize("NFKC", s or "").replace("臺", "台").replace("鍾", "鐘")
     s = re.sub(r"([0-9一二三四五六七八九十]+)段",
                lambda m: _seg_to_arabic(m.group(1)) + "段", s)
@@ -85,12 +107,12 @@ def _load() -> list:
         for a in c["AreaList"]:
             roads = []
             for r in a["RoadList"]:
-                rn = _norm(r["RoadName"])
+                rn = fold_variants(r["RoadName"])
                 roads.append((rn, _strip_seg(rn), r["RoadName"], r["RoadEngName"]))
-            areas[_norm(a["AreaName"])] = (
+            areas[fold_variants(a["AreaName"])] = (
                 a["AreaName"], a["AreaEngName"], a["ZipCode"], roads,
             )
-        cities.append((_norm(c["CityName"]), c["CityName"], c["CityEngName"], areas))
+        cities.append((fold_variants(c["CityName"]), c["CityName"], c["CityEngName"], areas))
     _merge_custom_roads(cities)
     return cities
 
@@ -105,12 +127,12 @@ def _merge_custom_roads(cities) -> None:
     for e in entries:
         try:
             # 用正規化名比對(臺/台等價),手動新增寫「台中市」也能對上官方「臺中市」
-            city = next(c for c in cities if c[0] == _norm(e["CityName"]))
-            area = city[3].get(_norm(e["AreaName"]))
+            city = next(c for c in cities if c[0] == fold_variants(e["CityName"]))
+            area = city[3].get(fold_variants(e["AreaName"]))
             if not area:
                 continue
             roads = area[3]
-            rn = _norm(e["RoadName"])
+            rn = fold_variants(e["RoadName"])
             if any(r[0] == rn for r in roads):
                 continue
             roads.append((rn, _strip_seg(rn), e["RoadName"], e["RoadEngName"]))
@@ -120,7 +142,7 @@ def _merge_custom_roads(cities) -> None:
 
 def _best(query: str, items, key, cutoff: float):
     """對 items 做 difflib 模糊比對,回傳 (score, item);低於 cutoff 回 (score, None)。"""
-    qn = _norm(query)
+    qn = fold_variants(query)
     best_s, best_it = 0.0, None
     for it in items:
         s = difflib.SequenceMatcher(None, qn, key(it)).ratio()
@@ -223,13 +245,13 @@ def _match_road(L: str, roads: list, cutoff: float = 0.5):
     """路名比對。回傳 (road_raw, road_eng, score) 或 None。
     優先序:①含段號的完整路名精確配(段號必抓版 regex 優先,救回
     國道路/公道五路 這型核心會被非貪婪切錯的路名)→ ②官方路名『子字串
-    精確含』(對官方清單精確比對、取最長,無誤配風險;段號已在 _norm 統一
+    精確含』(對官方清單精確比對、取最長,無誤配風險;段號已在 fold_variants 統一
     阿拉伯,「一段」原文也能含到「1段」條目)→ ③路名主幹模糊配(OCR 殘缺
     時的備援)。鄉村地名型(枋子林)與巷型(后尾巷)無 路/街/道 後綴,
     regex 抓不到,靠②。"""
     m = _ROAD_SEG_RE.search(L) or _ROAD_RE.search(L)
     if m:
-        road_core = _norm(m.group(1))              # 例:辛亥路
+        road_core = fold_variants(m.group(1))              # 例:辛亥路
         seg_num = _seg_to_arabic(m.group(2)) if m.lastindex >= 2 else None
         # 1. 有段號 → 直接組出「辛亥路7段」做精確配,拿到正確段別英文
         if seg_num:
@@ -247,7 +269,7 @@ def _match_road(L: str, roads: list, cutoff: float = 0.5):
     if hit:
         return hit[1], hit[2], 1.0
     if m:
-        road_core = _norm(m.group(1))
+        road_core = fold_variants(m.group(1))
         seg_num = _seg_to_arabic(m.group(2)) if m.lastindex >= 2 else None
         # 3. 以路名主幹模糊配(比對各路的去段主幹)。
         #    方向字防護:結尾前的東西南北必須一致——「大眾東路」不可
@@ -360,7 +382,7 @@ def _line_candidate(line: str, city_raw: str, city_eng: str, areas: dict,
     forced_area:給定 (area_raw, area_eng, zip, roads) 時直接採用(英文錨定
     已確定行政區),否則從行內比對;比不到區則以全縣市路名配。
     """
-    L = _norm(line)
+    L = fold_variants(line)
     if forced_area:
         area_raw, area_eng, zipcode, roads = forced_area
     else:
@@ -372,12 +394,12 @@ def _line_candidate(line: str, city_raw: str, city_eng: str, areas: dict,
             roads = [r for v in areas.values() for r in v[3]]  # 缺區 → 全縣市路名
     # 抓路名前,先把已定位的縣市/區從字串剝掉,避免路名 regex 從行首把
     # 「彰化縣和美鎮德南」整段吞成路名主幹 → 誤配。
-    cn = _norm(city_raw)
+    cn = fold_variants(city_raw)
     rest = L.replace(cn, "", 1)
     if len(cn) >= 3:
         rest = rest.replace(cn[1:], "", 1)   # 縣市首字被印章蓋掉的殘留(「雄市」)
     if area_raw:
-        rest = rest.replace(_norm(area_raw), "", 1)
+        rest = rest.replace(fold_variants(area_raw), "", 1)
     road = _match_road(rest, roads, cutoff=road_cutoff)
     road_raw, road_eng, rscore = road if road else ("", "", 0.0)
     detail = _extract_tail(line)
@@ -439,7 +461,7 @@ def normalize_address(text: str, *, road_cutoff: float = 0.5,
     best_rank = -1.0
     best_tier = 9          # 縣市命中層級:1 完整名 2 去尾字 3 模糊(可疑)
     for line in lines:
-        city = _match_city(_norm(line))
+        city = _match_city(fold_variants(line))
         if not city:
             continue
         city_raw, city_eng, areas, tier = city
@@ -483,16 +505,16 @@ def normalize_address(text: str, *, road_cutoff: float = 0.5,
 
 
 def find_roads(keyword: str, city_kw: str = "", area_kw: str = "") -> list:
-    """查官方庫(含自建補充)路名:關鍵字子字串比對,經 _norm 正規化
+    """查官方庫(含自建補充)路名:關鍵字子字串比對,經 fold_variants 折疊
        (臺/台、鍾/鐘異體、全半形都吸收)。回傳 [(縣市, 區, 路名, 英譯, 郵遞)]。"""
-    kw = _norm(keyword)
+    kw = fold_variants(keyword)
     out = []
     for _cn, c_raw, _ce, areas in _load():
-        if city_kw and _norm(city_kw) not in _norm(c_raw):
+        if city_kw and fold_variants(city_kw) not in fold_variants(c_raw):
             continue
         for v in areas.values():
             a_raw, _ae, zipc, roads = v
-            if area_kw and _norm(area_kw) not in _norm(a_raw):
+            if area_kw and fold_variants(area_kw) not in fold_variants(a_raw):
                 continue
             for rn, _b, raw, eng in roads:
                 if kw in rn:
