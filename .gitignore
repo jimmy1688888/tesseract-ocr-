@@ -31,6 +31,8 @@ output/
 # ── 仲介名冊資料檔（政府開放資料，2.2MB 且會隨時間變舊，手動下載更新）──────
 # 來源：data.gov.tw dataset 6682 的 JSON；下載後放到 data/agency_roster.json
 data/agency_roster.json
+# 由 export_roster_xlsx.py 從上面那個 JSON 產生的人工查看用 Excel(衍生檔,隨時可重產)
+data/agency_roster.xlsx
 
 # ── 全國門牌地址資料檔（政府開放資料，2.4MB，供 address_db.py 地址標準化）────
 # 來源：data.gov.tw 縣市→行政區→路街 中英對照 JSON；下載後放到 data/AllData.json

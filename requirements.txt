@@ -20,5 +20,8 @@ google-cloud-vision>=3.4.0,<4.0.0        # Vision API 交叉比對 / 雇主契�
 google-api-python-client>=2.100.0,<3.0.0 # Sheets API 寫入
 google-auth>=2.20.0,<3.0.0               # Service Account 認證
 
+# ── 名冊匯出(僅 export_roster_xlsx.py 需要,主流程用不到)────────────────
+openpyxl>=3.1.0,<4.0.0            # 名冊 JSON → Excel,供人工查看
+
 # ── 測試(開發用,同事只跑主程式可略過)─────────────────────────────────
 pytest>=8.0.0,<9.0.0
