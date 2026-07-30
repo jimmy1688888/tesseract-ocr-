@@ -149,17 +149,38 @@ def _tesseract_top_text(image_bytes: bytes, top_frac: float = 0.35) -> str:
 
 def score_contract_page(image_bytes: bytes) -> int:
     """一張圖的契約頁分數:欄位標籤(FORM)×2 + 樣板(PROSE)×1。
-    加權讓「雇主資料表」壓過只有 prose 的簽名頁(見 CONTRACT_MARKERS 註解)。"""
+    加權讓「雇主資料表」壓過只有 prose 的簽名頁(見 CONTRACT_MARKERS 註解)。
+
+    **先去紅章再掃**:資料表那頁的欄位標籤常被大紅章整片蓋住,原圖直送 Tesseract
+    會一個 FORM 標籤都讀不到 → 該頁 0 分,輸給只有 prose 的次頁,契約頁選錯
+    (32426/32427 教訓:image2 資料表 0 分敗給 image3 次頁 2 分,結果雇主欄位
+    抽到合約條文,且因「契約頁被判成最後一張」連次頁台仲都完全沒掃)。
+    去紅章後同樣兩張 image2 由 0 → 6/7 分穩定勝出。此舉也讓評分與後續各階段
+    (雇主 ROI、次頁台仲)一致都在去紅章後的影像上做。
+    前處理失敗則退回原圖,維持原行為,不讓評分因此中斷。
+    """
+    try:
+        image_bytes = deink_red_stamp(image_bytes)
+    except Exception:
+        pass
     text = _tesseract_top_text(image_bytes)
     return 2 * len(_FORM_LABELS.findall(text)) + len(_PROSE_MARKERS.findall(text))
 
 
+# 認定為契約頁的最低分。低於此值視為「頁面身分不明」,呼叫端各自決定退路。
+MIN_CONTRACT_SCORE = 2
+
+
 def find_contract_image(images: list[tuple[str, bytes]],
-                        min_score: int = 2) -> tuple[str, bytes] | None:
+                        min_score: int = MIN_CONTRACT_SCORE
+                        ) -> tuple[str, bytes] | None:
     """從 (檔名, bytes) 清單挑出契約頁:取特徵字命中數最高者,需 ≥ min_score。
 
     以 Tesseract 掃各圖上緣、計 CONTRACT_MARKERS 命中數;同分時取自然排序在前者。
     找不到(全都 < min_score)回傳 None。
+
+    註:給「手邊只有圖、沒有 docx 路徑」的呼叫端用。有 docx 路徑者請走
+    _scored_pages(),同一份 docx 的評分只會算一次。
     """
     best: tuple[str, bytes] | None = None
     best_score = 0
@@ -168,6 +189,46 @@ def find_contract_image(images: list[tuple[str, bytes]],
         if s > best_score:
             best_score, best = s, (name, b)
     return best if best_score >= min_score else None
+
+
+# docx → {圖檔名: 契約頁分數}。評分含 Tesseract(每份 docx 數秒),而同一份 docx
+# 在一次 pipeline 中會被評兩次:雇主擷取一次、次頁台仲反查再一次。兩者要的是
+# 「同一個契約頁判定」,重算既慢又有不一致的風險,故在此共用。
+# 只快取分數不快取影像 bytes:一份 docx 的圖動輒數 MB,整批快取會吃掉大量記憶體。
+# 鍵含 (mtime_ns, size),檔案被換掉會自動失效。
+_page_score_cache: dict[tuple, dict[str, int]] = {}
+
+
+def _score_cache_key(docx_path: str) -> tuple:
+    from pathlib import Path
+    try:
+        st = Path(docx_path).stat()
+        return (str(Path(docx_path).resolve()), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (str(docx_path), None, None)
+
+
+def _scored_pages(docx_path: str) -> list[tuple[int, str, bytes]]:
+    """docx 各內嵌圖的 (契約頁分數, 檔名, bytes),依自然排序。
+
+    分數取自 _page_score_cache,同一份 docx 只實際評一次;bytes 每次重讀
+    (zip 解壓遠比 Tesseract 便宜,且不必把影像長期留在記憶體)。
+    """
+    images = sorted(_docx_images(docx_path), key=lambda x: _natural_key(x[0]))
+    if not images:
+        return []
+    key = _score_cache_key(docx_path)
+    scores = _page_score_cache.get(key)
+    if scores is None or set(scores) != {n for n, _ in images}:
+        scores = {n: score_contract_page(b) for n, b in images}
+        _page_score_cache[key] = scores
+    return [(scores[n], n, b) for n, b in images]
+
+
+def _best_scored_page(scored: list[tuple[int, str, bytes]]
+                      ) -> tuple[int, str, bytes] | None:
+    """在 _scored_pages() 結果中取最高分頁;同分取自然排序在前者(max 的預設行為)。"""
+    return max(scored, key=lambda t: t[0]) if scored else None
 
 
 def deink_red_stamp(image_bytes: bytes, *, whiten_thresh: int = 45,
@@ -378,6 +439,17 @@ def _docx_images(docx_path: str) -> list[tuple[str, bytes]]:
 # 不能靠幾何裁半;改為整頁 OCR(仍只 1 次 Vision),以『台灣仲介』欄位標籤錨定起點、
 # 到其後的仲介標籤或印尼電話標籤(Telp/Telepon)為止,結構性排除印尼電話。
 _TW_AGENCY_LABEL = re.compile(r"[台臺]灣仲介|Agen(?:cy|si)\s*Taiwan", re.I)
+# 台仲標籤被紅章毀掉時的後備錨(僅在嚴格標籤完全找不到時才用)。
+# 32426 實例:『台灣仲介 Agensi Taiwan:』被章蓋成『tensi Taiwan:』——中文三字與
+# Agen 全失,嚴格式對不上就整份放棄,連同頁上完好的『電話:04-23263526』一起丟掉。
+# 放寬的同時必須擋住同頁其他含 Taiwan 的行,故要求兩個條件同時成立:
+#   ① 保留 Agensi/Agency 的殘骸(gen/nsi/si/cy 其一)
+#   ② Taiwan 後(容一個右括號,如『(Agency Taiwan):』)緊跟冒號——標籤才有,
+#      同頁的『TAIWAN BLVD NORTH』『TAIWAN(R.O.C.)』都沒有
+# 再加上 _is_agency_label_line 的「短行+非句號結尾」,可濾掉條文裡的
+# 『ke Instansi Pemerintah Taiwan yang…diverifikasi.』(長且以句號結尾)。
+_TW_AGENCY_LABEL_LOOSE = re.compile(
+    r"(?:gen|nsi|si|cy)\w*\s*Taiwan\s*[)）]?\s*[:：]", re.I)
 _ID_AGENCY_LABEL = re.compile(r"印尼仲介|P3MI|Agen(?:cy|si)\s*Indonesia|Perwakilan", re.I)
 # 印尼電話標籤(Telp/Telepon):台仲用「電話」、印尼用 Telp,作為區塊下界的補強
 # (當印尼仲介欄位標籤本身 OCR 糊掉沒對上時,仍能在印尼電話行前收尾)。
@@ -426,26 +498,26 @@ def _agency_block_lines(docx_path: str, client=None) -> list[str]:
     (短、非句號)錨定起點 → 到其後的仲介欄位標籤 / 印尼電話標籤(Telp)為止。
     台仲在左在右皆可;找不到契約頁/無次頁/無真台仲標籤 → 空清單(不猜、不誤抓)。
     """
-    imgs = _docx_images(docx_path)
-    if not imgs:
-        return []
-    ordered = sorted(imgs, key=lambda x: _natural_key(x[0]))
-    page = find_contract_image(imgs)
-    if not page:
-        return []
-    names = [n for n, _ in ordered]
-    ci = names.index(page[0])
-    if ci + 1 >= len(ordered):
+    scored = _scored_pages(docx_path)      # 分數與雇主擷取共用,不重評
+    best = _best_scored_page(scored)
+    if best is None or best[0] < MIN_CONTRACT_SCORE:
+        return []                          # 找不到契約頁 → 不猜(次頁是哪張也無從談起)
+    ci = [n for _s, n, _b in scored].index(best[1])
+    if ci + 1 >= len(scored):
         return []                          # 契約頁是最後一張,無次頁
     # 去紅章前處理後整頁送 Vision(仍只 1 次;台仲可能在右半,不裁切)。
-    png = _deink_next_page_png(ordered[ci + 1][1])
+    png = _deink_next_page_png(scored[ci + 1][2])
     lines = [l.strip() for l in vision_full_text(png, client=client)
              .splitlines() if l.strip()]
 
     start = next((i for i, l in enumerate(lines)
                   if _is_agency_label_line(l, _TW_AGENCY_LABEL)), None)
     if start is None:
-        return []                          # 無真台仲標籤 → 不猜(避免誤抓印尼資料)
+        # 嚴格標籤找不到 → 試殘缺標籤(紅章蓋掉『台灣仲介 Agen』只剩『tensi Taiwan:』)。
+        start = next((i for i, l in enumerate(lines)
+                      if _is_agency_label_line(l, _TW_AGENCY_LABEL_LOOSE)), None)
+    if start is None:
+        return []                          # 兩種都錨不到 → 不猜,交人工(避免誤抓印尼資料)
     end = next((i for i in range(start + 1, len(lines))
                 if _is_agency_label_line(lines[i], _ID_AGENCY_LABEL)
                 or _is_agency_label_line(lines[i], _TW_AGENCY_LABEL)
@@ -552,15 +624,13 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
 
     empty = {"雇主名稱_中": "", "雇主名稱_英": "", "地址_中": "",
              "地址_英": "", "電話": ""}
-    images = _docx_images(docx_path)
-    if not images:
+    # 各圖分數與次頁台仲反查共用(_scored_pages 有快取),同一份 docx 不重評
+    scored = _scored_pages(docx_path)
+    if not scored:
         return {**empty, "_image": "", "_note": "docx 無內嵌圖", "_crop": ""}
 
-    # 一次算完各圖分數(自然排序,同分取前者=max 的預設行為)
-    scored = [(score_contract_page(b), n, b)
-              for n, b in sorted(images, key=lambda x: _natural_key(x[0]))]
-    best_s, name, raw = max(scored, key=lambda t: t[0])
-    found = best_s >= 2
+    best_s, name, raw = _best_scored_page(scored)
+    found = best_s >= MIN_CONTRACT_SCORE
     if not found and best_s == 0:
         # 全零分:退 image2(樣本慣例上契約頁多在第 2 張),沒有再用第一張
         name, raw = next(((n, b) for _s, n, b in scored
