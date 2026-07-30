@@ -139,15 +139,47 @@ def _norm_phone(phone: str) -> str:
     return n
 
 
+# 台灣市話/手機正規化後為 9~10 碼;低於此長度視為殘段(分機、缺區碼的第二支)。
+# 同時是前綴反查的最短比對長度——兩處用同一個值,避免各自漂移。
+PHONE_MIN_LEN = 8
+
+# 名冊「電話」欄常把多支號碼或分機擠在同一格(全表 24 筆,其中有效機構 12 筆):
+#   '03-3253456/3253507'、'072114387、0925510286'、'037-364897.364898' → 兩支號碼
+#   '(03)-3554436#171'、'02-29819295*13'                             → 主號 + 分機
+# 整欄去非數字會串成一長串(→ '0332534563253507'),精確反查必然落空,只有主號
+# 恰為前綴時才靠前綴反查勉強救回,第二支號碼則完全查不到。
+# 實測全表分隔符只有這幾種:'/'(5)、'、'(2)、'.'(2) 分號碼;'#'(14)、'*'(1) 接分機。
+# '-'(4592) 與括號(413) 是號碼內的寫法,絕不能當分隔。
+_PHONE_FIELD_SEP = re.compile(r"[/、.]")
+_PHONE_EXT_SEP = re.compile(r"[#*]")
+
+
+def split_phone_field(raw: str) -> list[str]:
+    """名冊電話欄 → 正規化號碼清單(去重保序);單一號碼即回單元素清單。
+
+    先拆多支號碼,再切掉各段的分機。不足 PHONE_MIN_LEN 碼的殘段丟棄:那是分機
+    (#171)或缺區碼的第二支(如 '03-3253456/3253507' 的 3253507),短到只能靠
+    完全相等命中,而 Vision 抽到的台灣號一律 9~10 碼,留著只會徒增誤撞。
+    """
+    out: list[str] = []
+    for seg in _PHONE_FIELD_SEP.split(str(raw or "")):
+        n = _norm_phone(_PHONE_EXT_SEP.split(seg, maxsplit=1)[0])
+        if len(n) >= PHONE_MIN_LEN and n not in out:
+            out.append(n)
+    return out
+
+
 def build_phone_index(records: list[dict]) -> dict[str, list[dict]]:
     """建「正規化電話 → 有效機構列」索引,供全無命中時以仲介電話反查許可證。
-    只收目前有效者;同電話多家(約 2.6%)保留全部,由呼叫端判定模糊不採用。"""
+
+    只收目前有效者;同電話多家(約 2.6%)保留全部,由呼叫端判定模糊不採用。
+    一筆記錄可產生多把 key(電話欄塞了兩支號碼時),見 split_phone_field。
+    """
     idx: dict[str, list[dict]] = defaultdict(list)
     for rec in records:
         if not _is_active(rec):
             continue
-        n = _norm_phone(rec.get("電話"))
-        if n:
+        for n in split_phone_field(rec.get("電話")):
             idx[n].append(_info(rec))
     return idx
 
@@ -244,7 +276,8 @@ class PermitLookup:
         by_permit = {h["許可證"]: h for h in self.phone_index.get(n, [])}
         return list(by_permit.values())
 
-    def agencies_by_phone_prefix(self, phone: str, min_len: int = 8) -> list[dict]:
+    def agencies_by_phone_prefix(self, phone: str,
+                                 min_len: int = PHONE_MIN_LEN) -> list[dict]:
         """電話『前綴』反查(OCR 少碼容錯):以「一方為另一方前綴且共同長度 ≥ min_len」
         比對,回傳去重後的有效機構(0/1/多筆);呼叫端只在唯一命中時採用。
         比精確反查寬鬆,故設 8 碼門檻——台灣市話/手機正規化後 9~10 碼,容許少 1~2 碼,
