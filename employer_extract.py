@@ -30,6 +30,9 @@ PHONE_PAREN = re.compile(r"\((0\d{1,3})\)\s*(\d{3,4})\s*-?\s*(\d{3,4})(?!\d)")
 PHONE_INTL = re.compile(r"(?<!\d)\+?886[\s.-]*([\d][\d\s.-]{6,12}\d)")
 # 電話標籤行(不含「傳真」,避免傳真號被當電話):優先取此類行上的號碼。
 PHONE_LINE_LABEL = re.compile(r"電話|Nomor\s*Telepon", re.I)
+# 傳真起點:同一行常寫成「電話:03-5310852,傳真:03-5277128」,取號碼前先切掉後段,
+# 否則傳真號會與電話一起進統計(32447/32417 的仲介框正是這種寫法)。
+FAX_SPLIT = re.compile(r"傳真|Fax", re.I)
 
 
 def _phones_in(line: str) -> list[str]:
@@ -48,8 +51,18 @@ EN_ADDR_KW = re.compile(
     r"\b(No\.|Rd\.|St\.|Dist\.|Lane|Alley|Sec\.|Village|Township|County|City|Taiwan)\b",
     re.I,
 )
-NAME_LABEL  = re.compile(r"(甲方名稱|雇主名[稱称]|以下簡稱)")
+# 甲方(雇主)標籤。「以下簡稱」刻意帶上「甲方」二字:乙方那行寫的是
+# 「勞工姓名(以下簡稱乙方)」,同樣含「以下簡稱」,不限定就會錨到乙方——
+# 平常甲方在前先命中看不出問題,一旦甲方那行被紅章毀掉(32417 的
+# 「甲方名稱」被讀成「用戶名稱」、「以下簡稱為甲方」被讀成「以下統為甲方」),
+# 就會靜默錨到乙方,把整個雇主區塊切在起點之前 → 五欄全空。
+NAME_LABEL  = re.compile(r"(甲方名稱|雇主名[稱称]|以下簡稱為?甲方)")
 ID_LABEL    = re.compile(r"Nama\s*(Majikan|Perusahaan)", re.I)
+# 甲方區塊的結束線:印尼文樣板「SELANJUTNYA DISEBUT PIHAK PERTAMA」
+# (以下簡稱甲方)固定收在甲方資料之後,其後即乙方(勞工)資料。
+PARTY_END   = re.compile(
+    r"SELANJUTNYA\s*DISEBUT|勞工姓名|Nama\s*Pekerja|PIHAK\s*KEDUA|以下簡稱乙方",
+    re.I)
 ADDR_LABEL  = re.compile(r"(地址|Alamat)")
 PHONE_LABEL = re.compile(r"(電話|Nomor\s*Telepon|傳真)", re.I)
 LABEL_WORDS = re.compile(r"(甲方名稱|雇主名[稱称]|以下簡稱為?甲方|地址|電話|傳真)")
@@ -264,22 +277,44 @@ def deink_red_stamp(image_bytes: bytes, *, whiten_thresh: int = 45,
     return buf.getvalue()
 
 
+# 抽取失敗時回傳的空欄位。鍵與成功路徑一致(含 _standardize_address 補的四個),
+# 讓呼叫端不必分辨走的是哪條路。
+_EMPTY_FIELDS = {
+    "雇主名稱_中": "", "雇主名稱_英": "", "地址_中": "", "地址_英": "", "電話": "",
+    "地址_中_標準": "", "地址_英_標準": "", "郵遞區號": "", "地址_比對": False,
+}
+
+
 def extract_employer_fields(text: str) -> dict:
-    """從 Vision 全文擷取雇主欄位。回傳 dict(缺項為空字串)。"""
+    """從 Vision 全文擷取雇主欄位。回傳 dict(缺項為空字串)。
+
+    另含 _note:正常為空字串;雇主區塊錨不到時為失敗原因,呼叫端據以標示留空。
+    """
     lines = [l.strip() for l in text.splitlines() if l.strip()]
 
-    # ── 定位雇主區塊起點(跳過標題之上的仲介 block)──
-    start = 0
-    for i, l in enumerate(lines):
-        if NAME_LABEL.search(l):
-            start = i
-            break
-    else:
-        for i, l in enumerate(lines):
-            if "MAJIKAN DENGAN" in l.upper():
-                start = i + 1
-                break
-    seg = lines[start:]
+    # ── 定位雇主區塊(上界跳過仲介 block,下界切在乙方之前)──
+    # 起點① 甲方標籤;② 標籤被 OCR 毀掉時退印尼文標籤 Nama Majikan——
+    #   實測 7 份契約它一律完好,且其「前一行」永遠是甲方姓名那行,故往回退一行
+    #   以納入中文姓名。它落在仲介框之下,退到這裡不會把仲介電話捲進來。
+    # 刻意不再退「MAJIKAN DENGAN」:那是標題字,而 Vision 對兩欄版面是逐欄
+    #   序列化,標題屬右欄、雇主資料屬左欄,輸出順序與版面上下無關
+    #   (32417:標題 y=104 卻排在第 15 行,雇主 y=166 反而排在第 10 行),
+    #   拿它當起點等於賭 Vision 這次怎麼切欄。
+    # 終點:甲方段落結束標記,把乙方(勞工)資料排除在統計之外。
+    # 兩個錨都失效 → 回空並註記,不退回「從第 0 行開始」:實測 7 份契約中有 6 份
+    #   會因此把仲介框的名稱/地址/電話整組當成雇主填進去(32447、32417 甚至抓到
+    #   仲介的傳真號)。那是「看起來完全合理的錯誤資料」,人工審核看不出破綻,
+    #   比留空危險得多。比照 32098 與台仲區塊的既有決定:錨不到就不猜,交人工。
+    start = next((i for i, l in enumerate(lines) if NAME_LABEL.search(l)), None)
+    if start is None:
+        i = next((i for i, l in enumerate(lines) if ID_LABEL.search(l)), None)
+        if i is None:
+            return {**_EMPTY_FIELDS,
+                    "_note": "雇主區塊錨定失敗(甲方標籤與 Nama Majikan 皆未命中)"}
+        start = max(0, i - 1)
+    end = next((i for i in range(start + 1, len(lines))
+                if PARTY_END.search(lines[i])), len(lines))
+    seg = lines[start:end]
 
     # ── 電話:只統計雇主區塊內。仲介框在區塊上方,其電話絕不能混入——
     #    雇主電話被格式/紅章毀掉時,全文統計的 fallback 會把仲介電話
@@ -287,9 +322,13 @@ def extract_employer_fields(text: str) -> dict:
     #    優先「電話/Nomor Telepon 標籤行」上的號碼:農業契約地址含地號
     #    (0075-0010…)會被 PHONE regex 誤當電話,標籤行優先可避開(32262 教訓);
     #    標籤行取不到才退回全區塊。出現兩次者(電話+Nomor Telepon 各一)優先。
+    #    同行的「傳真」後段先切掉:雇主/仲介都常寫成
+    #    「電話:03-5310852,傳真:03-5277128」,不切則傳真號與電話一起進統計,
+    #    且該行本身就是標籤行,傳真反而會靠 labeled 優先勝出(32447/32417 實例)。
     labeled_counts: dict[str, int] = {}
     all_counts: dict[str, int] = {}
     for l in seg:
+        l = FAX_SPLIT.split(l, maxsplit=1)[0]
         on_label = bool(PHONE_LINE_LABEL.search(l))
         for m in _phones_in(l):
             all_counts[m] = all_counts.get(m, 0) + 1
@@ -353,6 +392,7 @@ def extract_employer_fields(text: str) -> dict:
         "地址_中": addr_cn,
         "地址_英": addr_en,
         "電話": phone,
+        "_note": "",
     }
     _standardize_address(fields, addr_cn or "", en_hint=en_hint)
     return fields
@@ -538,7 +578,7 @@ def _phones_in_block(block: list[str]) -> list[str]:
     for l in block:
         if _ID_LINE.search(l):
             continue
-        head = re.split(r"傳真|Fax", l, maxsplit=1)[0]
+        head = FAX_SPLIT.split(l, maxsplit=1)[0]
         for ph in _phones_in(head):
             if ph not in seen:
                 seen.add(ph)
@@ -622,8 +662,7 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
     """
     from pathlib import Path
 
-    empty = {"雇主名稱_中": "", "雇主名稱_英": "", "地址_中": "",
-             "地址_英": "", "電話": ""}
+    empty = _EMPTY_FIELDS
     # 各圖分數與次頁台仲反查共用(_scored_pages 有快取),同一份 docx 不重評
     scored = _scored_pages(docx_path)
     if not scored:
@@ -655,7 +694,8 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
     if deink:
         content = deink_red_stamp(content)
     fields = extract_employer_fields(vision_full_text(content, client=client))
-    return {**fields, "_image": name, "_note": "", "_crop": crop_name}
+    # 錨定失敗時 fields 已帶 _note(欄位全空),原樣傳出讓 pipeline 標示 H~O 留空
+    return {**fields, "_image": name, "_crop": crop_name}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
