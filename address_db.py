@@ -312,7 +312,7 @@ def _match_road_en(en_text: str, roads: list, cutoff: float = 0.9):
     模糊比對易錯配到同名系路(拕子一街),故門檻預設 0.9。
     取 Dist./Township 之前、最後一個路名 token(No./Lane/Alley 都在路名之前)。
     """
-    head = re.split(r"\b(?:Dist|Township)\b", en_text, 1)[0]
+    head = re.split(r"\b(?:Dist|Township)\b", en_text, maxsplit=1)[0]
     toks = _EN_ROAD_TOKEN.findall(head)
     if not toks:
         return None

@@ -57,7 +57,7 @@ class TestDoubtReasons:
 class TestFuzzyCityWithholdsZip:
     """縣市只靠模糊比對湊上、路名又沒配到 → 郵遞區號與英譯不採用。
 
-    收緊前:郵遞區號與 地址_英_標準 只要 matched 就填,不受 J 欄那道
+    收緊前:郵遞區號只要 matched 就填,不受 J 欄那道
     `district and road` 守衛保護。「中山區」「中正區」「中山路」全台通用,
     模糊配到錯誤縣市時底下照樣配得到,於是 J 欄留空(看得見)而 N 欄填了
     個確信的錯值(看不見)——正是人工核對最抓不到的那類錯誤。
@@ -74,12 +74,11 @@ class TestFuzzyCityWithholdsZip:
     def test_zip_withheld(self):
         assert _std(self.WRONG)["郵遞區號"] == ""
 
-    def test_english_standard_withheld(self):
-        """地址_英_標準 已不寫入 Sheets,但仍用來回填空的英文 OCR 欄——
-        縣市模糊配錯時連這個回填也不能做,否則錯的縣市會從後門進 M 欄。"""
+    def test_english_ocr_never_backfilled(self):
+        """英文 OCR 空就是空——官方英譯不得從任何路徑補進 M 欄。"""
         f = _std(self.WRONG, en="")
-        assert f["地址_英_標準"] == ""
         assert f["地址_英"] == ""
+        assert "地址_英_標準" not in f
 
     def test_reason_names_the_withheld_columns(self):
         d = _std(self.WRONG)["地址_疑慮"]
@@ -106,6 +105,51 @@ class TestFuzzyCityRescueSurvives:
 
     def test_no_doubt_raised(self):
         assert _std(self.RESCUED)["地址_疑慮"] == ""
+
+
+class TestEnglishAnchorCountsAsPrecise:
+    """英文行錨定救回的縣市要算「精確」,否則收緊規則會誤傷既有的救援路徑。
+
+    印章多蓋在中文行首(縣市被毀),而英文地址的 County/City 慣例在行尾而倖存,
+    address_db 因此以英文行反查縣市/區為錨。_match_city_area_en 只做「官方英文名
+    精確含」不做模糊,所以這條路徑的縣市與完整名命中同級。
+
+    危險在於:若沒把它歸類為精確,「縣市非精確就不填郵遞區號」會把這些本來救得
+    回來的地址一併打掉,而且理由還寫成「縣市僅模糊比對命中」——縣市明明是確定的。
+    有路名時路名會當佐證而掩蓋這個問題,故本組刻意用路名也配不到的地址。
+    """
+
+    CN_DEAD = "◎◎◎左營區天馬行空路1號"      # 縣市全毀 + 路名不在庫
+    EN_ALIVE = "No.1, Tianma Rd., Zuoying Dist., Kaohsiung City, Taiwan R.O.C."
+
+    def test_anchor_recovers_city(self):
+        r = normalize_address(self.CN_DEAD, en_text=self.EN_ALIVE)
+        assert r["city"] == "高雄市" and r["district"] == "左營區"
+
+    def test_anchored_city_is_tier_one(self):
+        assert normalize_address(self.CN_DEAD, en_text=self.EN_ALIVE)["city_tier"] == 1
+
+    def test_zip_survives_without_road_evidence(self):
+        """路名配不到時,郵遞區號全靠這個層級判斷撐著。"""
+        f = _std(self.CN_DEAD, en=self.EN_ALIVE)
+        assert f["郵遞區號"] == "813"
+
+    def test_doubt_blames_the_road_not_the_city(self):
+        f = _std(self.CN_DEAD, en=self.EN_ALIVE)
+        assert "路名" in f["地址_疑慮"]
+        assert "縣市" not in f["地址_疑慮"]
+
+    def test_without_english_line_it_really_does_fail(self):
+        """前提檢查:沒有英文行時這個地址確實救不回來,否則上面幾條沒有意義。"""
+        f = _std(self.CN_DEAD, en="")
+        assert f["郵遞區號"] == "" and "縣市比不到" in f["地址_疑慮"]
+
+    def test_stamped_city_also_recovered(self):
+        """印章壓字型(「中共雄巿」)也走同一條路徑。"""
+        f = _std("中共雄巿左營區華夏路1728號13樓",
+                 en="13F., No.1728, Huaxia Rd., Zuoying Dist., Kaohsiung City")
+        assert f["地址_中_標準"] == "高雄市左營區華夏路1728號13樓"
+        assert f["郵遞區號"] == "813" and f["地址_疑慮"] == ""
 
 
 class TestCityTierExposed:
@@ -147,14 +191,17 @@ class TestSheetWiring:
         row = self._row("b.docx", {"地址_疑慮": "路名不在資料庫"})
         assert row[self.L] == "路名不在資料庫"
 
-    def test_english_standard_no_longer_written(self):
-        """官方英譯不得再出現在列上——M 欄只放 OCR 原文。"""
+    def test_english_column_is_ocr_verbatim(self):
+        """M 欄只放 OCR 原文,官方英譯不得從任何路徑出現在列上。"""
         row = self._row("e.docx", {
-            "地址_英_標準": "No. 29, Panshi Rd., North Dist., Hsinchu City",
             "地址_英": "7F., No.29, Panshih Rd., North Dist., Hsinchu City 300068",
         })
+        assert row[self.M] == "7F., No.29, Panshih Rd., North Dist., Hsinchu City 300068"
         assert "Panshi Rd." not in row[self.L]
-        assert row[self.M].startswith("7F., No.29, Panshih Rd.")
+
+    def test_english_ocr_empty_stays_empty(self):
+        """讀不到就空——不拿官方譯名充數,否則 M 欄的語意會出現例外。"""
+        assert self._row("f.docx", {"地址_中_標準": "宜蘭縣宜蘭市津梅路142巷2號"})[self.M] == ""
 
     def test_clean_row_has_empty_doubt(self):
         row = self._row("c.docx", {"地址_中_標準": "新竹市北區磐石路29號7樓"})

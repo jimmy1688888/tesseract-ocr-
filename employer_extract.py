@@ -281,7 +281,7 @@ def deink_red_stamp(image_bytes: bytes, *, whiten_thresh: int = 45,
 # 讓呼叫端不必分辨走的是哪條路。
 _EMPTY_FIELDS = {
     "雇主名稱_中": "", "雇主名稱_英": "", "地址_中": "", "地址_英": "", "電話": "",
-    "地址_中_標準": "", "地址_英_標準": "", "郵遞區號": "", "地址_比對": False,
+    "地址_中_標準": "", "郵遞區號": "", "地址_比對": False,
     "地址_疑慮": "",
 }
 
@@ -402,9 +402,10 @@ def extract_employer_fields(text: str) -> dict:
 def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
     """用官方地址庫(address_db)校正地址,非破壞式補上標準欄位。
 
-    - 新增:地址_中_標準、地址_英_標準、郵遞區號、地址_比對(是否命中)、地址_疑慮。
-      地址_英_標準 **已不寫入 Sheets**(英文一律以 OCR 原文為準),留著只為下面的回填。
-    - 回填:原 OCR 地址_英 為空時,以官方英文譯名補上——空欄位比官方譯名更沒用。
+    - 新增:地址_中_標準、郵遞區號、地址_比對(是否命中)、地址_疑慮。
+    - **不動 地址_英**:英文欄純粹是 OCR 讀到什麼就是什麼,讀不到就空。官方英譯
+      既不輸出也不回填——契約英譯沒有單一正確寫法,官方譯名並不比契約上的更權威,
+      混進來只會讓「M 欄是 OCR 原文」這件事出現例外。
     - 保守:縣市+行政區+路名都命中才回填標準中文;郵遞區號另需
       **縣市精確命中**(city_tier 1/2)。留空一律在 地址_疑慮 寫明成因,
       因為留空的格子人看得見、填錯的格子人看不見(見 ADR-0003)。
@@ -413,7 +414,6 @@ def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
     庫或資料缺失時安靜跳過(try/except),絕不影響既有流程。
     """
     fields.setdefault("地址_中_標準", "")
-    fields.setdefault("地址_英_標準", "")
     fields.setdefault("郵遞區號", "")
     fields.setdefault("地址_比對", False)
     fields.setdefault("地址_疑慮", "")
@@ -432,16 +432,16 @@ def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
         return
 
     fields["地址_比對"] = True
-    # 縣市只靠模糊比對湊上、且路名也沒配到時,郵遞區號不採用(官方英譯連帶不用於回填):
-    # 模糊配錯縣市時,「中山區」「中山路」這類全台通用的名字在錯誤縣市底下照樣
-    # 配得到,會產出確信的錯值(實測「台桃市中壢區」→ 臺北市中山區、郵遞 104)。
+    # 縣市只靠模糊比對湊上、且路名也沒配到時,郵遞區號不採用:模糊配錯縣市時,
+    # 「中山區」「中山路」這類全台通用的名字在錯誤縣市底下照樣配得到,會產出
+    # 確信的錯值(實測「台桃市中壢區」→ 臺北市中山區、郵遞 104)。
     # 但路名配得到就是佐證(「宜藺縣」→ 宜蘭縣羅東鎮中正路),此時照採。
+    #
+    # 注意這裡不碰 地址_英:英文行是**餵進** normalize_address 當錨的輸入
+    # (見上面的 en_text),不是輸出。錨定與輸出是兩件事,別讓後者汙染前者。
     trust_city = r.get("city_tier", 1) <= 2 or bool(r["road"])
     if trust_city:
         fields["郵遞區號"] = r["zip"]
-        fields["地址_英_標準"] = r["address_en"]
-        if not fields["地址_英"] and r["address_en"]:   # 原英文空 → 用官方英文回填
-            fields["地址_英"] = r["address_en"]
 
     if r["district"] and r["road"]:        # 縣市+區+路都命中才給標準中文地址
         fields["地址_中_標準"] = r["address_cn"]
