@@ -1626,13 +1626,14 @@ def _agency_cols(permit_value: str) -> list[str]:
 _EMPLOYER_COL_KEYS = (
     "雇主名稱_中", "雇主名稱_英",
     "地址_中_標準", "地址_中",        # J=標準, K=OCR原文
-    "地址_英_標準", "地址_英",        # L=標準, M=OCR原文
+    "地址_疑慮", "地址_英",           # L=疑慮標示, M=英文OCR原文
     "郵遞區號", "電話",
 )
 
-# P 欄:疑慮標示。刻意不併進 _EMPLOYER_COL_KEYS——它不是一個「雇主欄位」,
-# 而是對 J/L/N 為何留空的說明。混進去會讓 H~O 這個既有的整體多出一個異類。
-# 與 D 欄 reason 也刻意分開:D 欄專講許可證判讀,一個欄位不承載兩種語意(ADR-0003)。
+# L 欄原為「英文標準地址」,已取消輸出:契約英譯沒有單一正確寫法,官方譯名並不比
+# 契約上的更權威,兩欄並列只是讓人多比對一次卻分不出對錯。英文一律以 OCR 原文
+# (M 欄)為準,騰出的 L 欄改放疑慮標示。
+# 與 D 欄 reason 仍刻意分開:D 欄專講許可證判讀,一個欄位不承載兩種語意(ADR-0003)。
 _DOUBT_COL_KEY = "地址_疑慮"
 
 _EMPLOYER_FIELDS_BY_DOCX: dict[str, dict] = {}
@@ -1842,23 +1843,13 @@ def _employer_cols(r) -> list[str]:
     return out
 
 
-def _doubt_col(r) -> list[str]:
-    """P 欄:疑慮標示——中文地址標準化留空的成因,查 docx 快取。"""
-    docx = r.get("source_docx", "") if isinstance(r, dict) \
-        else getattr(r, "source_docx", "")
-    own = r.get(_DOUBT_COL_KEY, "") if isinstance(r, dict) else ""
-    cached = _EMPLOYER_FIELDS_BY_DOCX.get(docx, {})
-    return [str(own or cached.get(_DOUBT_COL_KEY, "") or "")]
-
-
 def _row_to_sheet_values(r, status: SheetStatus) -> list[str]:
-    """把一筆紀錄轉成 Sheets 的一列（16 欄：A~D 識別/決策、E~G 機構、H~O 雇主、
-    P 疑慮標示）。
+    """把一筆紀錄轉成 Sheets 的一列（15 欄：A~D 識別/決策、E~G 機構、H~O 雇主）。
 
     支援 dict（manual 用）與 VisionQueueItem。E~G 欄由 B 欄的許可證值查名冊補上；
     H~O 為雇主欄位，依 source_docx 查 collect_employer_fields() 建好的快取
-    （見 _employer_cols），未擷取或失敗則留空。P 欄說明中文地址標準欄為何留空
-    （見 _doubt_col 與 ADR-0003）。
+    （見 _employer_cols），未擷取或失敗則留空。其中 L 欄不是資料而是疑慮標示，
+    說明中文標準地址（J）為何留空（見 ADR-0003）。
     """
     if isinstance(r, VisionQueueItem):
         value = r.candidate_value
@@ -1872,7 +1863,7 @@ def _row_to_sheet_values(r, status: SheetStatus) -> list[str]:
             status.value,
             r.get("reason") or r.get("note", ""),
         ]
-    return base + _agency_cols(value) + _employer_cols(r) + _doubt_col(r)
+    return base + _agency_cols(value) + _employer_cols(r)
 
 
 def write_sheets_batched(batches: list[tuple[list, SheetStatus]]) -> int:

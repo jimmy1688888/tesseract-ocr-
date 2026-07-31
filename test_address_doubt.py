@@ -75,7 +75,11 @@ class TestFuzzyCityWithholdsZip:
         assert _std(self.WRONG)["郵遞區號"] == ""
 
     def test_english_standard_withheld(self):
-        assert _std(self.WRONG)["地址_英_標準"] == ""
+        """地址_英_標準 已不寫入 Sheets,但仍用來回填空的英文 OCR 欄——
+        縣市模糊配錯時連這個回填也不能做,否則錯的縣市會從後門進 M 欄。"""
+        f = _std(self.WRONG, en="")
+        assert f["地址_英_標準"] == ""
+        assert f["地址_英"] == ""
 
     def test_reason_names_the_withheld_columns(self):
         d = _std(self.WRONG)["地址_疑慮"]
@@ -118,7 +122,13 @@ class TestCityTierExposed:
 
 
 class TestSheetWiring:
-    """P 欄要真的接到 Sheets 那一列上,而且不侵蝕既有 15 欄。"""
+    """疑慮標示佔 L 欄(原英文標準地址),整列維持 15 欄。
+
+    英文標準地址取消輸出:契約英譯沒有單一正確寫法,官方譯名並不比契約上的更權威,
+    兩欄並列只是讓人多比對一次卻分不出對錯。英文一律以 OCR 原文(M 欄)為準。
+    """
+
+    L, M = 11, 12       # A=0 … L=11 M=12(H~O 對應 index 7~14)
 
     def _row(self, docx, fields):
         import pipeline
@@ -130,26 +140,36 @@ class TestSheetWiring:
         finally:
             pipeline._EMPLOYER_FIELDS_BY_DOCX.pop(docx, None)
 
-    def test_row_is_sixteen_columns(self):
-        assert len(self._row("a.docx", {})) == 16
+    def test_row_is_fifteen_columns(self):
+        assert len(self._row("a.docx", {})) == 15
 
-    def test_doubt_lands_in_column_p(self):
+    def test_doubt_lands_in_column_l(self):
         row = self._row("b.docx", {"地址_疑慮": "路名不在資料庫"})
-        assert row[15] == "路名不在資料庫"
+        assert row[self.L] == "路名不在資料庫"
 
-    def test_clean_row_has_empty_p(self):
-        assert self._row("c.docx", {"地址_中_標準": "新竹市北區磐石路29號7樓"})[15] == ""
+    def test_english_standard_no_longer_written(self):
+        """官方英譯不得再出現在列上——M 欄只放 OCR 原文。"""
+        row = self._row("e.docx", {
+            "地址_英_標準": "No. 29, Panshi Rd., North Dist., Hsinchu City",
+            "地址_英": "7F., No.29, Panshih Rd., North Dist., Hsinchu City 300068",
+        })
+        assert "Panshi Rd." not in row[self.L]
+        assert row[self.M].startswith("7F., No.29, Panshih Rd.")
+
+    def test_clean_row_has_empty_doubt(self):
+        row = self._row("c.docx", {"地址_中_標準": "新竹市北區磐石路29號7樓"})
+        assert row[self.L] == ""
 
     def test_doubt_does_not_leak_into_reason_column(self):
         """D 欄專講許可證判讀,不能被雇主的疑慮汙染(一個欄位不承載兩種語意)。"""
         row = self._row("d.docx", {"地址_疑慮": "縣市比不到"})
         assert "縣市" not in row[3]
 
-    def test_unknown_docx_gives_empty_p_not_crash(self):
+    def test_unknown_docx_gives_empty_doubt_not_crash(self):
         import pipeline
         row = pipeline._row_to_sheet_values(
             {"source_docx": "never-seen.docx"}, pipeline.SheetStatus.MANUAL_REVIEW)
-        assert len(row) == 16 and row[15] == ""
+        assert len(row) == 15 and row[self.L] == ""
 
 
 class TestRealDocsUnaffected:

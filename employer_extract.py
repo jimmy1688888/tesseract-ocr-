@@ -403,8 +403,9 @@ def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
     """用官方地址庫(address_db)校正地址,非破壞式補上標準欄位。
 
     - 新增:地址_中_標準、地址_英_標準、郵遞區號、地址_比對(是否命中)、地址_疑慮。
-    - 回填:原 OCR 地址_英 為空時,以官方英文譯名補上。
-    - 保守:縣市+行政區+路名都命中才回填標準中文;郵遞區號與官方英譯另需
+      地址_英_標準 **已不寫入 Sheets**(英文一律以 OCR 原文為準),留著只為下面的回填。
+    - 回填:原 OCR 地址_英 為空時,以官方英文譯名補上——空欄位比官方譯名更沒用。
+    - 保守:縣市+行政區+路名都命中才回填標準中文;郵遞區號另需
       **縣市精確命中**(city_tier 1/2)。留空一律在 地址_疑慮 寫明成因,
       因為留空的格子人看得見、填錯的格子人看不見(見 ADR-0003)。
     - 英文錨定:OCR 英文地址行一併傳入 normalize_address(en_text=…);
@@ -431,7 +432,7 @@ def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
         return
 
     fields["地址_比對"] = True
-    # 縣市只靠模糊比對湊上、且路名也沒配到時,郵遞區號與官方英譯不採用:
+    # 縣市只靠模糊比對湊上、且路名也沒配到時,郵遞區號不採用(官方英譯連帶不用於回填):
     # 模糊配錯縣市時,「中山區」「中山路」這類全台通用的名字在錯誤縣市底下照樣
     # 配得到,會產出確信的錯值(實測「台桃市中壢區」→ 臺北市中山區、郵遞 104)。
     # 但路名配得到就是佐證(「宜藺縣」→ 宜蘭縣羅東鎮中正路),此時照採。
@@ -458,8 +459,9 @@ def _has_road_pattern(text: str) -> bool:
 def _address_doubt(raw_cn: str, r: dict, trust_city: bool) -> str:
     """標準中文地址留空的成因。順序即優先序:先講最上游卡住的那一關。"""
     if not trust_city:
-        # 這條同時代表郵遞區號與英譯也被扣住,比下游的區/路更該先講
-        return "縣市僅模糊比對命中,郵遞區號與英譯一併不採用"
+        # 這條同時代表郵遞區號也被扣住,比下游的區/路更該先講。
+        # 只提郵遞區號:官方英譯已不輸出,對看 Sheets 的人來說不存在那一欄。
+        return "縣市僅模糊比對命中,郵遞區號一併不採用"
     if not r["district"]:
         return "行政區比不到(多半被印章蓋住)"
     if _has_road_pattern(raw_cn):
@@ -778,7 +780,7 @@ if __name__ == "__main__":
         res = extract_employer_from_docx(args.path, deink=True, roi=roi)
         print(f"採用契約頁:{res.get('_image') or '(無)'}  {res.get('_note','')}")
         for k in ("雇主名稱_中", "雇主名稱_英", "地址_中", "地址_英", "電話",
-                  "地址_中_標準", "地址_英_標準", "郵遞區號"):
+                  "地址_中_標準", "郵遞區號", "地址_疑慮"):
             print(f"  {k}: {res.get(k)!r}")
     elif args.no_ab:
         print(extract_employer(args.path, deink=True, roi=roi))
