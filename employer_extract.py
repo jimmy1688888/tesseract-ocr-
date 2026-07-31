@@ -282,6 +282,7 @@ def deink_red_stamp(image_bytes: bytes, *, whiten_thresh: int = 45,
 _EMPTY_FIELDS = {
     "雇主名稱_中": "", "雇主名稱_英": "", "地址_中": "", "地址_英": "", "電話": "",
     "地址_中_標準": "", "地址_英_標準": "", "郵遞區號": "", "地址_比對": False,
+    "地址_疑慮": "",
 }
 
 
@@ -401,10 +402,11 @@ def extract_employer_fields(text: str) -> dict:
 def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
     """用官方地址庫(address_db)校正地址,非破壞式補上標準欄位。
 
-    - 新增:地址_中_標準、地址_英_標準、郵遞區號、地址_比對(是否命中)。
+    - 新增:地址_中_標準、地址_英_標準、郵遞區號、地址_比對(是否命中)、地址_疑慮。
     - 回填:原 OCR 地址_英 為空時,以官方英文譯名補上。
-    - 保守:縣市+行政區都命中才回填標準中文;僅命中縣市時只補郵遞/英文,
-      不覆寫地址_中,避免把「有 OCR 原文」誤換成「資訊較少的標準串」。
+    - 保守:縣市+行政區+路名都命中才回填標準中文;郵遞區號與官方英譯另需
+      **縣市精確命中**(city_tier 1/2)。留空一律在 地址_疑慮 寫明成因,
+      因為留空的格子人看得見、填錯的格子人看不見(見 ADR-0003)。
     - 英文錨定:OCR 英文地址行一併傳入 normalize_address(en_text=…);
       印章蓋掉中文行首縣市時,以行尾倖存的英文縣市/區反查糾錯。
     庫或資料缺失時安靜跳過(try/except),絕不影響既有流程。
@@ -413,23 +415,56 @@ def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
     fields.setdefault("地址_英_標準", "")
     fields.setdefault("郵遞區號", "")
     fields.setdefault("地址_比對", False)
+    fields.setdefault("地址_疑慮", "")
     if not raw_cn.strip():
+        fields["地址_疑慮"] = "中文地址未擷取到"
         return
     try:
         from address_db import normalize_address
         r = normalize_address(
             raw_cn, en_text=fields.get("地址_英", "") or en_hint)
     except Exception:
+        fields["地址_疑慮"] = "地址庫無法使用"
         return
     if not r.get("matched"):
+        fields["地址_疑慮"] = "縣市比不到(多半被印章蓋住)"
         return
+
     fields["地址_比對"] = True
-    fields["郵遞區號"] = r["zip"]
-    fields["地址_英_標準"] = r["address_en"]
-    if r["district"] and r["road"]:        # 縣市+區+路都命中才給標準中文地址;
-        fields["地址_中_標準"] = r["address_cn"]  # 無路名的鄉村地址易失真,留空以 OCR 原文為準
-    if not fields["地址_英"] and r["address_en"]:   # 原英文空 → 用官方英文回填
-        fields["地址_英"] = r["address_en"]
+    # 縣市只靠模糊比對湊上、且路名也沒配到時,郵遞區號與官方英譯不採用:
+    # 模糊配錯縣市時,「中山區」「中山路」這類全台通用的名字在錯誤縣市底下照樣
+    # 配得到,會產出確信的錯值(實測「台桃市中壢區」→ 臺北市中山區、郵遞 104)。
+    # 但路名配得到就是佐證(「宜藺縣」→ 宜蘭縣羅東鎮中正路),此時照採。
+    trust_city = r.get("city_tier", 1) <= 2 or bool(r["road"])
+    if trust_city:
+        fields["郵遞區號"] = r["zip"]
+        fields["地址_英_標準"] = r["address_en"]
+        if not fields["地址_英"] and r["address_en"]:   # 原英文空 → 用官方英文回填
+            fields["地址_英"] = r["address_en"]
+
+    if r["district"] and r["road"]:        # 縣市+區+路都命中才給標準中文地址
+        fields["地址_中_標準"] = r["address_cn"]
+    else:
+        fields["地址_疑慮"] = _address_doubt(raw_cn, r, trust_city)
+
+
+# 判定「地址文字裡是否有路名樣式」用的兩支 regex 就是 address_db 配路名時用的同兩支,
+# 不另寫一套——否則兩邊對「什麼算路名」的認知會各自漂移。
+def _has_road_pattern(text: str) -> bool:
+    from address_db import _ROAD_RE, _ROAD_SEG_RE
+    return bool(_ROAD_SEG_RE.search(text) or _ROAD_RE.search(text))
+
+
+def _address_doubt(raw_cn: str, r: dict, trust_city: bool) -> str:
+    """標準中文地址留空的成因。順序即優先序:先講最上游卡住的那一關。"""
+    if not trust_city:
+        # 這條同時代表郵遞區號與英譯也被扣住,比下游的區/路更該先講
+        return "縣市僅模糊比對命中,郵遞區號與英譯一併不採用"
+    if not r["district"]:
+        return "行政區比不到(多半被印章蓋住)"
+    if _has_road_pattern(raw_cn):
+        return "路名不在資料庫(可補進 data/custom_roads.json)"
+    return "地址無路名(鄉村型),以 OCR 原文為準"
 
 
 def vision_full_text(image_bytes: bytes, client=None) -> str:

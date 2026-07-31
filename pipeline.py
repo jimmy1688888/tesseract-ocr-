@@ -1630,6 +1630,11 @@ _EMPLOYER_COL_KEYS = (
     "郵遞區號", "電話",
 )
 
+# P 欄:疑慮標示。刻意不併進 _EMPLOYER_COL_KEYS——它不是一個「雇主欄位」,
+# 而是對 J/L/N 為何留空的說明。混進去會讓 H~O 這個既有的整體多出一個異類。
+# 與 D 欄 reason 也刻意分開:D 欄專講許可證判讀,一個欄位不承載兩種語意(ADR-0003)。
+_DOUBT_COL_KEY = "地址_疑慮"
+
 _EMPLOYER_FIELDS_BY_DOCX: dict[str, dict] = {}
 
 # 雇主 ROI 截圖(去紅章前的契約頁裁切)存放處,供人工複查 H~O 欄位值
@@ -1664,12 +1669,44 @@ def collect_employer_fields(docx_files) -> None:
             logger.info(f"  {name}: {fields['_note']} → H~O 留空"
                         f"（截圖 {fields.get('_crop', '') or '無'}）")
         else:
+            doubt = fields.get(_DOUBT_COL_KEY, "")
             logger.info(
                 f"  {name}: 雇主={fields.get('雇主名稱_中', '')!r}"
                 f" 電話={fields.get('電話', '')!r}"
                 f" 郵遞={fields.get('郵遞區號', '')!r}"
                 f"（契約頁 {fields.get('_image', '')} → 截圖 {fields.get('_crop', '')}）"
+                + (f" ⚠ {doubt}" if doubt else "")
             )
+    write_doubt_report()
+
+
+# 疑慮明細另存本機報表。ADR-0003 選擇「寧可多報、不調門檻」,代價是誤報率未知;
+# pipeline 對 Sheets 只寫不讀,誤報率不會自己回來,得靠這份報表人工數一次。
+DOUBT_REPORT_PATH = OUTPUT_DIR / "address_doubts.csv"
+
+
+def write_doubt_report() -> int:
+    """把本次所有帶疑慮標示的 docx 寫成 CSV,回傳筆數(無疑慮則不產檔)。
+
+    欄位刻意帶上 OCR 原文與標準值,讓人不必開 Sheets 就能判斷是不是誤報。
+    """
+    rows = [(name, f.get(_DOUBT_COL_KEY, ""), f.get("地址_中", ""),
+             f.get("地址_中_標準", ""), f.get("郵遞區號", ""))
+            for name, f in sorted(_EMPLOYER_FIELDS_BY_DOCX.items())
+            if f.get(_DOUBT_COL_KEY)]
+    if not rows:
+        return 0
+    try:
+        DOUBT_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(DOUBT_REPORT_PATH, "w", encoding="utf-8-sig", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["docx", "疑慮", "地址_中(OCR)", "地址_中(標準)", "郵遞區號"])
+            w.writerows(rows)
+    except Exception as e:      # 報表產不出來不該拖垮主流程
+        logger.warning(f"  ⚠ 疑慮報表寫入失敗({e!r}),本次僅記於 log")
+        return len(rows)
+    logger.info(f"  疑慮標示 {len(rows)} 筆 → {DOUBT_REPORT_PATH}")
+    return len(rows)
 
 
 def rescue_manual_review_via_agency_phone(
@@ -1805,12 +1842,23 @@ def _employer_cols(r) -> list[str]:
     return out
 
 
+def _doubt_col(r) -> list[str]:
+    """P 欄:疑慮標示——中文地址標準化留空的成因,查 docx 快取。"""
+    docx = r.get("source_docx", "") if isinstance(r, dict) \
+        else getattr(r, "source_docx", "")
+    own = r.get(_DOUBT_COL_KEY, "") if isinstance(r, dict) else ""
+    cached = _EMPLOYER_FIELDS_BY_DOCX.get(docx, {})
+    return [str(own or cached.get(_DOUBT_COL_KEY, "") or "")]
+
+
 def _row_to_sheet_values(r, status: SheetStatus) -> list[str]:
-    """把一筆紀錄轉成 Sheets 的一列（15 欄：A~D 識別/決策、E~G 機構、H~O 雇主）。
+    """把一筆紀錄轉成 Sheets 的一列（16 欄：A~D 識別/決策、E~G 機構、H~O 雇主、
+    P 疑慮標示）。
 
     支援 dict（manual 用）與 VisionQueueItem。E~G 欄由 B 欄的許可證值查名冊補上；
     H~O 為雇主欄位，依 source_docx 查 collect_employer_fields() 建好的快取
-    （見 _employer_cols），未擷取或失敗則留空。
+    （見 _employer_cols），未擷取或失敗則留空。P 欄說明中文地址標準欄為何留空
+    （見 _doubt_col 與 ADR-0003）。
     """
     if isinstance(r, VisionQueueItem):
         value = r.candidate_value
@@ -1824,7 +1872,7 @@ def _row_to_sheet_values(r, status: SheetStatus) -> list[str]:
             status.value,
             r.get("reason") or r.get("note", ""),
         ]
-    return base + _agency_cols(value) + _employer_cols(r)
+    return base + _agency_cols(value) + _employer_cols(r) + _doubt_col(r)
 
 
 def write_sheets_batched(batches: list[tuple[list, SheetStatus]]) -> int:

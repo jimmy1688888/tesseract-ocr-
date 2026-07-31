@@ -66,12 +66,12 @@
 
 ## 已完成：雇主欄位接進 Google Sheets（H~O 整合）
 
-Sheets 每列 **15 欄**，H~O 由 `pipeline.py` 於寫入前自動填入：
+Sheets 每列 **16 欄**，H~P 由 `pipeline.py` 於寫入前自動填入：
 
 - 欄位（標準／OCR 各佔一欄、中英分開）：
   - A–G（同前）｜H=雇主名稱_中 I=雇主名稱_英
   - J=雇主地址_中(標準) K=雇主地址_中(OCR) L=雇主地址_英(標準) M=雇主地址_英(OCR)
-  - N=郵遞區號 O=雇主電話
+  - N=郵遞區號 O=雇主電話 P=疑慮標示（J 欄為何留空，見下）
 - 實作方式（`pipeline.py`）：
   - `collect_employer_fields(docx_files)`：主流程步驟 4b 前對每份 docx 跑一次
     `employer_extract.extract_employer_from_docx()`（契約頁偵測=本機 Tesseract、
@@ -79,7 +79,18 @@ Sheets 每列 **15 欄**，H~O 由 `pipeline.py` 於寫入前自動填入：
     `_EMPLOYER_FIELDS_BY_DOCX` 快取。manual_review 列也擷取（許可證待複核≠雇主資料無效）。
   - `_employer_cols(r)`：組列時依 `source_docx` 查快取；row dict 自帶同名 key 優先。
     擷取失敗/找不到契約頁 → 該列 H~O 留空，絕不中斷主流程。
-- **提醒**：Sheet 標題列要手動補上 **E~O**（程式 append 不寫標題列）。
+- **提醒**：Sheet 標題列要手動補上 **E~P**（程式 append 不寫標題列）。
+- **P 欄疑慮標示**（[ADR-0003](docs/adr/0003-employer-address-doubt-flag.md)）：中文標準
+  地址（J）留空時寫明成因，五選一——縣市比不到／行政區比不到／縣市僅模糊命中／路名不在
+  資料庫（可補 `data/custom_roads.json`）／地址無路名（鄉村型，正常）。留空的格子人看得見，
+  填錯的格子人看不見，所以系統的工作是把後者變成前者。明細另存
+  `scan_results/address_doubts.csv` 供人工一次數完誤報率（pipeline 對 Sheets 只寫不讀）。
+- **縣市僅模糊命中時不填郵遞區號與官方英譯**：模糊配錯縣市時，「中山區」「中山路」這類
+  全台通用的名字在錯誤縣市底下照樣配得到（實測「台桃市中壢區」→ 臺北市中山區、郵遞 104）。
+  但路名配得到就是佐證（「宜藺縣」→ 宜蘭縣羅東鎮中正路），此時照填——模糊命中本身不是錯誤。
+- 英文地址**不做**判定：契約英譯沒有單一正確寫法（Panshih/Panshi 都出現得到），分不出
+  「拼法不同」與「讀錯」。代價是「中文讀對、英文讀錯」（32448 的 Jinhai/Jinmei）抓不到，
+  已知且接受。
 - 樓層「之N」英譯已支援：`2樓之1` → `2F.-1`（address_db）。
 - **雇主 ROI 截圖**：每份 docx 送 Vision 的契約頁裁切（去紅章**前**原貌）自動存到
   `scan_results/employer_crops/{docx主檔名}_{圖檔名}`，人工複查 H~O 時直接開圖對照。

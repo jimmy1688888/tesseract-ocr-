@@ -161,7 +161,7 @@ python pipeline.py --roi mol              # 只掃某個 ROI（mol / permit_uppe
 
 ## 輸出欄位
 
-寫入 Google Sheets 每列 **15 欄**：
+寫入 Google Sheets 每列 **16 欄**：
 
 | 欄 | 內容 | 來源 |
 |---|---|---|
@@ -180,10 +180,13 @@ python pipeline.py --roi mol              # 只掃某個 ROI（mol / permit_uppe
 | M | 雇主地址_英(OCR) | 契約 OCR 原文 |
 | N | 郵遞區號 | 官方地址庫 |
 | O | 雇主電話 | 契約 OCR |
+| P | 疑慮標示（J 欄為何留空）| 官方地址庫 |
 
 - E/F/G 由 B 欄許可證查名冊補上（**仲介機構**，非雇主）；查無或無值則留空。
 - H~O 為**雇主**資料（契約甲方）：寫入前對每份 docx 的契約頁跑一次 Vision OCR 自動填入；擷取失敗或找不到契約頁時該列留空。標準地址（J/L）未命中官方庫時留空，以 OCR 原文（K/M）為準。
-- **Sheet 標題列需自行補上 E~O 各欄標題**（程式為 append，不會寫標題列）。
+- P 欄說明**中文**標準地址（J）為何留空，五種成因之一：縣市／行政區比不到、縣市僅模糊命中、路名不在資料庫（可補 `data/custom_roads.json`）、地址無路名（鄉村型，正常）。空白＝標準化順利完成。英文地址不做判定——契約英譯沒有單一正確寫法，分不出「拼法不同」與「讀錯」（見 [ADR-0003](docs/adr/0003-employer-address-doubt-flag.md)）。
+- 明細另存 `scan_results/address_doubts.csv`，供人工一次數完誤報率。
+- **Sheet 標題列需自行補上 E~P 各欄標題**（程式為 append，不會寫標題列）。
 
 ---
 

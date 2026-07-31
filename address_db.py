@@ -432,13 +432,20 @@ def normalize_address(text: str, *, road_cutoff: float = 0.5,
     回傳 dict:
         matched(bool)、city/city_en、district/district_en、zip、
         road/road_en、detail(號樓)、address_cn、address_en、
-        road_score(路名相似度,精確配為 1.0)。
+        road_score(路名相似度,精確配為 1.0)、
+        city_tier(縣市命中層級:0 無命中 1 完整名 2 去尾字 3 模糊)。
         完全比不到縣市時 matched=False,其餘欄位為空。
+
+    city_tier 3 代表縣市只靠模糊比對湊上,**不必然是錯的**——印章咬掉一字的
+    「宜藺縣」正是靠它救回「宜蘭縣」;但配錯時會安靜地換成另一個縣市,而區名
+    (中山區)與路名(中山路)全台通用,錯誤縣市底下照樣配得到。呼叫端據此決定
+    郵遞區號與官方英譯要不要採用(見 ADR-0003)。
     """
     empty = {
         "matched": False, "city": "", "city_en": "", "district": "",
         "district_en": "", "zip": "", "road": "", "road_en": "",
         "detail": "", "address_cn": "", "address_en": "", "road_score": 0.0,
+        "city_tier": 0,
     }
     if not text or not text.strip():
         return dict(empty)
@@ -492,7 +499,9 @@ def normalize_address(text: str, *, road_cutoff: float = 0.5,
                         ab["road_en"], ab["district_en"],
                         ab["city_en"], ab["detail"])
             if ab:
-                best = ab
+                # 縣市改由英文行提供。_match_city_area_en 只做「官方英文名精確含」
+                # 不做模糊,故這條路徑的縣市與完整名命中同級,視為精確。
+                best, best_tier = ab, 1
         elif anc and best is not None:
             # 中文縣市可信但比不到區,英文錨同縣市且有區 → 補區重配路名
             (a_raw, a_eng, a_areas), a_area = anc
@@ -501,7 +510,10 @@ def normalize_address(text: str, *, road_cutoff: float = 0.5,
                 if ab:
                     best = ab
 
-    return best if best else dict(empty)
+    if not best:
+        return dict(empty)
+    best["city_tier"] = best_tier
+    return best
 
 
 def find_roads(keyword: str, city_kw: str = "", area_kw: str = "") -> list:
