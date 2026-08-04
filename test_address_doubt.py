@@ -9,6 +9,8 @@ keyed-in/manual_review 完全由許可證判讀決定——雇主資料只是搭
 分不出「拼法不同」與「讀錯」。代價是 32448 那類「中文讀對、英文讀錯」抓不到,
 這是已知且接受的缺口。
 """
+import json
+
 from address_db import normalize_address
 from employer_extract import _standardize_address
 
@@ -25,25 +27,43 @@ class TestDoubtReasons:
     def test_city_not_matched(self):
         f = _std("XX@@市北區磐石路29號7樓")
         assert f["地址_中_標準"] == ""
-        assert "縣市比不到" in f["地址_疑慮"]
+        assert "縣市未比對到" in f["地址_疑慮"]
 
     def test_district_not_matched(self):
-        f = _std("新竹市OOO磐石路29號7樓")
-        assert f["地址_中_標準"] == ""
-        assert "行政區比不到" in f["地址_疑慮"]
+        """區配不到、路名又跨多個區(反推不啟動)→ 區留空並說明為何無從判定。
 
-    def test_road_not_in_db_is_actionable(self):
-        """路名有樣式卻配不到 → 可補 custom_roads.json,話要講到這一步。"""
+        素材刻意用中正路:新竹市的北區與東區都有,所以路名反推不了區。
+        用單一區才有的路(磐石路)會被反推救回來,那是另一組測的行為。
+        """
+        f = _std("新竹市OOO中正路29號7樓")
+        assert f["地址_中_標準"] == ""
+        assert "行政區未判定" in f["地址_疑慮"]
+        assert "多個行政區" in f["地址_疑慮"]
+
+    def test_road_not_in_db_states_fact_only(self):
+        """只說「沒在清單中」這個事實,不推斷原因、不叫人去補資料庫。
+
+        舊措辭寫「可補進 custom_roads.json」,而 32538 實例證明那個建議會出錯:
+        區被誤配時,一條好端端存在於別區的路也會被說成不在資料庫,照著補會
+        重複加入並掛錯區。沒配到是確定的,為什麼沒配到不是。
+        """
         f = _std("新竹市北區天馬行空路29號7樓")
         assert f["地址_中_標準"] == ""
-        assert "custom_roads.json" in f["地址_疑慮"]
+        assert "路名未在" in f["地址_疑慮"]
+        assert "custom_roads" not in f["地址_疑慮"]
+
+    def test_no_reason_offers_an_action(self):
+        """整組理由都不得夾帶行動建議——它自己可能是錯的。"""
+        for cn in ("XX@@市北區磐石路29號7樓", "新竹市OOO中正路29號7樓",
+                   "新竹市北區天馬行空路29號7樓", ""):
+            d = _std(cn)["地址_疑慮"]
+            assert "可補" not in d and ".json" not in d, cn
 
     def test_rural_address_flagged_as_normal(self):
         """鄉村型無路名地址也標,但要寫明是正常的,否則人會白跑一趟查證。"""
         f = _std("宜蘭縣三星鄉大隱村12鄰5號")
         assert f["地址_中_標準"] == ""
         assert "鄉村型" in f["地址_疑慮"]
-        assert "custom_roads" not in f["地址_疑慮"]   # 別叫人去補一條不存在的路
 
     def test_no_chinese_address_at_all(self):
         assert "未擷取到" in _std("")["地址_疑慮"]
@@ -107,6 +127,68 @@ class TestFuzzyCityRescueSurvives:
         assert _std(self.RESCUED)["地址_疑慮"] == ""
 
 
+class TestCityNameDoesNotFeedDistrictMatch:
+    """縣市名不得自己餵進行政區比對(32538 教訓)。
+
+    行政區比對的第二階段會去尾字:「桃園區」去掉「區」剩「桃園」,而「桃園市…」
+    裡就有這兩字——於是一個完全沒寫區的地址被安上桃園區。後果是連鎖的:
+    錯的區 → 只在該區的路名清單裡找 → 找不到 → 郵遞區號填成 330(實為 333)、
+    且把好端端在龜山區的「文化七路」報成路名不在資料庫。
+
+    修法是配區前先剝掉縣市名,與同一支函式配路名時的既有做法對稱。
+    """
+
+    NO_DISTRICT = "桃園市高山里文化七路206巷100弄13號3樓"   # 只有里,沒有區
+    CORRECT = "桃園市龜山區高山里文化七路206巷100弄13號3樓"
+
+    def test_matches_the_explicit_district_version(self):
+        """沒寫區的版本要與寫了正確區的版本得到同一個答案。"""
+        a, b = normalize_address(self.NO_DISTRICT), normalize_address(self.CORRECT)
+        assert (a["district"], a["road"], a["zip"]) == \
+               (b["district"], b["road"], b["zip"]) == ("龜山區", "文化七路", "333")
+
+    def test_zip_is_not_the_city_named_district(self):
+        """330 是桃園區的郵遞區號——不能再從縣市名借一個區出來。"""
+        assert normalize_address(self.NO_DISTRICT)["zip"] != "330"
+
+    def test_no_doubt_raised(self):
+        assert _std(self.NO_DISTRICT)["地址_疑慮"] == ""
+
+    def test_same_named_county_seat_unaffected(self):
+        """縣治與縣同名的合法碰撞不能被誤傷——那正是去尾字階段存在的理由。"""
+        for cn, dist in (("宜蘭縣宜蘭市津梅路142巷2號", "宜蘭市"),
+                         ("彰化縣和美鎮德南街100號", "和美鎮"),
+                         ("桃園市桃園區文化街5號", "桃園區")):
+            assert normalize_address(cn)["district"] == dist, cn
+
+
+class TestDistrictInferredFromUniqueRoad:
+    """區配不到時,以「該縣市內唯一擁有此路名的區」反推——限路名精確命中。
+
+    性質同英文行錨定:拿一條與「區」的 OCR 無關的獨立證據把區補回來。
+    全台 90.8% 的路名在其縣市內只屬於一個行政區,訊號夠強;但通用路名
+    (中山路、中正路)不唯一,一律不猜。
+    """
+
+    def test_unique_road_pins_the_district(self):
+        r = normalize_address("新竹市OOO磐石路29號7樓")   # 磐石路只有北區有
+        assert r["district"] == "北區" and r["zip"] == "300"
+
+    def test_common_road_does_not_guess(self):
+        """中正路在新竹市的北區與東區都有 → 不猜,區留空、郵遞留空。"""
+        r = normalize_address("新竹市OOO中正路29號7樓")
+        assert r["district"] == "" and r["zip"] == ""
+
+    def test_unmatched_road_does_not_guess(self):
+        r = normalize_address("桃園市新屋區清華路50巷101弄75號")
+        assert r["road"] == ""          # 清華路確實不在庫裡(只有清華一街/二街)
+
+    def test_fuzzy_road_does_not_infer(self):
+        """模糊命中的路名不反推區:兩層推測疊加,錯了會是確信的錯值。"""
+        r = normalize_address("成園市格梅區梅翠路二段716巷7號")
+        assert r["district"] == "" and r["zip"] == ""
+
+
 class TestEnglishAnchorCountsAsPrecise:
     """英文行錨定救回的縣市要算「精確」,否則收緊規則會誤傷既有的救援路徑。
 
@@ -142,7 +224,7 @@ class TestEnglishAnchorCountsAsPrecise:
     def test_without_english_line_it_really_does_fail(self):
         """前提檢查:沒有英文行時這個地址確實救不回來,否則上面幾條沒有意義。"""
         f = _std(self.CN_DEAD, en="")
-        assert f["郵遞區號"] == "" and "縣市比不到" in f["地址_疑慮"]
+        assert f["郵遞區號"] == "" and "縣市未比對到" in f["地址_疑慮"]
 
     def test_stamped_city_also_recovered(self):
         """印章壓字型(「中共雄巿」)也走同一條路徑。"""
@@ -188,8 +270,8 @@ class TestSheetWiring:
         assert len(self._row("a.docx", {})) == 15
 
     def test_doubt_lands_in_column_l(self):
-        row = self._row("b.docx", {"地址_疑慮": "路名不在資料庫"})
-        assert row[self.L] == "路名不在資料庫"
+        row = self._row("b.docx", {"疑慮標示": "J:路名未在該行政區的路名清單中"})
+        assert row[self.L] == "J:路名未在該行政區的路名清單中"
 
     def test_english_column_is_ocr_verbatim(self):
         """M 欄只放 OCR 原文,官方英譯不得從任何路徑出現在列上。"""
@@ -209,7 +291,7 @@ class TestSheetWiring:
 
     def test_doubt_does_not_leak_into_reason_column(self):
         """D 欄專講許可證判讀,不能被雇主的疑慮汙染(一個欄位不承載兩種語意)。"""
-        row = self._row("d.docx", {"地址_疑慮": "縣市比不到"})
+        row = self._row("d.docx", {"疑慮標示": "J:縣市未比對到官方資料庫"})
         assert "縣市" not in row[3]
 
     def test_unknown_docx_gives_empty_doubt_not_crash(self):
@@ -217,6 +299,63 @@ class TestSheetWiring:
         row = pipeline._row_to_sheet_values(
             {"source_docx": "never-seen.docx"}, pipeline.SheetStatus.MANUAL_REVIEW)
         assert len(row) == 15 and row[self.L] == ""
+
+
+class TestVisionTextIsPersisted:
+    """Vision 全文要真的落地——它是唯一花錢買來的東西,丟了就只能憑猜測改規則。
+
+    這條路徑先前差點靜默壞掉:pipeline.py 沒有 import json,而沒有測試走到
+    write_employer_texts,整份存檔會在跑真實資料時才 NameError。
+    """
+
+    def test_writes_json_and_returns_count(self, tmp_path, monkeypatch):
+        import pipeline
+        target = tmp_path / "employer_texts.json"
+        monkeypatch.setattr(pipeline, "EMPLOYER_TEXT_PATH", target)
+        n = pipeline.write_employer_texts({
+            "32538.docx": {"image": "image2.jpeg", "text": "甲方名稱: 王小明\n地址:"},
+        })
+        assert n == 1
+        data = json.loads(target.read_text(encoding="utf-8"))
+        assert data["32538.docx"]["text"].startswith("甲方名稱")
+        assert data["32538.docx"]["image"] == "image2.jpeg"
+
+    def test_empty_input_writes_nothing(self, tmp_path, monkeypatch):
+        import pipeline
+        target = tmp_path / "employer_texts.json"
+        monkeypatch.setattr(pipeline, "EMPLOYER_TEXT_PATH", target)
+        assert pipeline.write_employer_texts({}) == 0
+        assert not target.exists()
+
+    def test_write_failure_does_not_raise(self, tmp_path, monkeypatch):
+        """輔助產物寫不出來,不該拖垮已經跑完的主流程。"""
+        import pipeline
+        monkeypatch.setattr(pipeline, "EMPLOYER_TEXT_PATH", tmp_path / "x" / "y")
+        monkeypatch.setattr(pipeline.Path, "mkdir",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("nope")))
+        assert pipeline.write_employer_texts({"a.docx": {"text": "x"}}) == 0
+
+    def test_text_is_moved_out_of_the_row_cache(self, tmp_path, monkeypatch):
+        """全文另存後不留在快取:快取組每一列時都會查,夾一大塊文字只是負擔。"""
+        import pipeline
+        monkeypatch.setattr(pipeline, "EMPLOYER_TEXT_PATH",
+                            tmp_path / "employer_texts.json")
+        monkeypatch.setattr(pipeline, "get_vision_client", lambda: None)
+        monkeypatch.setattr(
+            "employer_extract.extract_employer_from_docx",
+            lambda *a, **k: {"雇主名稱_中": "王小明", "疑慮標示": "",
+                             "_note": "", "_image": "image2.jpeg", "_crop": "",
+                             "_text": "甲方名稱: 王小明"})
+        pipeline.collect_employer_fields([tmp_path / "99999.docx"])
+        try:
+            cached = pipeline._EMPLOYER_FIELDS_BY_DOCX["99999.docx"]
+            assert "_text" not in cached
+            assert cached["雇主名稱_中"] == "王小明"
+            saved = json.loads(
+                (tmp_path / "employer_texts.json").read_text(encoding="utf-8"))
+            assert saved["99999.docx"]["text"] == "甲方名稱: 王小明"
+        finally:
+            pipeline._EMPLOYER_FIELDS_BY_DOCX.pop("99999.docx", None)
 
 
 class TestRealDocsUnaffected:

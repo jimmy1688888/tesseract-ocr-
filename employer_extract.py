@@ -282,7 +282,7 @@ def deink_red_stamp(image_bytes: bytes, *, whiten_thresh: int = 45,
 _EMPTY_FIELDS = {
     "雇主名稱_中": "", "雇主名稱_英": "", "地址_中": "", "地址_英": "", "電話": "",
     "地址_中_標準": "", "郵遞區號": "", "地址_比對": False,
-    "地址_疑慮": "",
+    "地址_疑慮": "", "名稱_疑慮": "", "疑慮標示": "",
 }
 
 
@@ -360,9 +360,12 @@ def extract_employer_fields(text: str) -> dict:
         if not en_hint and _has_cjk(l) and EN_ADDR_KW.search(l) and len(l) > 12:
             en_hint = l
 
-    # ── 名稱:雇主區塊前段,排除地址/標籤,依中日韓/拉丁分中英 ──
+    # ── 名稱:掃整個雇主區塊,排除地址/標籤,依中日韓/拉丁分中英 ──
+    # 掃整段而非前 9 行:Vision 對兩欄版面逐欄序列化,中文名與它的標籤未必相鄰——
+    # 32508 的「呂偉」排在區塊第 9 行(索引剛好落在舊窗口外),中間隔著從另一欄
+    # 串進來的契約標題區塊,於是標題「勞動契約 家庭幫傭」反而先命中成了雇主名。
     name_cn = name_en = ""
-    for l in seg[:9]:
+    for l in seg:
         if ADDR_LABEL.search(l) or PHONE_LABEL.search(l) or l in (addr_cn, addr_en):
             continue
         # 英文名:優先取 Nama 標籤後的值(同行),否則取整行(去冒號前綴)
@@ -379,11 +382,13 @@ def extract_employer_fields(text: str) -> dict:
         # EN_ADDR_KW 檢查:紅章殘影字有時會黏在英文地址行首(「司賜聼12.Ln.18…」),
         # 該行含 CJK 又無中文縣市字,若只擋 CN_ADDR 會被誤收為中文名。
         if not name_cn:
-            core = re.sub(r".*[:：]", "", l).strip()
+            # 分隔符含 ;；:OCR 常把全形冒號讀成分號,不吃就會把標籤連同分號
+            # 一起留在值裡(32521 的「; 林瑞峰」)。
+            core = re.sub(r".*[:：;；]", "", l).strip()
             if _has_cjk(core) and not CN_ADDR.search(core) and not EN_ADDR_KW.search(core):
                 cand = LABEL_WORDS.sub("", core)
-                cand = re.sub(r"Nama.*", "", cand, flags=re.I).strip(" ()（）:：")
-                if cand and _has_cjk(cand):
+                cand = re.sub(r"Nama.*", "", cand, flags=re.I).strip(" ()（）:：;；")
+                if cand and _has_cjk(cand) and _is_name_like(cand):
                     name_cn = cand
 
     fields = {
@@ -396,7 +401,77 @@ def extract_employer_fields(text: str) -> dict:
         "_note": "",
     }
     _standardize_address(fields, addr_cn or "", en_hint=en_hint)
+    fields["名稱_疑慮"] = _name_doubt(fields["雇主名稱_中"], fields["雇主名稱_英"])
+    fields["疑慮標示"] = _compose_doubt(fields)
     return fields
+
+
+# 中文樣板字。BOILERPLATE 從頭到尾只有印尼文與英文,且只用在英文名那條路徑——
+# 中文名完全沒有樣板過濾,於是契約標題「勞動契約 家庭幫傭／監護工」在標籤行沒抓到
+# 名字時就會頂上來當雇主名(32508/32510)。「以下」則是標籤自己的殘骸:OCR 把
+# 「甲方名稱(以下簡稱為甲方)」咬成「甲方名稱(以下」,LABEL_WORDS 認不出殘缺的
+# 完整片語,剝掉「甲方名稱」後剩下的「以下」就成了值(32527)。
+CN_BOILERPLATE = re.compile(
+    r"勞動契約|家庭幫傭|監護工|看護工|家庭看護|製造工|廠工|漁工|"
+    r"以下簡稱|以下$|^以下")
+
+
+def _is_name_like(s: str) -> bool:
+    """像不像「雇主名稱」——排除樣板字與帶門牌號的地址殘骸。
+
+    不限字數也不限純中文:雇主可以是公司(見 CONTEXT.md),公司名可長可帶括號。
+    改以「含阿拉伯數字」排除地址:門牌號一定有數字,人名與公司名都不會有。
+    這條是掃整個區塊之後才需要的——窗口放寬後,縣市被 OCR 毀掉而 CN_ADDR 抓不到
+    的地址殘行(「新竹騒麒西鎮大同里8鄰水坑2之8號」)會有機會頂上來當名字。
+    """
+    return not CN_BOILERPLATE.search(s) and not re.search(r"\d", s)
+
+
+# 公司型雇主的英文名(XX Co., Ltd.)音節數與中文字數無對應關係,不做數量檢查。
+_EN_COMPANY = re.compile(
+    r"\b(Co|Ltd|Inc|Corp|Company|Limited|Enterprise|Industr|Tech)\b\.?", re.I)
+
+
+def _en_syllables(name_en: str) -> int:
+    """英文姓名的音節段數:以空白/逗號/連字號切,SONG, MING-FANG → 3。"""
+    return len([p for p in re.split(r"[\s,\-]+", name_en.strip()) if p])
+
+
+def _name_doubt(name_cn: str, name_en: str) -> str:
+    """中文名的疑慮。措辭只陳述事實,不推斷成因(同 _address_doubt 的規矩)。
+
+    中文名的可靠度遠低於英文名:紅章蓋的是中文那一欄,羅馬拼音在另一欄反而倖存。
+    實測 21 份契約,可比對的 13 筆裡有 7 筆中文字數與英譯音節數對不上——涵蓋
+    樣板字、雜訊、重複字、以及最危險的「截斷」(「明芳」少了姓「宋」、「彭武」
+    少了第三字),而截斷後的名字看起來完全像個正常的名字,人核對時滑過去就過了。
+
+    這是**結構性計數**不是音譯比對:ADR-0003 當初排除名稱是因為威妥瑪／漢語／
+    通用拼音並存、無權威對照表,那個理由對「數數量」不成立。代價是同字數的錯字
+    抓不到(「洪清廷」vs HUNG YAN TING 都是 3),那要真的比對音譯才行,不做。
+
+    空值一律只寫「未擷取到」,不猜原因:32510 的「姜信安」被紅章壓住讀不出來,
+    32503 的契約本身就只填羅馬拼音——兩者在 OCR 文字上一模一樣,分不出來。
+    寫成「契約未載中文名」會誤導人「不必去翻契約」,而那正好是錯的那一半。
+    """
+    if not name_cn:
+        return "H:未擷取到中文名"
+    if not name_en or _EN_COMPANY.search(name_en):
+        return ""
+    n_cn = len(CJK.findall(name_cn))
+    n_en = _en_syllables(name_en)
+    if n_cn != n_en:
+        return f"H:中文 {n_cn} 字與英譯 {n_en} 音節不符"
+    return ""
+
+
+def _compose_doubt(fields: dict) -> str:
+    """把各欄的疑慮併成 L 欄一格,每條冠上欄名指明是哪一格。
+
+    與 D 欄分開的理由不變(D 欄專講許可證判讀,不同主題);但名稱與地址同屬
+    雇主資料,是同一個主題下的多個欄位,合在一格不算一詞多義。
+    """
+    parts = [fields.get("名稱_疑慮", ""), fields.get("地址_疑慮", "")]
+    return "；".join(p for p in parts if p)
 
 
 def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
@@ -418,17 +493,17 @@ def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
     fields.setdefault("地址_比對", False)
     fields.setdefault("地址_疑慮", "")
     if not raw_cn.strip():
-        fields["地址_疑慮"] = "中文地址未擷取到"
+        fields["地址_疑慮"] = "J:中文地址未擷取到"
         return
     try:
         from address_db import normalize_address
         r = normalize_address(
             raw_cn, en_text=fields.get("地址_英", "") or en_hint)
     except Exception:
-        fields["地址_疑慮"] = "地址庫無法使用"
+        fields["地址_疑慮"] = "J:地址庫無法使用"
         return
     if not r.get("matched"):
-        fields["地址_疑慮"] = "縣市比不到(多半被印章蓋住)"
+        fields["地址_疑慮"] = "J:縣市未比對到官方資料庫"
         return
 
     fields["地址_比對"] = True
@@ -457,16 +532,26 @@ def _has_road_pattern(text: str) -> bool:
 
 
 def _address_doubt(raw_cn: str, r: dict, trust_city: bool) -> str:
-    """標準中文地址留空的成因。順序即優先序:先講最上游卡住的那一關。"""
+    """標準中文地址留空的成因。順序即優先序:先講最上游卡住的那一關。
+
+    措辭一律只陳述**確定的事實**,不寫推斷的成因、也不給行動建議。
+    理由是這條訊息自己可能是錯的:32538「桃園市高山里文化七路…」因為行政區被
+    誤配成桃園區,而該區沒有文化七路,舊措辭就寫成「路名不在資料庫(可補進
+    custom_roads.json)」——那條路其實好端端在龜山區底下。照著建議做會把一條
+    已存在的路重複加進去,還掛在錯的區。「沒配到」是確定的,「為什麼沒配到」不是。
+    """
     if not trust_city:
         # 這條同時代表郵遞區號也被扣住,比下游的區/路更該先講。
         # 只提郵遞區號:官方英譯已不輸出,對看 Sheets 的人來說不存在那一欄。
-        return "縣市僅模糊比對命中,郵遞區號一併不採用"
+        return "J:縣市僅模糊比對命中,郵遞區號一併未採用"
     if not r["district"]:
-        return "行政區比不到(多半被印章蓋住)"
+        # 路名配得到卻仍無區 → 該路名跨多個區,無從判定(反推只在唯一時啟動)
+        if r["road"]:
+            return "J:行政區未判定(該路名在多個行政區皆有)"
+        return "J:行政區未判定"
     if _has_road_pattern(raw_cn):
-        return "路名不在資料庫(可補進 data/custom_roads.json)"
-    return "地址無路名(鄉村型),以 OCR 原文為準"
+        return "J:路名未在該行政區的路名清單中"
+    return "J:地址無路名樣式(鄉村型),以 OCR 原文為準"
 
 
 def vision_full_text(image_bytes: bytes, client=None) -> str:
@@ -696,6 +781,7 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
       _image:實際採用(或候選)的圖檔名
       _note :流程備註(例如「找不到契約頁」)
       _crop :已存檔的 ROI 截圖檔名(未存檔則為空)
+      _text :Vision 全文(未送 Vision 時為空字串)
     """
     from pathlib import Path
 
@@ -724,15 +810,18 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
 
     if not found:
         # 特徵不足不送 Vision(頁面身分不明,抽出的欄位不可信),只留截圖
-        return {**empty, "_image": name,
+        return {**empty, "_image": name, "_text": "",
                 "_note": f"找不到契約頁(特徵字命中不足,最高分 {best_s});已存候選頁截圖",
                 "_crop": crop_name}
 
     if deink:
         content = deink_red_stamp(content)
-    fields = extract_employer_fields(vision_full_text(content, client=client))
+    # 全文一併傳出:它是這條流程唯一花錢買來的東西,而每一次解析修正都要拿它
+    # 當素材。丟掉的話,改一次名稱/地址的抽取規則就得再跑一輪 Vision 才驗得了。
+    text = vision_full_text(content, client=client)
+    fields = extract_employer_fields(text)
     # 錨定失敗時 fields 已帶 _note(欄位全空),原樣傳出讓 pipeline 標示 H~O 留空
-    return {**fields, "_image": name, "_crop": crop_name}
+    return {**fields, "_image": name, "_crop": crop_name, "_text": text}
 
 
 # ═══════════════════════════════════════════════════════════════════════════

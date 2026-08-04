@@ -28,6 +28,7 @@ Google 認證：
 
 import re
 import csv
+import json
 import time
 import zipfile
 import logging
@@ -1626,7 +1627,7 @@ def _agency_cols(permit_value: str) -> list[str]:
 _EMPLOYER_COL_KEYS = (
     "雇主名稱_中", "雇主名稱_英",
     "地址_中_標準", "地址_中",        # J=標準, K=OCR原文
-    "地址_疑慮", "地址_英",           # L=疑慮標示, M=英文OCR原文
+    "疑慮標示", "地址_英",             # L=疑慮標示, M=英文OCR原文
     "郵遞區號", "電話",
 )
 
@@ -1634,12 +1635,19 @@ _EMPLOYER_COL_KEYS = (
 # 契約上的更權威,兩欄並列只是讓人多比對一次卻分不出對錯。英文一律以 OCR 原文
 # (M 欄)為準,騰出的 L 欄改放疑慮標示。
 # 與 D 欄 reason 仍刻意分開:D 欄專講許可證判讀,一個欄位不承載兩種語意(ADR-0003)。
-_DOUBT_COL_KEY = "地址_疑慮"
+_DOUBT_COL_KEY = "疑慮標示"
 
 _EMPLOYER_FIELDS_BY_DOCX: dict[str, dict] = {}
 
 # 雇主 ROI 截圖(去紅章前的契約頁裁切)存放處,供人工複查 H~O 欄位值
 EMPLOYER_CROP_DIR = OUTPUT_DIR / "employer_crops"
+
+# 雇主契約頁的 Vision 全文。這是整條流程唯一花錢買來的東西,而每一次「抽取規則
+# 改對了沒」的驗證都要拿它當素材——丟掉的話,改一次名稱或地址的解析就得再跑一輪
+# Vision 才驗得了,於是實務上就會變成憑猜測改。存這份等於把「離線重放」變成常態。
+# 個資考量:同目錄的 employer_crops 裁切圖已含相同內容,存文字不是新的曝險;
+# scan_results/ 整個在 .gitignore 內。
+EMPLOYER_TEXT_PATH = OUTPUT_DIR / "employer_texts.json"
 
 
 def collect_employer_fields(docx_files) -> None:
@@ -1657,6 +1665,7 @@ def collect_employer_fields(docx_files) -> None:
         logger.warning(f"  ⚠ employer_extract 載入失敗,雇主欄(H~O)本次全部留空:{e!r}")
         return
     client = get_vision_client()
+    texts: dict[str, dict] = {}
     for dp in docx_files:
         name = Path(dp).name
         try:
@@ -1665,6 +1674,10 @@ def collect_employer_fields(docx_files) -> None:
         except Exception as e:
             logger.warning(f"  ⚠ {name}: 雇主擷取失敗({e!r}),該列 H~O 留空")
             continue
+        # 全文另存,不留在快取裡:快取每列都會查,夾一大塊文字只是負擔。
+        text = fields.pop("_text", "")
+        if text:
+            texts[name] = {"image": fields.get("_image", ""), "text": text}
         _EMPLOYER_FIELDS_BY_DOCX[name] = fields
         if fields.get("_note"):
             logger.info(f"  {name}: {fields['_note']} → H~O 留空"
@@ -1678,7 +1691,27 @@ def collect_employer_fields(docx_files) -> None:
                 f"（契約頁 {fields.get('_image', '')} → 截圖 {fields.get('_crop', '')}）"
                 + (f" ⚠ {doubt}" if doubt else "")
             )
+    write_employer_texts(texts)
     write_doubt_report()
+
+
+def write_employer_texts(texts: dict[str, dict]) -> int:
+    """把本次各 docx 的 Vision 全文存成 JSON,回傳筆數。
+
+    供離線重放:改了抽取規則後,不必再花 Vision 呼叫就能對真實資料驗到底。
+    寫檔失敗只記 warning——這是輔助產物,不該拖垮已經跑完的主流程。
+    """
+    if not texts:
+        return 0
+    try:
+        EMPLOYER_TEXT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        EMPLOYER_TEXT_PATH.write_text(
+            json.dumps(texts, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"  ⚠ Vision 全文存檔失敗({e!r}),本次無法離線重放")
+        return 0
+    logger.info(f"  Vision 全文 {len(texts)} 份 → {EMPLOYER_TEXT_PATH}")
+    return len(texts)
 
 
 # 疑慮明細另存本機報表。ADR-0003 選擇「寧可多報、不調門檻」,代價是誤報率未知;
@@ -1691,7 +1724,8 @@ def write_doubt_report() -> int:
 
     欄位刻意帶上 OCR 原文與標準值,讓人不必開 Sheets 就能判斷是不是誤報。
     """
-    rows = [(name, f.get(_DOUBT_COL_KEY, ""), f.get("地址_中", ""),
+    rows = [(name, f.get(_DOUBT_COL_KEY, ""),
+             f.get("雇主名稱_中", ""), f.get("雇主名稱_英", ""), f.get("地址_中", ""),
              f.get("地址_中_標準", ""), f.get("郵遞區號", ""))
             for name, f in sorted(_EMPLOYER_FIELDS_BY_DOCX.items())
             if f.get(_DOUBT_COL_KEY)]
@@ -1701,7 +1735,8 @@ def write_doubt_report() -> int:
         DOUBT_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(DOUBT_REPORT_PATH, "w", encoding="utf-8-sig", newline="") as fh:
             w = csv.writer(fh)
-            w.writerow(["docx", "疑慮", "地址_中(OCR)", "地址_中(標準)", "郵遞區號"])
+            w.writerow(["docx", "疑慮", "雇主名稱_中", "雇主名稱_英",
+                    "地址_中(OCR)", "地址_中(標準)", "郵遞區號"])
             w.writerows(rows)
     except Exception as e:      # 報表產不出來不該拖垮主流程
         logger.warning(f"  ⚠ 疑慮報表寫入失敗({e!r}),本次僅記於 log")

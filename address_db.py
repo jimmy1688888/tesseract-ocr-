@@ -375,6 +375,17 @@ def _assemble_en(road_eng: str, area_eng: str, city_eng: str, detail: str) -> st
     return addr_en
 
 
+def _area_by_unique_road(road_raw: str, areas: dict):
+    """該路名在本縣市內只屬於一個行政區時回傳該區,否則 None。
+
+    「中山路」「文化路」這類全台通用的名字會命中多個區,回 None 不猜;
+    「文化七路」在桃園市只有龜山區有,才據以反推。
+    """
+    rn = fold_variants(road_raw)
+    hits = [v for v in areas.values() if any(r[0] == rn for r in v[3])]
+    return hits[0] if len(hits) == 1 else None
+
+
 def _line_candidate(line: str, city_raw: str, city_eng: str, areas: dict,
                     forced_area, road_cutoff: float):
     """在指定縣市下,對單一中文行比對 區→路→門牌,回傳 (cand, rank)。
@@ -383,25 +394,42 @@ def _line_candidate(line: str, city_raw: str, city_eng: str, areas: dict,
     已確定行政區),否則從行內比對;比不到區則以全縣市路名配。
     """
     L = fold_variants(line)
+    # 比對區與路之前都先把縣市名剝掉。剝了配路名是為了避免路名 regex 從行首把
+    # 「彰化縣和美鎮德南」整段吞成路名主幹;剝了配區則是因為縣市名自己就會餵進
+    # 去尾字階段——「桃園區」去尾剩「桃園」,而「桃園市…」裡就有這兩字,於是
+    # 一個完全沒寫區的地址被安上桃園區(32538:實為龜山區,郵遞 333 被填成 330,
+    # 且連帶把該區沒有的「文化七路」誤報成路名不在資料庫)。同名碰撞的縣治
+    # (宜蘭縣/宜蘭市、花蓮縣/花蓮市…)不受影響:剝掉的是縣市名,區名還在。
+    cn = fold_variants(city_raw)
+    body = L.replace(cn, "", 1)
+    if len(cn) >= 3:
+        body = body.replace(cn[1:], "", 1)   # 縣市首字被印章蓋掉的殘留(「雄市」)
+
     if forced_area:
         area_raw, area_eng, zipcode, roads = forced_area
     else:
-        area = _match_area(L, areas)
+        area = _match_area(body, areas)
         if area:
             area_raw, area_eng, zipcode, roads = area
         else:
             area_raw = area_eng = zipcode = ""
             roads = [r for v in areas.values() for r in v[3]]  # 缺區 → 全縣市路名
-    # 抓路名前,先把已定位的縣市/區從字串剝掉,避免路名 regex 從行首把
-    # 「彰化縣和美鎮德南」整段吞成路名主幹 → 誤配。
-    cn = fold_variants(city_raw)
-    rest = L.replace(cn, "", 1)
-    if len(cn) >= 3:
-        rest = rest.replace(cn[1:], "", 1)   # 縣市首字被印章蓋掉的殘留(「雄市」)
+
+    rest = body
     if area_raw:
         rest = rest.replace(fold_variants(area_raw), "", 1)
     road = _match_road(rest, roads, cutoff=road_cutoff)
     road_raw, road_eng, rscore = road if road else ("", "", 0.0)
+
+    # 區配不到但路名精確命中時,若該路名在本縣市內只屬於一個區,以它反推區。
+    # 性質同英文行錨定:拿一條與「區」的 OCR 無關的獨立證據把區補回來。
+    # 限精確命中(rscore==1.0)且唯一——模糊路名再反推區是兩層推測疊加,
+    # 錯了會是確信的錯值。全台 90.8% 的路名符合唯一性。
+    if not area_raw and road_raw and rscore >= 1.0:
+        inferred = _area_by_unique_road(road_raw, areas)
+        if inferred:
+            area_raw, area_eng, zipcode, _ = inferred
+
     detail = _extract_tail(line)
 
     cand = {
