@@ -12,7 +12,8 @@
 """
 import re
 
-from employer_extract import extract_employer_fields, _name_doubt
+from employer_extract import (extract_employer_fields, _name_doubt,
+                              _house_number_doubt)
 
 # 32508 實況節錄:標籤行沒有名字,契約標題從另一欄串進來,真名遠在後面
 _LINES_TITLE_INTERFERES = [
@@ -181,3 +182,39 @@ class TestComposedDoubtColumn:
                  "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
         for part in _f(lines)["疑慮標示"].split("；"):
             assert re.match(r"^[A-Z]:", part), part
+
+
+class TestHouseNumberCrossCheck:
+    """中文與英文的門牌號不一致即標示。
+
+    這道檢查是「英文路名備援」修好之後的必要配套:修好前 32510 因路名配不到而
+    J 欄留空並掛疑慮(人看得見);修好後路名救回來了,J 欄卻會填進中文那個讀壞的
+    門牌號(圖上是 62 號,OCR 讀成 7 號)而不帶任何標示——等於把一個看得見的失敗
+    換成看不見的錯值。
+
+    門牌號是阿拉伯數字,沒有拼音變體問題,這正是英文地址整體不做判定卻仍能拿
+    門牌號來對的原因。同名稱的字數/音節數檢查,是結構性比對而非語意判斷。
+    """
+    def test_mismatch_flagged(self):
+        d = _house_number_doubt("成園市格梅區梅翠路二段716巷7號",
+                    "No. 62, Ln. 716. Sec. 2. Meishi Rd, Yangmei Dist.")
+        assert "門牌號中英不符" in d and "7／62" in d
+
+    def test_agreement_passes(self):
+        assert _house_number_doubt("桃園市新屋區清華路50巷101弄75號",
+                       "No. 75, Aly. 101, Ln. 50, Qingwen Rd.") == ""
+
+    def test_zhi_form_equals_hyphen_form(self):
+        """「8之15之2號」與「No.8-15-2」是同一件事的兩種寫法,不得誤報。
+
+        比對前不統一的話,32509 與 32523 會被當成不符——實測那兩筆其實一致,
+        是粗糙的 regex 只抓到最後一段數字才看起來不同。
+        """
+        assert _house_number_doubt("台中市太平區鵬儀路214巷6弄8之15之2號",
+                       "No.8-15-2, Alley 6, Lane 214, Pengyi Rd.") == ""
+        assert _house_number_doubt("臺北市信義區虎林街164巷13之1號2樓",
+                       "2F., No.13-1, Ln. 164, Hulin St.") == ""
+
+    def test_missing_either_side_skips(self):
+        assert _house_number_doubt("", "No. 62, Ln. 716") == ""
+        assert _house_number_doubt("桃園市新屋區清華路75號", "") == ""

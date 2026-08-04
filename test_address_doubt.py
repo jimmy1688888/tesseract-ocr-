@@ -377,3 +377,44 @@ class TestRealDocsUnaffected:
             assert f["郵遞區號"] == zipcode, cn
             assert f["地址_中_標準"], cn
             assert f["地址_疑慮"] == "", cn
+
+
+class TestEnglishRoadFallback:
+    """英文路名備援:中文路名被讀壞、英文行倖存時的最後一道救援。
+
+    這條路徑寫好之後從未真的跑起來過——_EN_ROAD_TOKEN 寫死「Rd 後面必須有句點」,
+    而契約常印成「Meishi Rd,」(無句點),findall 直接回空,備援靜默放棄。
+    另外 token 的字元類別不含逗號,會從上一個逗號一路吃進「Ln. 716.」這類前綴,
+    把相似度稀釋到 0.727 而過不了 0.9 的門檻。
+    """
+
+    CN_BROKEN = "成園市格梅區梅翠路二段716巷7號"        # 梅獅路被讀成梅翠路
+    EN_OK = ("No. 62, Ln. 716. Sec. 2. Meishi Rd, Yangmei Dist. "
+             "Taoyuan City 326014, Taiwan")
+
+    def test_recovers_road_from_english_line(self):
+        r = normalize_address(self.CN_BROKEN, en_text=self.EN_OK)
+        assert r["road"] == "梅獅路２段" and r["zip"] == "326"
+
+    def test_chinese_fuzzy_alone_still_refuses(self):
+        """中文那邊仍該拒配——主幹防護擋住梅翠→梅獅(0.667 < 0.75)是刻意的。
+        救回來的功勞屬於英文行,不是把中文的門檻放寬。"""
+        assert normalize_address("桃園市楊梅區梅翠路二段716巷7號")["road"] == ""
+
+    def test_genuinely_missing_road_still_not_matched(self):
+        """32540:新屋區真的沒有清華路。最像的是「新文路/Xinwen Rd.」0.857,
+        必須擋掉——配成新文路會是確信的錯值,比留空糟。"""
+        r = normalize_address(
+            "桃園市新屋區清華路50巷101弄75號",
+            en_text="No. 75, Aly. 101, Ln. 50, Qingwen Rd., Xinwu Dist., "
+                    "Taoyuan City , Taiwan (R.O.C.)")
+        assert r["road"] == ""
+
+    def test_road_suffix_without_period_is_accepted(self):
+        from address_db import _EN_ROAD_TOKEN
+        assert _EN_ROAD_TOKEN.findall("Sec. 2. Meishi Rd, Yangmei")
+
+    def test_east_is_not_mistaken_for_st(self):
+        """後綴前的詞界不可省:少了它「East,」會被拆成 Ea + st 誤判成 St. 結尾。"""
+        from address_db import _EN_ROAD_TOKEN
+        assert not _EN_ROAD_TOKEN.findall("Somewhere East, ")

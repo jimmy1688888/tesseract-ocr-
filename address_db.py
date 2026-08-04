@@ -301,8 +301,20 @@ def _match_road(L: str, roads: list, cutoff: float = 0.5):
     return None
 
 
+# 路名後綴的句點是**可選**的:契約上常印成「Meishi Rd,」而非「Meishi Rd.,」。
+# 舊版寫死 Rd\. 要求句點,遇到這種寫法整個 findall 回空,備援於是靜默放棄——
+# 32510 的英文行寫著 Meishi Rd(官方 Sec. 2, Meishi Rd.),中文被讀成「梅翠路」
+# 配不到,這條本該救回它的路徑卻從未真的跑起來過。
+# 後綴前的 \b 不可省:少了它,「East,」會被拆成 Ea + st 而誤判成 St. 結尾。
+# 終止符收 [,.]:行內以句點分隔(「Meishi Rd. Yangmei」)時同樣要能收尾。
 _EN_ROAD_TOKEN = re.compile(
-    r"([A-Za-z0-9'’.\- ]+?(?:Rd\.|St\.|Blvd\.|Ave\.|Dr\.))(?=\s*,|\s*$)", re.I)
+    r"([A-Za-z0-9'’.\- ]+?\b(?:Rd|St|Blvd|Ave|Dr)\.?)(?=\s*[,.]|\s*$)", re.I)
+
+# token 的字元類別不含逗號,所以會從上一個逗號一路吃到路名後綴,把「Ln. 716.」
+# 這類前綴一起吞進去,稀釋掉相似度(實測 0.727,過不了 0.9 的門檻)。
+# 比對前把開頭的號/巷/弄/樓片段剝掉——它們一律排在路名之前。
+_EN_ROAD_LEAD = re.compile(
+    r"^(?:\s*(?:No|Ln|Lane|Aly|Alley|F)\.?\s*[0-9\-]+\s*[.,]?\s*)+", re.I)
 
 
 def _match_road_en(en_text: str, roads: list, cutoff: float = 0.9):
@@ -311,12 +323,19 @@ def _match_road_en(en_text: str, roads: list, cutoff: float = 0.9):
     契約上的英譯是仲介自翻,常與官方不同(Tuozi S. St. vs 官方 Tuozinan St.),
     模糊比對易錯配到同名系路(拕子一街),故門檻預設 0.9。
     取 Dist./Township 之前、最後一個路名 token(No./Lane/Alley 都在路名之前)。
+
+    0.9 這道門檻實測剛好切在對的位置:32510 的 Meishi Rd 對官方
+    「Sec. 2, Meishi Rd.」得 0.914 而救回梅獅路;32540 的 Qingwen Rd. 最像的
+    是「新文路 / Xinwen Rd.」只有 0.857,擋掉——那筆是真的缺一條清華路,
+    配成新文路會是確信的錯值。
     """
     head = re.split(r"\b(?:Dist|Township)\b", en_text, maxsplit=1)[0]
     toks = _EN_ROAD_TOKEN.findall(head)
     if not toks:
         return None
-    tok = toks[-1].strip().lower()
+    tok = _EN_ROAD_LEAD.sub("", toks[-1].strip()).strip().lower()
+    if not tok:
+        return None
     best, score = None, 0.0
     for _rn, _base, raw, eng in roads:
         s = difflib.SequenceMatcher(None, tok, eng.lower()).ratio()

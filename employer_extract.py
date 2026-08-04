@@ -282,7 +282,7 @@ def deink_red_stamp(image_bytes: bytes, *, whiten_thresh: int = 45,
 _EMPTY_FIELDS = {
     "雇主名稱_中": "", "雇主名稱_英": "", "地址_中": "", "地址_英": "", "電話": "",
     "地址_中_標準": "", "郵遞區號": "", "地址_比對": False,
-    "地址_疑慮": "", "名稱_疑慮": "", "疑慮標示": "",
+    "地址_疑慮": "", "名稱_疑慮": "", "門牌_疑慮": "", "疑慮標示": "",
 }
 
 
@@ -402,6 +402,7 @@ def extract_employer_fields(text: str) -> dict:
     }
     _standardize_address(fields, addr_cn or "", en_hint=en_hint)
     fields["名稱_疑慮"] = _name_doubt(fields["雇主名稱_中"], fields["雇主名稱_英"])
+    fields["門牌_疑慮"] = _house_number_doubt(fields["地址_中"], fields["地址_英"])
     fields["疑慮標示"] = _compose_doubt(fields)
     return fields
 
@@ -464,13 +465,43 @@ def _name_doubt(name_cn: str, name_en: str) -> str:
     return ""
 
 
+# 門牌號:中文取「N號」(含「N之M號」),英文取「No. N」(含「N-M」)。
+_HOUSE_NO_CN = re.compile(r"(\d+(?:\s*之\s*\d+)*)\s*號")
+_HOUSE_NO_EN = re.compile(r"\bNo\.?\s*(\d+(?:\s*-\s*\d+)*)", re.I)
+
+
+def _house_number_doubt(addr_cn: str, addr_en: str) -> str:
+    """中文與英文地址的門牌號不一致即標示。
+
+    門牌號是**阿拉伯數字**,沒有拼音變體的問題——這正是英文地址整體不做判定
+    (Panshih/Panshi 分不出「拼法不同」與「讀錯」)卻仍能拿門牌號來對的原因。
+    與名稱的字數/音節數檢查同一個性質:結構性比對,不是語意判斷。
+
+    這道檢查是「英文路名備援」修好之後的必要配套。修好前 32510 因路名配不到而
+    J 欄留空並掛疑慮(人看得見);修好後路名救回來了,J 欄卻會填進中文那個讀壞的
+    門牌號(圖上是 62 號,OCR 讀成 7 號)而**不帶任何標示**——等於把一個看得見的
+    失敗換成看不見的錯值,正是 ADR-0003 要防的事。
+
+    「N之M號」與「No. N-M」是同一件事的兩種寫法,比對前統一成 N-M,
+    否則 32509 的「8之15之2號」對「No.8-15-2」會被誤報成不符。
+    """
+    a = _HOUSE_NO_CN.search(addr_cn or "")
+    b = _HOUSE_NO_EN.search(addr_en or "")
+    if not (a and b):
+        return ""
+    norm = lambda s: re.sub(r"\s", "", s).replace("之", "-")   # noqa: E731
+    cn, en = norm(a.group(1)), norm(b.group(1))
+    return "" if cn == en else f"J:門牌號中英不符({cn}／{en})"
+
+
 def _compose_doubt(fields: dict) -> str:
     """把各欄的疑慮併成 L 欄一格,每條冠上欄名指明是哪一格。
 
     與 D 欄分開的理由不變(D 欄專講許可證判讀,不同主題);但名稱與地址同屬
     雇主資料,是同一個主題下的多個欄位,合在一格不算一詞多義。
     """
-    parts = [fields.get("名稱_疑慮", ""), fields.get("地址_疑慮", "")]
+    parts = [fields.get("名稱_疑慮", ""), fields.get("地址_疑慮", ""),
+             fields.get("門牌_疑慮", "")]
     return "；".join(p for p in parts if p)
 
 
