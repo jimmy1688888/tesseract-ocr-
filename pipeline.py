@@ -545,6 +545,17 @@ def _image_sort_key(name: str) -> tuple[int, int, str]:
     return (1, 0, name)
 
 
+def list_input_docx(input_dir: Path = INPUT_DIR) -> list[Path]:
+    """INPUT_DIR 裡要處理的 .docx,已排除 Word 的鎖定檔。
+
+    Word 開著某份文件時會在同目錄產生 `~$檔名.docx`(約 162 bytes,不是 zip)。
+    它符合 *.docx,glob 撈得到,而 extract_images_from_docx 會在它上面拋
+    BadZipFile 讓整批當場掛掉 —— 而觸發條件只是「有人正開著那份檔案在看」。
+    """
+    return sorted(p for p in input_dir.glob("*.docx")
+                  if not p.name.startswith("~$"))
+
+
 def _image_index(name: str) -> int:
     """imageN.jpeg → N。檔名沒有數字回傳 0(永遠不屬於第一層)。"""
     key = _image_sort_key(name)
@@ -2210,7 +2221,7 @@ def main(opts: argparse.Namespace) -> None:
         logging.getLogger().setLevel(logging.DEBUG)
         logger.debug(f"單檔 DEBUG 模式：{target.name}")
     else:
-        docx_files = sorted(INPUT_DIR.glob("*.docx"))
+        docx_files = list_input_docx()
         if not docx_files:
             logger.error(f"找不到 .docx：{INPUT_DIR.resolve()}")
             return

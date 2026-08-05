@@ -67,6 +67,26 @@ def _rows(tmp_path):
         return list(csv.DictReader(f))
 
 
+class TestInputListing:
+    """Word 的鎖定檔不得進入處理清單。
+
+    Word 開著某份文件時會在同目錄產生 `~$檔名.docx`(約 162 bytes,不是 zip)。
+    它符合 *.docx,而 extract_images_from_docx 會在它上面拋 BadZipFile 讓整批
+    當場掛掉——觸發條件只是「有人正開著那份檔案在看」。
+    """
+
+    def test_word_lock_files_are_skipped(self, tmp_path):
+        (tmp_path / "32572.docx").write_bytes(b"x")
+        (tmp_path / "~$32572.docx").write_bytes(b"lock")
+        assert [p.name for p in P.list_input_docx(tmp_path)] == ["32572.docx"]
+
+    def test_order_is_deterministic(self, tmp_path):
+        for n in ("32574.docx", "32503.docx", "~$32503.docx"):
+            (tmp_path / n).write_bytes(b"x")
+        assert [p.name for p in P.list_input_docx(tmp_path)] == ["32503.docx",
+                                                                 "32574.docx"]
+
+
 class TestSplitTiers:
     """第一層是 {2,5,6},其餘全歸第二層,兩者聯集恆等於輸入。"""
 

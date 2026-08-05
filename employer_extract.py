@@ -13,11 +13,14 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 from io import BytesIO
 
 import numpy as np
 from PIL import Image, ImageOps
+
+logger = logging.getLogger(__name__)
 
 CJK        = re.compile(r"[一-鿿]")
 # 台灣電話:0 開頭,號段間可夾 '-'/空白(涵蓋 02-2727-6999 這種雙連字號)。
@@ -102,6 +105,15 @@ _PROSE_MARKERS = re.compile(
 CONTRACT_MARKERS = re.compile(
     _FORM_LABELS.pattern + "|" + _PROSE_MARKERS.pattern, re.I)
 
+# 切結書(Surat Pernyataan Biaya dan Gaji)第一頁的標題。用來找雇主姓名的第二個
+# 來源:那個欄位實測 6/6 都在「切結書第一頁的下一頁」(見 ADR-0006)。
+#
+# 刻意**不**用 `Majikan R.O.C`(欄位本身的標籤)當錨:32538/32554 的那一頁,
+# Tesseract 在 35%/55%/70% 任何裁切範圍都讀不出這串字,而 Vision 讀得到。認頁
+# 只能靠 Tesseract 讀得穩的東西 —— 印刷體大標題讀得穩,夾在表格線與紅章之間的
+# 欄位標籤讀不穩。認頁與取值因此分工:Tesseract 認頁(免費),Vision 取值。
+_PLEDGE_FRONT = re.compile(r"Surat\s*Pernyataan", re.I)
+
 
 def _has_cjk(s: str) -> bool:
     return bool(CJK.search(s))
@@ -172,12 +184,22 @@ def score_contract_page(image_bytes: bytes) -> int:
     (雇主 ROI、次頁台仲)一致都在去紅章後的影像上做。
     前處理失敗則退回原圖,維持原行為,不讓評分因此中斷。
     """
+    return _page_marks(image_bytes)[0]
+
+
+def _page_marks(image_bytes: bytes) -> tuple[int, bool]:
+    """一次上緣掃描,同時得出契約頁分數與「這頁是不是切結書第一頁」。
+
+    兩件事共用同一段文字。分開跑會讓每份 docx 的 Tesseract 次數翻倍,而它們要的
+    輸入完全一樣(去紅章後的上緣裁切),沒有理由掃兩次。
+    """
     try:
         image_bytes = deink_red_stamp(image_bytes)
     except Exception:
         pass
     text = _tesseract_top_text(image_bytes)
-    return 2 * len(_FORM_LABELS.findall(text)) + len(_PROSE_MARKERS.findall(text))
+    score = 2 * len(_FORM_LABELS.findall(text)) + len(_PROSE_MARKERS.findall(text))
+    return score, bool(_PLEDGE_FRONT.search(text))
 
 
 # 認定為契約頁的最低分。低於此值視為「頁面身分不明」,呼叫端各自決定退路。
@@ -209,7 +231,7 @@ def find_contract_image(images: list[tuple[str, bytes]],
 # 「同一個契約頁判定」,重算既慢又有不一致的風險,故在此共用。
 # 只快取分數不快取影像 bytes:一份 docx 的圖動輒數 MB,整批快取會吃掉大量記憶體。
 # 鍵含 (mtime_ns, size),檔案被換掉會自動失效。
-_page_score_cache: dict[tuple, dict[str, int]] = {}
+_page_score_cache: dict[tuple, dict[str, tuple[int, bool]]] = {}
 
 
 def _score_cache_key(docx_path: str) -> tuple:
@@ -227,15 +249,45 @@ def _scored_pages(docx_path: str) -> list[tuple[int, str, bytes]]:
     分數取自 _page_score_cache,同一份 docx 只實際評一次;bytes 每次重讀
     (zip 解壓遠比 Tesseract 便宜,且不必把影像長期留在記憶體)。
     """
-    images = sorted(_docx_images(docx_path), key=lambda x: _natural_key(x[0]))
+    images = _sorted_images(docx_path)
     if not images:
         return []
+    marks = _cached_marks(docx_path, images)
+    return [(marks[n][0], n, b) for n, b in images]
+
+
+def _sorted_images(docx_path: str) -> list[tuple[str, bytes]]:
+    return sorted(_docx_images(docx_path), key=lambda x: _natural_key(x[0]))
+
+
+def _cached_marks(docx_path: str, images: list[tuple[str, bytes]]
+                  ) -> dict[str, tuple[int, bool]]:
+    """{圖檔名: (契約頁分數, 是否切結書第一頁)},同一份 docx 只實際掃一輪。"""
     key = _score_cache_key(docx_path)
-    scores = _page_score_cache.get(key)
-    if scores is None or set(scores) != {n for n, _ in images}:
-        scores = {n: score_contract_page(b) for n, b in images}
-        _page_score_cache[key] = scores
-    return [(scores[n], n, b) for n, b in images]
+    marks = _page_score_cache.get(key)
+    if marks is None or set(marks) != {n for n, _ in images}:
+        marks = {n: _page_marks(b) for n, b in images}
+        _page_score_cache[key] = marks
+    return marks
+
+
+def pledge_name_pages(docx_path: str, max_pages: int = 2
+                      ) -> list[tuple[str, bytes]]:
+    """雇主姓名可能所在的頁:切結書第一頁之**後**最多 max_pages 頁。
+
+    實測 6 份(32503/32510/32538/32554/32572/32574)全部命中第一候選頁,所以實際
+    只會花一次 Vision。留第二頁是因為切結書長度 2~3 頁不定(ADR-0005),而雇主欄
+    與許可證**不一定同頁** —— 32538/32554 的許可證在 image6、雇主欄在 image5,
+    所以不能拿許可證命中的圖來當這一頁(這條假設一度成立過 4/4,是巧合)。
+    """
+    images = _sorted_images(docx_path)
+    if not images:
+        return []
+    marks = _cached_marks(docx_path, images)
+    for i, (name, _b) in enumerate(images):
+        if marks[name][1]:
+            return images[i + 1:i + 1 + max_pages]
+    return []
 
 
 def _best_scored_page(scored: list[tuple[int, str, bytes]]
@@ -463,6 +515,61 @@ def _name_doubt(name_cn: str, name_en: str) -> str:
     if n_cn != n_en:
         return f"H:中文 {n_cn} 字與英譯 {n_en} 音節不符"
     return ""
+
+
+# 切結書頁的雇主姓名欄。兩種版面都要吃:
+#   中英分行     「中華民國雇主:張鈺珠」 + 另一行「Majikan R.O.C: ZHANG YU ZHU」
+#   中英同行斜線 「中華民國雇主/Majikan R.O.C: 姜信安/JIANG SIN AN」
+# 後者是 32510 的實況,兩個標籤之間隔了 14 個字元 —— 一開始寫死「標籤後 8 字內」
+# 就是因此抓空,而不是 Vision 沒讀到。
+_PLEDGE_LABEL = re.compile(r"中\s*華\s*民\s*國\s*雇\s*主[^\n]{0,24}?[::：﹕]\s*([^\n]{1,30})")
+# 值的結束處:斜線(接英譯)、括號(簽章註記)、拉丁字母(接英文標籤)、或下一個欄名。
+_PLEDGE_CUT = re.compile(r"[/／(（]|[A-Za-z]|負責人|簽章|日期|Tanggal")
+
+
+def _pledge_name(text: str) -> str:
+    """從切結書頁的 Vision 全文取中文雇主名;取不到回空字串。
+
+    刻意**不**用同頁的「負責人或代表人簽章」那一行當來源,雖然它也印著名字:
+      - 32510 那一行只讀到「信安」,少了姓 —— 手寫簽章的辨識率遠低於印刷欄位
+      - 公司型雇主的負責人不是雇主本身,兩者根本不是同一個人
+    """
+    m = _PLEDGE_LABEL.search(text)
+    if not m:
+        return ""
+    val = m.group(1)
+    cut = _PLEDGE_CUT.search(val)
+    if cut:
+        val = val[:cut.start()]
+    val = re.sub(r"\s+", "", val)
+    return val if CJK.search(val) and _is_name_like(val) else ""
+
+
+def rescue_name_from_pledge(docx_path: str, client=None,
+                            max_pages: int = 2) -> tuple[str, str]:
+    """契約頁抽不到中文名時,改從切結書頁取。回傳 (名字, 圖檔名),失敗回 ("", "")。
+
+    **用 Vision 而不是本機 Tesseract**,這是這條管道能不能用的關鍵。同一格實測:
+
+        引擎                     32572      32574
+        Vision                   張鈺珠 ✔   鍾滄榮 ✔
+        Tesseract chi_tra 紅通道  張鈺珠 ✔   鍾濃榮 ✘
+        Tesseract chi_tra 去紅章  整行消失 ✘  鍾澹榮 ✘
+
+    同一格、同一個語言包,換個前處理就讀出三個不同的字(滄/濃/澹)。漢字正是兩個
+    引擎差距最大的地方,而契約頁那邊的中文名本來就是 Vision 讀的 —— 拿弱引擎去
+    補強引擎沒有意義。代價是每次救援 +1 次 Vision,而救援只在中文名為空時觸發
+    (上一批 21 份會觸發 4 次)。
+    """
+    for name, raw in pledge_name_pages(docx_path, max_pages):
+        try:
+            got = _pledge_name(vision_full_text(raw, client=client))
+        except Exception as e:                       # 憑證/額度/網路問題
+            logger.warning(f"  ⚠ 切結書頁 Vision 失敗({name}):{e!r}")
+            return "", ""
+        if got:
+            return got, name
+    return "", ""
 
 
 # 門牌號:中文取「N號」(含「N之M號」),英文取「No. N」(含「N-M」)。
@@ -851,8 +958,35 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
     # 當素材。丟掉的話,改一次名稱/地址的抽取規則就得再跑一輪 Vision 才驗得了。
     text = vision_full_text(content, client=client)
     fields = extract_employer_fields(text)
+    if not fields.get("雇主名稱_中"):
+        _apply_pledge_rescue(fields, docx_path, client)
     # 錨定失敗時 fields 已帶 _note(欄位全空),原樣傳出讓 pipeline 標示 H~O 留空
     return {**fields, "_image": name, "_crop": crop_name, "_text": text}
+
+
+def _apply_pledge_rescue(fields: dict, docx_path: str, client=None) -> None:
+    """就地把切結書頁救回的中文名寫進 fields,並重算名稱疑慮。
+
+    只救中文名,不動英文名:英文名本來就是可靠的那一欄(ADR-0004,紅章蓋的是中文
+    那一欄),而切結書頁的英文反而讀壞過 —— 32503 讀成 `FU BIN ANI FU`。拿它去
+    覆蓋契約頁的英文名是負向交換。
+
+    救不回來時什麼都不改:H 欄維持空、L 欄維持「H:未擷取到中文名」。這一格的
+    兩種空值成因(紅章壓死 vs 契約本身只填拼音)從文字上仍然分不出來,ADR-0004
+    那條「不猜原因」不因為多了一條管道而改變 —— 32503 正是救不回來的那一半。
+    """
+    from pathlib import Path
+
+    got, page = rescue_name_from_pledge(docx_path, client=client)
+    if not got:
+        logger.info(f"  切結書頁未取得中文名:{Path(docx_path).name}")
+        return
+    fields["雇主名稱_中"] = got
+    count = _name_doubt(got, fields.get("雇主名稱_英", ""))
+    fields["名稱_疑慮"] = "；".join(
+        p for p in (f"H:中文名取自切結書頁({page})", count) if p)
+    fields["疑慮標示"] = _compose_doubt(fields)
+    logger.info(f"  ★ 切結書頁救回中文名:{got}({Path(docx_path).name}/{page})")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

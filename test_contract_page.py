@@ -106,14 +106,20 @@ def _make_docx(path, images: dict[str, bytes]):
 
 @pytest.fixture
 def counting_scorer(monkeypatch):
-    """把 score_contract_page 換成計次器,回傳 {圖檔名: 被實際評分次數}。"""
+    """把 _page_marks 換成計次器,回傳 {圖檔名: 被實際掃描次數}。
+
+    攔的是 _page_marks 而不是 score_contract_page:契約頁分數與「是否切結書
+    第一頁」共用同一次上緣掃描(ADR-0006),快取的是那一次的結果,所以計次要計
+    在那個接縫上。回 (0, False):0 分讓兩個入口都提早返回、不碰 Vision;
+    False 表示沒有切結書頁,救援也不會啟動。
+    """
     calls: dict[bytes, int] = {}
 
-    def _score(b, **kw):
+    def _marks(b, **kw):
         calls[b] = calls.get(b, 0) + 1
-        return 0                            # 0 分:兩個入口都會提早返回,不碰 Vision
+        return 0, False
 
-    monkeypatch.setattr(ee, "score_contract_page", _score)
+    monkeypatch.setattr(ee, "_page_marks", _marks)
     return calls
 
 
