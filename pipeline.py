@@ -129,6 +129,20 @@ CONF_NOVOTE_RESCUE_MAX = 50
 # ─── prefilter ────────────────────────────────────────────────────────────
 SMALL_DOCX_THRESHOLD = 3   # 圖片數 ≤ 此值 → "small"
 
+# ─── 分層掃描（large 專用，見 ADR-0005）────────────────────────────────────
+# 許可證印在「切結書」的最後一頁(簽署方欄 VI. Pihak yang menandatangani),而
+# docx 內的圖序前段是固定的:
+#     image1 雜訊/空白 │ image2 契約頁 │ image3 次頁 │ image4~ 切結書 │ 尾端空白圖
+# 切結書長度 2~3 頁不定,故許可證落在 image5 或 image6;mol ROI 則只有契約頁
+# (image2)讀得到。21 份實測:19/19 許可證命中都在 {5,6},mol 命中全在 {2}。
+#
+# 用絕對序號而非「倒數第 N 張」:尾端掛著數量不定的空白圖(32510 的 image6、
+# 32509 的 image7 都是空的),倒數會數到空白;前段的內容順序才是穩定的。
+#
+# 猜錯不會錯值,只會慢 —— 第一層拿不到 permit 多數票就把其餘圖全掃完,回到與
+# 全掃相同的輸入。代價是規則會安靜地過期,故 CSV 留 scan_tier 欄供觀測。
+TIER1_IMAGES = {2, 5, 6}
+
 # ─── ROI ──────────────────────────────────────────────────────────────────
 ROI_REGIONS = {
     "mol":           (0.05, 0.04, 0.40, 0.25),
@@ -220,7 +234,7 @@ class VisionQueueItem:
 
 # ─── CSV 欄位順序（同時供寫入與讀取使用，避免兩端走樣） ───────────────────
 CSV_FIELDS = [
-    "source_docx", "image_name", "docx_class",
+    "source_docx", "image_name", "docx_class", "scan_tier",
     "mol", "mol_layer", "mol_conf", "mol_from_vote",
     "id",  "id_layer",  "id_conf",  "id_from_vote",
     "cross_match", "final_value", "final_conf", "vision_review",
@@ -252,6 +266,10 @@ class ScanResult:
     source_docx: str
     image_name: str
     docx_class: str            # "small" / "large"
+    # 這張圖是在第幾層被掃到的:1=第一層(TIER1_IMAGES)，2=第一層沒拿到 permit
+    # 多數票後的擴掃。small 與 --full-scan 一律為 1。純觀測欄位，不參與任何決策
+    # ——它存在是為了讓「第一層命中率崩掉」這件事看得見(見 ADR-0005)。
+    scan_tier: int = 1
 
     # ─── OCR 結果 ────────────────────────────────────────────────────────
     mol: str = ""
@@ -295,6 +313,7 @@ class ScanResult:
             "source_docx":   self.source_docx,
             "image_name":    self.image_name,
             "docx_class":    self.docx_class,
+            "scan_tier":     str(self.scan_tier),
             "mol":           self.mol,
             "mol_layer":     str(self.mol_layer) if self.mol_layer else "",
             "mol_conf":      f"{self.mol_conf:.1f}" if self.mol_conf else "",
@@ -346,6 +365,8 @@ class ScanResult:
             source_docx   = row.get("source_docx", ""),
             image_name    = row.get("image_name", ""),
             docx_class    = row.get("docx_class", ""),
+            # 舊 CSV 沒有這欄 → 視為第一層,不讓缺欄變成無意義的 0
+            scan_tier     = to_int(row.get("scan_tier", "")) or 1,
             mol           = row.get("mol", ""),
             mol_layer     = to_int(row.get("mol_layer", "")),
             mol_conf      = to_float(row.get("mol_conf", "")),
@@ -522,6 +543,39 @@ def _image_sort_key(name: str) -> tuple[int, int, str]:
     if m:
         return (0, int(m.group()), name)
     return (1, 0, name)
+
+
+def _image_index(name: str) -> int:
+    """imageN.jpeg → N。檔名沒有數字回傳 0(永遠不屬於第一層)。"""
+    key = _image_sort_key(name)
+    return key[1] if key[0] == 0 else 0
+
+
+def split_tiers(images: list[tuple[str, bytes]]
+                ) -> tuple[list[tuple[str, bytes]], list[tuple[str, bytes]]]:
+    """把圖分成 (第一層, 其餘),兩者聯集恆等於輸入,順序不變。
+
+    命名不是 imageN 的圖一律歸第二層 —— 第一層是一組「賭它在這裡」的位置,
+    賭不到就擴掃,把身分不明的檔名放進第一層只會白花時間。
+    """
+    tier1  = [x for x in images if _image_index(x[0]) in TIER1_IMAGES]
+    rest   = [x for x in images if _image_index(x[0]) not in TIER1_IMAGES]
+    return tier1, rest
+
+
+def has_permit_vote(rows: list[ScanResult]) -> bool:
+    """這批結果裡有沒有「可信的 permit 多數票」——即不必再擴掃的唯一理由。
+
+    刻意排除兩種「看起來有值」的情況,它們都不足以停止擴掃:
+
+      mol 命中          mol 只證明這是契約頁,不是許可證的讀值。32523/32529 的
+                        mol 信心是 37 與 28,拿這種值擋掉擴掃等於用雜訊做決策。
+      PERMIT_PARTIAL    幾個設定各讀出不同的值、湊不出多數。r.id 雖有值,但
+                        process_large_vs 的規則A2 不會採用它,反而會掉進規則B
+                        並以 no_vote_rescue 把整份推去走台仲反查 —— 而真正的
+                        多數票可能就在還沒掃的那幾張圖上(見 ADR-0005)。
+    """
+    return any(r.id_from_vote and r.id and r.id_conf > CONF_VOTE_MIN for r in rows)
 
 
 def extract_images_from_docx(docx_path: Path) -> list[tuple[str, bytes]]:
@@ -1988,17 +2042,42 @@ def _save_review_images(docx_path: Path, images: list[tuple[str, bytes]],
     return saved
 
 
+def _scan_tier(docx_name: str, images: list[tuple[str, bytes]],
+               roi_filter: str, tier: int) -> list[ScanResult]:
+    """掃一層的圖，回傳有命中的結果（已跑過 decide_result 並標上 scan_tier）。"""
+    out: list[ScanResult] = []
+    for img_name, img_bytes in images:
+        result = scan_image_large(docx_name, img_name, img_bytes,
+                                  roi_filter=roi_filter)
+        if not result:
+            logger.debug(f"  {docx_name} / {img_name}  未命中")
+            continue
+        decide_result(result)
+        result.scan_tier = tier
+        out.append(result)
+        logger.info(
+            f"★ {docx_name}/{img_name}"
+            f"  [large|T{tier}|{result.hit_roi}]"
+            f"  mol={result.mol!r} id={result.id!r}"
+            f"  final={result.final_value!r}"
+            f"  vision={result.vision_review!r}"
+        )
+    return out
+
+
 def run_scan(docx_files: list[Path], image_filter: str = "",
-             roi_filter: str = "") -> Path:
+             roi_filter: str = "", full_scan: bool = False) -> Path:
     """執行 Tesseract 掃描，輸出 matches.csv，回傳 csv 路徑。
 
     image_filter：若非空，配合單一 docx 只處理該檔名的圖（對應 --image）。
     roi_filter  ：若非空，只掃指定的 ROI（對應 --roi）。
+    full_scan   ：True 則關掉分層，每張圖都掃（對應 --full-scan）。
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     csv_path = OUTPUT_DIR / "matches.csv"
 
     total = hits = upper_hits = lower_hits = 0
+    large_docs = tier1_docs = expanded_docs = 0
     t0 = time.time()
 
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -2006,51 +2085,65 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
         writer.writeheader()
 
         for docx_path in docx_files:
-            images = extract_images_from_docx(docx_path)
+            all_images = extract_images_from_docx(docx_path)
+            # docx_class 一律用「原始張數」判定，必須在任何過濾之前算：把過濾後
+            # 的張數丟進 classify_by_count，5 張圖的 docx 剩 3 張就會被判成
+            # small，整份改走 mol-only 的另一條路（ADR-0005）。
+            docx_class = classify_by_count(len(all_images))
+            logger.debug(f"  {docx_path.name}: {len(all_images)} 張圖 → {docx_class}")
+
+            images = all_images
             # --image 過濾
             if image_filter:
-                all_names = [n for n, _ in images]
-                images = [(n, b) for n, b in images if n == image_filter]
+                all_names = [n for n, _ in all_images]
+                images = [(n, b) for n, b in all_images if n == image_filter]
                 if not images:
                     logger.error(
                         f"找不到圖檔 {image_filter!r}（{docx_path.name} 內含:{all_names}）"
                     )
                     continue
 
-            docx_class = classify_by_count(len(images))
-            logger.debug(f"  {docx_path.name}: {len(images)} 張圖 → {docx_class}")
-
             small_bucket: list[ScanResult] = []
-            large_hit_count = 0
+            large_rows: list[ScanResult] = []
+            expanded = False
 
-            for img_name, img_bytes in images:
-                total += 1
-                if docx_class == "small":
-                    result = scan_image_mol_only(docx_path.name, img_name, img_bytes)
-                    small_bucket.append(result)
-                else:
-                    result = scan_image_large(
-                        docx_path.name, img_name, img_bytes,
-                        roi_filter=roi_filter,
+            if docx_class == "small":
+                # small 不分層：最多 3 張圖、只掃一個佔頁面 7% 的 mol ROI，最壞
+                # 也才 2.3 分鐘；而 1~2 張圖的 docx 與 TIER1_IMAGES 可能毫無交集，
+                # 過濾會把它掃成零張、產出一筆與真的讀不到無從分辨的「全無命中」。
+                for img_name, img_bytes in images:
+                    total += 1
+                    small_bucket.append(
+                        scan_image_mol_only(docx_path.name, img_name, img_bytes)
                     )
-                    if result:
-                        decide_result(result)
-                        hits += 1
-                        large_hit_count += 1
-                        if result.hit_roi == "permit_upper":
-                            upper_hits += 1
-                        elif result.hit_roi == "permit_lower":
-                            lower_hits += 1
-                        writer.writerow(result.to_csv_row())
-                        logger.info(
-                            f"★ {docx_path.name}/{img_name}"
-                            f"  [{docx_class}|{result.hit_roi}]"
-                            f"  mol={result.mol!r} id={result.id!r}"
-                            f"  final={result.final_value!r}"
-                            f"  vision={result.vision_review!r}"
-                        )
-                    else:
-                        logger.debug(f"  {docx_path.name} / {img_name}  未命中")
+            else:
+                large_docs += 1
+                tier1, rest = (images, []) if full_scan else split_tiers(images)
+
+                large_rows = _scan_tier(docx_path.name, tier1, roi_filter, 1)
+                total += len(tier1)
+
+                if has_permit_vote(large_rows):
+                    tier1_docs += 1
+                elif rest:
+                    expanded = True
+                    expanded_docs += 1
+                    logger.info(
+                        f"  ↻ {docx_path.name} 第一層({len(tier1)}張)無 permit 多數票"
+                        f" → 擴掃其餘 {len(rest)} 張"
+                    )
+                    large_rows += _scan_tier(docx_path.name, rest, roi_filter, 2)
+                    total += len(rest)
+
+                for result in large_rows:
+                    hits += 1
+                    if result.hit_roi == "permit_upper":
+                        upper_hits += 1
+                    elif result.hit_roi == "permit_lower":
+                        lower_hits += 1
+                    writer.writerow(result.to_csv_row())
+
+            large_hit_count = len(large_rows)
 
             # large 全無命中：寫一列佔位記錄,供後續人工審查，並存 image2/5/6 原圖
             if docx_class == "large" and large_hit_count == 0:
@@ -2059,6 +2152,10 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
                 fallback.note          = "large:全無命中"
                 fallback.manual_review = "Y"
                 fallback.status        = ResultStatus.LARGE_NO_HIT
+                # 全無命中的份不會有任何命中列,這張佔位列是它在 CSV 裡的唯一
+                # 代表。擴掃過就得標 2 —— 否則「大量擴掃且仍沒命中」(規則過期
+                # 最典型的表現)在 scan_tier 欄上完全看不出來。
+                fallback.scan_tier     = 2 if expanded else 1
                 writer.writerow(fallback.to_csv_row())
                 saved = _save_review_images(docx_path, images, {2, 5, 6})
                 logger.info(
@@ -2090,6 +2187,14 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
     logger.info(f"掃描完成：{total} 張圖，命中 {hits} 張，耗時 {elapsed}s")
     if upper_hits + lower_hits > 0:
         logger.info(f"  permit 上半命中：{upper_hits} 張 / 下半命中：{lower_hits} 張")
+    if large_docs:
+        # 這行是分層規則的體檢報告：命中率一旦崩掉,代表文件版面變了、第一層
+        # 押錯位置,此時每份都會擴掃、總時間反而比全掃更長(ADR-0005)。
+        mode = "全掃模式" if full_scan else f"第一層{sorted(TIER1_IMAGES)}"
+        logger.info(
+            f"  {mode}：{tier1_docs}/{large_docs} 份一次命中，"
+            f"擴掃 {expanded_docs} 份"
+        )
     return csv_path
 
 
@@ -2118,7 +2223,8 @@ def main(opts: argparse.Namespace) -> None:
 
     # ── 步驟 2：scan → matches.csv ─────────────────────────────────────────
     logger.info("── 步驟 2：Tesseract 掃描 ──")
-    csv_path = run_scan(docx_files, image_filter=opts.image, roi_filter=opts.roi)
+    csv_path = run_scan(docx_files, image_filter=opts.image, roi_filter=opts.roi,
+                        full_scan=opts.full_scan)
     logger.info(f"  matches.csv 已輸出：{csv_path.resolve()}")
 
     # ── 步驟 3：vision_submit 分流 ─────────────────────────────────────────
@@ -2254,6 +2360,10 @@ def _parse_args() -> argparse.Namespace:
                         help="配合 --file，只處理 docx 內指定的圖檔名")
     parser.add_argument("--roi",   "-r", metavar="ROI",   default="",
                         help=f"只掃指定 ROI：{list(ROI_REGIONS.keys())}")
+    parser.add_argument("--full-scan", action="store_true",
+                        help=(f"關掉分層掃描，large docx 的每張圖都掃"
+                              f"（平時只掃 image{sorted(TIER1_IMAGES)}，"
+                              f"拿不到 permit 多數票才擴掃）"))
     opts = parser.parse_args()
     # 驗證 --roi（過去在 __main__ 內驗證後寫到 globals()，現於此處驗證後由 main 直接讀 opts.roi）
     if opts.roi:
