@@ -21,9 +21,24 @@ pipeline.py
   pip install pytesseract pillow numpy google-cloud-vision google-auth
               google-api-python-client
 
-Google 認證：
-  設定環境變數 GOOGLE_APPLICATION_CREDENTIALS 指向 Service Account JSON 金鑰檔，
-  或在程式內改用 OAuth 2.0。
+Google 認證（ADC + 服務帳戶模擬，不使用金鑰檔）：
+  本程式不再讀取 service_account.json。憑證改由 ADC（應用程式預設憑證）提供，
+  由操作者本人登入後模擬服務帳戶取得短期權杖。
+
+  新機器一次性設定：
+    gcloud auth application-default login --impersonate-service-account=<SA_EMAIL>
+    gcloud auth application-default set-quota-project <PROJECT_ID>
+
+  前置條件：
+    1. 操作者需具備該 SA 的 roles/iam.serviceAccountTokenCreator
+    2. 專案需啟用 IAM Service Account Credentials API（iamcredentials.googleapis.com）
+    3. 目標試算表需分享給該 SA 的信箱（Drive 層級權限，與 IAM 無關）
+
+  驗證憑證是否可用：
+    python pipeline.py --preflight-only
+
+  改用模擬而非金鑰檔的理由：不再有長期憑證檔案需要在機器間複製與保管，
+  且稽核日誌會記錄「哪個真人模擬了這個 SA」，而非只看到 SA 本身。
 """
 
 import re
@@ -54,7 +69,11 @@ from google.api_core import exceptions as gax_exceptions
 # Google Sheets
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from google.oauth2 import service_account
+
+# 認證：ADC（應用程式預設憑證）。不再 import google.oauth2.service_account —
+# 這支程式已不讀取任何金鑰檔，憑證一律由 google.auth.default() 取得。
+import google.auth
+import google.auth.exceptions
 
 # 許可證 → 機構資料(名稱／地址／電話)查表(來源:data.gov.tw 6682 名冊)
 from permit_lookup import PermitLookup
@@ -111,11 +130,16 @@ SHEET_NAME     = "工作表1"                        # ← 改為實際工作表
 # 欄位順序由 _row_to_sheet_values() 組裝決定；若需改順序在那裡調整。
 # 注意：Sheet 標題列需自行補上 E~O 各欄標題（程式 append 不會寫標題列）。
 
-# Service Account 金鑰路徑（或設環境變數 GOOGLE_APPLICATION_CREDENTIALS）
-SERVICE_ACCOUNT_JSON = os.environ.get(
-    "GOOGLE_APPLICATION_CREDENTIALS", "service_account.json"
-)
+# ─── 認證 scope ───────────────────────────────────────────────────────────
+# Sheets 需要明確要求 spreadsheets scope；Vision client 自行要求 cloud-platform。
+# 走模擬時這些 scope 是「要為 SA 換取哪種權杖」的宣告，由程式端決定，
+# 不需要在 gcloud auth application-default login 時用 --scopes 指定。
 SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+# preflight 用：預期的模擬目標 SA。留空則不檢查身分，只檢查憑證是否存在。
+# 設定它的好處是能擋掉「登入成了但忘了加 --impersonate-service-account」這種
+# 會一路跑到 Sheets 403 才爆的情況。
+EXPECTED_SA_EMAIL = os.environ.get("PIPELINE_SA_EMAIL", "")
 
 # 信心門檻
 CONF_KEY_IN       = 55   # 高於此值直接 key-in；低於則標記送 Google Vision
@@ -1336,14 +1360,14 @@ def build_vision_queue(csv_path: Path) -> tuple[list[VisionQueueItem], list[dict
 def get_vision_client() -> gvision.ImageAnnotatorClient:
     """Vision client 在整個進程內共用一個實例（lazy + cached）。
 
-    過去每次 run_google_vision() 都會重新讀取 service_account.json 並建立
-    新 client，浪費 IO 與 TLS 連線。改成 lru_cache 後第一次建立、之後重用。
+    憑證來源為 ADC：不帶 credentials 參數時，client library 會自行呼叫
+    google.auth.default()，取到 %APPDATA%\\gcloud\\application_default_credentials.json
+    裡的憑證。若該檔案是以 --impersonate-service-account 產生的，函式庫會自動
+    走模擬流程換取 SA 的短期權杖，這裡不需要任何額外程式碼。
+
+    lru_cache 的理由不變：避免每次 run_google_vision() 重建 client 與 TLS 連線。
     """
-    credentials = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_JSON,
-        scopes=["https://www.googleapis.com/auth/cloud-platform"],
-    )
-    return gvision.ImageAnnotatorClient(credentials=credentials)
+    return gvision.ImageAnnotatorClient()
 
 
 @with_retry(
@@ -1603,10 +1627,12 @@ UPLOAD_LOG_PATH = OUTPUT_DIR / "upload_log.csv"
 
 @functools.lru_cache(maxsize=1)
 def get_sheets_service():
-    """Sheets service 在整個進程內共用（lazy + cached）。"""
-    creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_JSON, scopes=SHEETS_SCOPES
-    )
+    """Sheets service 在整個進程內共用（lazy + cached）。
+
+    與 Vision 不同，Sheets 必須明確傳入 scopes——googleapiclient 不會自己推斷，
+    漏掉會在第一次寫入時回 "Request had insufficient authentication scopes"。
+    """
+    creds, _ = google.auth.default(scopes=SHEETS_SCOPES)
     return build("sheets", "v4", credentials=creds)
 
 
@@ -2209,8 +2235,265 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
     return csv_path
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ⑨' preflight：啟動前環境與憑證檢查
+# ═══════════════════════════════════════════════════════════════════════════
+# 這一段存在的理由：改用 ADC 模擬之後，「能不能跑」取決於六件散在不同地方的事
+# （Tesseract、ADC 憑證、模擬身分、TokenCreator 權限、iamcredentials API、
+# 試算表分享設定）。任何一項沒設好，程式原本都會在跑到一半時才炸，而且錯誤
+# 訊息長得都很像 403，很難分辨是哪一層。
+#
+# preflight 把這些檢查提前到啟動的前三秒，並且——這才是重點——每個失敗都直接
+# 印出對應的修復指令。新機器上手時，照著錯誤訊息貼指令就會通。
+#
+# 刻意不做的事：不呼叫 Vision API。建 client 不花額度，實際送圖要花 1 unit，
+# 為了健康檢查每次啟動燒一格額度不划算。Vision 的權限問題會在 Sheets 檢查
+# （同一組憑證、同一條模擬鏈路）就先被抓到。
+
+@dataclass
+class CheckResult:
+    name: str
+    ok: bool
+    detail: str = ""
+    fix: str = ""          # 失敗時要印給使用者的修復指令／說明
+
+
+def _check_tesseract() -> CheckResult:
+    """Tesseract 執行檔與語言包。"""
+    exe = pytesseract.pytesseract.tesseract_cmd
+    if not Path(exe).exists():
+        return CheckResult(
+            "Tesseract 執行檔", False, f"找不到 {exe}",
+            "安裝 Tesseract-OCR，或修改 pipeline.py 頂端的 "
+            "pytesseract.pytesseract.tesseract_cmd 指向實際安裝路徑",
+        )
+    try:
+        ver = pytesseract.get_tesseract_version()
+    except Exception as e:
+        return CheckResult("Tesseract 執行檔", False, repr(e),
+                           "確認 Tesseract 可正常執行")
+    # 語言包：TESS_LANG 形如 "ind+eng"
+    want = set(TESS_LANG.split("+"))
+    try:
+        have = set(pytesseract.get_languages(config=""))
+    except Exception:
+        # 舊版 pytesseract 沒有 get_languages()，跳過語言包檢查而非誤報失敗
+        return CheckResult("Tesseract 執行檔", True, f"v{ver}（語言包未檢查）")
+    missing = want - have
+    if missing:
+        return CheckResult(
+            "Tesseract 語言包", False, f"缺少 {sorted(missing)}",
+            "重跑 Tesseract 安裝程式並勾選對應語言，或手動把 .traineddata "
+            "放進 tessdata 資料夾",
+        )
+    return CheckResult("Tesseract 執行檔", True, f"v{ver}，語言包 {TESS_LANG} 齊全")
+
+
+def _check_adc() -> tuple[CheckResult, object]:
+    """ADC 憑證是否存在。回傳 (檢查結果, credentials 物件或 None)。"""
+    try:
+        creds, project = google.auth.default(scopes=SHEETS_SCOPES)
+    except google.auth.exceptions.DefaultCredentialsError as e:
+        return CheckResult(
+            "ADC 憑證", False, str(e).split("\n")[0],
+            "gcloud auth application-default login "
+            "--impersonate-service-account=<SA_EMAIL>",
+        ), None
+    return CheckResult("ADC 憑證", True, f"已載入（quota project: {project or '未設定'}）"), creds
+
+
+def _check_impersonation(creds) -> CheckResult:
+    """確認 ADC 走的是模擬、且模擬目標正確。
+
+    這一項抓的是最常見的設定失誤：login 時忘了加
+    --impersonate-service-account。那種情況下憑證是「你本人」，Vision 可能
+    還能跑（你自己有權限），但 Sheets 會 403（試算表只分享給 SA 沒分享給你），
+    而錯誤訊息完全看不出根因。
+    """
+    mod = type(creds).__module__
+
+    # 情況一：ADC 解析到金鑰檔。這是本檢查最重要的一項——
+    # google.auth.default() 會優先採用環境變數 GOOGLE_APPLICATION_CREDENTIALS，
+    # 而那正是這支程式改版前指向 service_account.json 的地方。若它還留在系統中，
+    # 程式會繼續用金鑰跑，整個改版等於沒生效。
+    # 不能只用 hasattr(creds, "service_account_email") 判斷：金鑰憑證同樣有這個
+    # 屬性，看起來與模擬毫無差別，會誤判為通過。必須看憑證的實際型別。
+    if mod.startswith("google.oauth2.service_account"):
+        env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+        src = f"環境變數 GOOGLE_APPLICATION_CREDENTIALS={env}" if env else "ADC 設定"
+        return CheckResult(
+            "模擬身分", False,
+            f"目前用的是服務帳戶金鑰檔，不是模擬（來源：{src}）",
+            "清除環境變數 GOOGLE_APPLICATION_CREDENTIALS："
+            "Windows → 系統內容 → 環境變數 → 刪除該筆 → 重開終端機後再試",
+        )
+
+    if not mod.startswith("google.auth.impersonated_credentials"):
+        return CheckResult(
+            "模擬身分", False,
+            f"目前的 ADC 是使用者憑證（{mod}），未啟用服務帳戶模擬",
+            "gcloud auth application-default login "
+            "--impersonate-service-account=<SA_EMAIL>",
+        )
+
+    sa_email = getattr(creds, "service_account_email", None)
+    if not sa_email:
+        return CheckResult(
+            "模擬身分", False, "無法判讀模擬目標",
+            "gcloud auth application-default login "
+            "--impersonate-service-account=<SA_EMAIL>",
+        )
+    if EXPECTED_SA_EMAIL and sa_email != EXPECTED_SA_EMAIL:
+        return CheckResult(
+            "模擬身分", False,
+            f"模擬的是 {sa_email}，但預期為 {EXPECTED_SA_EMAIL}",
+            "重新登入並指定正確的 SA，或修正環境變數 PIPELINE_SA_EMAIL",
+        )
+    return CheckResult("模擬身分", True, f"模擬 {sa_email}")
+
+
+def _check_token(creds) -> CheckResult:
+    """實際換一次權杖。
+
+    這是唯一能同時驗證「TokenCreator 角色」與「iamcredentials API 已啟用」
+    的檢查——前面的檢查都只看本機檔案，這一項才真的打到 Google。
+    """
+    try:
+        from google.auth.transport.requests import Request
+        creds.refresh(Request())
+    except Exception as e:
+        msg = str(e)
+        if "iamcredentials" in msg or "has not been used in project" in msg:
+            fix = ("在 Cloud Console 啟用 IAM Service Account Credentials API"
+                   "（iamcredentials.googleapis.com）")
+        elif "getAccessToken" in msg or "PERMISSION_DENIED" in msg or "403" in msg:
+            fix = ("在該服務帳戶的「權限」分頁，授予你的帳號"
+                   " roles/iam.serviceAccountTokenCreator（授權後最長需 7 分鐘生效）")
+        else:
+            fix = "gcloud auth application-default login --impersonate-service-account=<SA_EMAIL>"
+        return CheckResult("取得權杖", False, msg.split("\n")[0][:200], fix)
+    return CheckResult("取得權杖", True, "已成功換取短期存取權杖")
+
+
+def _check_sheets() -> CheckResult:
+    """讀取試算表 metadata：一次驗證 scope、Drive 分享權限、工作表名稱。"""
+    try:
+        service = get_sheets_service()
+        meta = service.spreadsheets().get(
+            spreadsheetId=SPREADSHEET_ID,
+            fields="properties.title,sheets.properties.title",
+        ).execute()
+    except HttpError as e:
+        status = getattr(e.resp, "status", 0)
+        if status == 403:
+            fix = ("開啟該試算表 →「共用」→ 把服務帳戶的信箱加為「編輯者」。"
+                   "（這是 Google Drive 的分享權限，與 GCP IAM 是兩套系統）")
+        elif status == 404:
+            fix = f"確認 SPREADSHEET_ID 是否正確：{SPREADSHEET_ID}"
+        else:
+            fix = "檢查 Sheets API 是否已在專案中啟用"
+        return CheckResult("Google Sheets 存取", False, f"HTTP {status}: {e}"[:200], fix)
+    except Exception as e:
+        return CheckResult("Google Sheets 存取", False, repr(e)[:200],
+                           "檢查網路與憑證設定")
+
+    titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
+    if SHEET_NAME not in titles:
+        return CheckResult(
+            "工作表名稱", False,
+            f"找不到工作表 {SHEET_NAME!r}，實際有：{titles}",
+            f"修改 pipeline.py 的 SHEET_NAME 為上列其中之一",
+        )
+    return CheckResult(
+        "Google Sheets 存取", True,
+        f"《{meta['properties']['title']}》→ 工作表 {SHEET_NAME!r} 可存取",
+    )
+
+
+def _check_vision_client() -> CheckResult:
+    """只建立 client，不送圖（送圖會消耗 1 unit 免費額度）。"""
+    try:
+        get_vision_client()
+    except Exception as e:
+        return CheckResult("Vision client", False, repr(e)[:200],
+                           "確認 Cloud Vision API 已在專案中啟用")
+    return CheckResult("Vision client", True, "已建立（未實際呼叫，不消耗額度）")
+
+
+def _check_dirs() -> CheckResult:
+    """輸入資料夾與 permit_lookup 名冊。"""
+    problems = []
+    if not INPUT_DIR.exists():
+        problems.append(f"輸入資料夾不存在：{INPUT_DIR.resolve()}")
+    elif not list_input_docx():
+        problems.append(f"輸入資料夾內沒有 .docx：{INPUT_DIR.resolve()}")
+    if _permit_lookup() is None:
+        problems.append("仲介名冊載入失敗（機構名稱/地址/電話欄會留空，不影響許可證判讀）")
+    if problems:
+        return CheckResult("輸入資料", False, "；".join(problems),
+                           "建立 ./docs 並放入待處理的 .docx；確認 permit_lookup 的名冊資料檔存在")
+    return CheckResult("輸入資料", True, f"{len(list_input_docx())} 份 .docx 待處理")
+
+
+def run_preflight(require_input: bool = True) -> bool:
+    """依序執行所有檢查，全部通過回傳 True。
+
+    憑證相關的檢查是有順序相依的（沒有 ADC 就談不上模擬與換權杖），
+    所以前一項失敗時後續直接標記為「略過」，避免印出一堆衍生的假錯誤，
+    讓使用者一眼看到真正的根因在哪一行。
+    """
+    logger.info("── preflight：環境與憑證檢查 ──")
+    results: list[CheckResult] = [_check_tesseract()]
+
+    adc_result, creds = _check_adc()
+    results.append(adc_result)
+    if creds is not None:
+        imp = _check_impersonation(creds)
+        results.append(imp)
+        tok = _check_token(creds)
+        results.append(tok)
+        if tok.ok:
+            results.append(_check_vision_client())
+            results.append(_check_sheets())
+        else:
+            results.append(CheckResult("Vision client", False, "（因無法取得權杖而略過）"))
+            results.append(CheckResult("Google Sheets 存取", False, "（因無法取得權杖而略過）"))
+    else:
+        for n in ("模擬身分", "取得權杖", "Vision client", "Google Sheets 存取"):
+            results.append(CheckResult(n, False, "（因無 ADC 憑證而略過）"))
+
+    if require_input:
+        results.append(_check_dirs())
+
+    for r in results:
+        logger.info(f"  {'✔' if r.ok else '✘'} {r.name}：{r.detail}")
+
+    failed = [r for r in results if not r.ok]
+    if not failed:
+        logger.info("  preflight 全數通過")
+        return True
+
+    logger.error(f"── preflight 未通過（{len(failed)} 項）──")
+    for r in failed:
+        if r.fix:
+            logger.error(f"  [{r.name}] 修復方式：")
+            logger.error(f"      {r.fix}")
+    logger.error("  排除後重跑；只想重新檢查可用 --preflight-only")
+    return False
+
+
 def main(opts: argparse.Namespace) -> None:
     """主流程。接收已解析的 CLI options，不再依賴 module-level 全域變數。"""
+    # ── 步驟 0：preflight ──────────────────────────────────────────────────
+    # 放在最前面的理由：掃描階段可能跑數十分鐘，跑完才發現 Sheets 沒權限、
+    # 結果寫不進去，等於整批白做。憑證問題要在花時間之前就攔下來。
+    if not opts.skip_preflight:
+        # 指定 --file 時輸入來源是那個檔案，不需要檢查 ./docs 有沒有東西
+        if not run_preflight(require_input=not opts.file):
+            return
+    if opts.preflight_only:
+        return
+
     # ── 決定要掃哪些 docx ──────────────────────────────────────────────────
     if opts.file:
         target = Path(opts.file)
@@ -2375,7 +2658,13 @@ def _parse_args() -> argparse.Namespace:
                         help=(f"關掉分層掃描，large docx 的每張圖都掃"
                               f"（平時只掃 image{sorted(TIER1_IMAGES)}，"
                               f"拿不到 permit 多數票才擴掃）"))
+    parser.add_argument("--preflight-only", action="store_true",
+                        help="只執行環境與憑證檢查後結束，不處理任何 docx")
+    parser.add_argument("--skip-preflight", action="store_true",
+                        help="略過啟動檢查（確定環境沒問題、想省幾秒時使用）")
     opts = parser.parse_args()
+    if opts.preflight_only and opts.skip_preflight:
+        parser.error("--preflight-only 與 --skip-preflight 互斥")
     # 驗證 --roi（過去在 __main__ 內驗證後寫到 globals()，現於此處驗證後由 main 直接讀 opts.roi）
     if opts.roi:
         valid_rois = list(ROI_REGIONS.keys())
