@@ -20,17 +20,23 @@ pipeline.py
 環境需求：
   pip install pytesseract pillow numpy google-cloud-vision google-auth
               google-api-python-client
+  共用套件 gcp-identity 由下述設定腳本安裝（pip install -e），不列在上面——
+  它靠本機路徑安裝，而路徑在每台機器上不同。
 
-Google 認證（ADC + 服務帳戶模擬，不使用金鑰檔）：
-  本程式不再讀取 service_account.json。憑證改由 ADC（應用程式預設憑證）提供，
-  由操作者本人登入後模擬服務帳戶取得短期權杖。
+Google 認證（程式內服務帳戶模擬，不使用金鑰檔）：
+  本程式不讀取 service_account.json。操作者本人登入一次取得 ADC，程式再模擬
+  服務帳戶換取短期權杖。模擬目標是本檔的 SA_EMAIL 常數。
 
-  新機器一次性設定：
-    gcloud auth application-default login --impersonate-service-account=<SA_EMAIL>
-    gcloud auth application-default set-quota-project <PROJECT_ID>
+  新機器一次性設定：執行共用腳本 setup-google-adc.bat（每台機器一次，
+  供該機器上所有專案共用）。它做的事等同於：
+    gcloud auth application-default login
+  ⚠️ 刻意「不加」--impersonate-service-account：ADC 是機器全域的單一檔案、
+     只能記一個模擬目標，寫進去多專案就無法各用不同服務帳戶。模擬改由程式做，
+     計費專案由 with_quota_project() 設定，不需要改 ADC 的 JSON 檔。
 
   前置條件：
     1. 操作者需具備該 SA 的 roles/iam.serviceAccountTokenCreator
+       （授權後最長需 7 分鐘生效）
     2. 專案需啟用 IAM Service Account Credentials API（iamcredentials.googleapis.com）
     3. 目標試算表需分享給該 SA 的信箱（Drive 層級權限，與 IAM 無關）
 
@@ -39,6 +45,7 @@ Google 認證（ADC + 服務帳戶模擬，不使用金鑰檔）：
 
   改用模擬而非金鑰檔的理由：不再有長期憑證檔案需要在機器間複製與保管，
   且稽核日誌會記錄「哪個真人模擬了這個 SA」，而非只看到 SA 本身。
+  完整決策脈絡見 foreign-worker-query 的 docs/adr/0002。
 """
 
 import re
@@ -70,10 +77,12 @@ from google.api_core import exceptions as gax_exceptions
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-# 認證：ADC（應用程式預設憑證）。不再 import google.oauth2.service_account —
-# 這支程式已不讀取任何金鑰檔，憑證一律由 google.auth.default() 取得。
-import google.auth
-import google.auth.exceptions
+# 認證：不讀取任何金鑰檔。執行者以自己的公司 Google 帳號登入一次（共用設定
+# 腳本 setup-google-adc.bat 負責），模擬服務帳號由 gcp_identity 在程式內完成。
+# 為什麼模擬不在 gcloud 登入時做：ADC 是機器全域的單一檔案、只能記一個模擬
+# 目標，多專案各用不同服務帳號時會互相覆蓋。見 gcp_identity/credentials.py。
+from gcp_identity import ProjectIdentity
+from gcp_identity import checks as gchecks
 
 # 許可證 → 機構資料(名稱／地址／電話)查表(來源:data.gov.tw 6682 名冊)
 from permit_lookup import PermitLookup
@@ -136,10 +145,15 @@ SHEET_NAME     = "工作表1"                        # ← 改為實際工作表
 # 不需要在 gcloud auth application-default login 時用 --scopes 指定。
 SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-# preflight 用：預期的模擬目標 SA。留空則不檢查身分，只檢查憑證是否存在。
-# 設定它的好處是能擋掉「登入成了但忘了加 --impersonate-service-account」這種
-# 會一路跑到 Sheets 403 才爆的情況。
-EXPECTED_SA_EMAIL = os.environ.get("PIPELINE_SA_EMAIL", "")
+# ─── Google 身分 ─────────────────────────────────────────────────────────
+# 要模擬哪個服務帳號、用量記到哪個 GCP 專案。這兩個值不是密鑰（光有它們拿不到
+# 任何權限），因此寫在這裡進版控，所有使用者共用同一組、clone 下來不必修改。
+# 環境變數僅供臨時切換。
+SA_EMAIL       = os.environ.get(
+    "PIPELINE_SA_EMAIL", "lina-ocr@extreme-display-505910-s8.iam.gserviceaccount.com")
+GCP_PROJECT_ID = os.environ.get("PIPELINE_GCP_PROJECT", "extreme-display-505910-s8")
+
+IDENTITY = ProjectIdentity(SA_EMAIL, GCP_PROJECT_ID, label="LinaOCRproject")
 
 # 信心門檻
 CONF_KEY_IN       = 55   # 高於此值直接 key-in；低於則標記送 Google Vision
@@ -1360,14 +1374,14 @@ def build_vision_queue(csv_path: Path) -> tuple[list[VisionQueueItem], list[dict
 def get_vision_client() -> gvision.ImageAnnotatorClient:
     """Vision client 在整個進程內共用一個實例（lazy + cached）。
 
-    憑證來源為 ADC：不帶 credentials 參數時，client library 會自行呼叫
-    google.auth.default()，取到 %APPDATA%\\gcloud\\application_default_credentials.json
-    裡的憑證。若該檔案是以 --impersonate-service-account 產生的，函式庫會自動
-    走模擬流程換取 SA 的短期權杖，這裡不需要任何額外程式碼。
+    憑證「明確傳入」，不讓 client library 自己去拿 ADC：ADC 現在是執行者本人的
+    使用者憑據，用它直接打 Vision 會以「你本人」的身分呼叫——那可能還是通的
+    （你自己有權限），但 Sheets 會 403（試算表分享給服務帳號、沒分享給你），
+    而錯誤訊息完全看不出根因。統一走 IDENTITY 就沒有這個歧義。
 
     lru_cache 的理由不變：避免每次 run_google_vision() 重建 client 與 TLS 連線。
     """
-    return gvision.ImageAnnotatorClient()
+    return gvision.ImageAnnotatorClient(credentials=IDENTITY.credentials())
 
 
 @with_retry(
@@ -1631,9 +1645,10 @@ def get_sheets_service():
 
     與 Vision 不同，Sheets 必須明確傳入 scopes——googleapiclient 不會自己推斷，
     漏掉會在第一次寫入時回 "Request had insufficient authentication scopes"。
+    走模擬時 scopes 是「要為服務帳號換取哪種權杖」的宣告，由程式端決定。
     """
-    creds, _ = google.auth.default(scopes=SHEETS_SCOPES)
-    return build("sheets", "v4", credentials=creds)
+    return build("sheets", "v4",
+                 credentials=IDENTITY.credentials(tuple(SHEETS_SCOPES)))
 
 
 def _load_upload_log() -> set[tuple[str, str]]:
@@ -2289,90 +2304,54 @@ def _check_tesseract() -> CheckResult:
     return CheckResult("Tesseract 執行檔", True, f"v{ver}，語言包 {TESS_LANG} 齊全")
 
 
-def _check_adc() -> tuple[CheckResult, object]:
-    """ADC 憑證是否存在。回傳 (檢查結果, credentials 物件或 None)。"""
-    try:
-        creds, project = google.auth.default(scopes=SHEETS_SCOPES)
-    except google.auth.exceptions.DefaultCredentialsError as e:
-        return CheckResult(
-            "ADC 憑證", False, str(e).split("\n")[0],
-            "gcloud auth application-default login "
-            "--impersonate-service-account=<SA_EMAIL>",
-        ), None
-    return CheckResult("ADC 憑證", True, f"已載入（quota project: {project or '未設定'}）"), creds
+def _adapt(r: "gchecks.CheckResult") -> CheckResult:
+    """把共用套件的檢查結果轉成本檔的 CheckResult。
 
-
-def _check_impersonation(creds) -> CheckResult:
-    """確認 ADC 走的是模擬、且模擬目標正確。
-
-    這一項抓的是最常見的設定失誤：login 時忘了加
-    --impersonate-service-account。那種情況下憑證是「你本人」，Vision 可能
-    還能跑（你自己有權限），但 Sheets 會 403（試算表只分享給 SA 沒分享給你），
-    而錯誤訊息完全看不出根因。
+    共用套件多帶一個 blame（該由執行者或由管理者處理）。本檔的 preflight 只印
+    name/detail/fix，所以把 blame 併進 fix 的開頭，資訊不流失。
     """
-    mod = type(creds).__module__
+    fix = r.fix
+    if not r.ok and r.blame == gchecks.ADMIN:
+        fix = "【需 GCP 專案管理者處理，不是你的設定問題】\n      " + fix
+    return CheckResult(r.name, r.ok, r.detail, fix)
 
-    # 情況一：ADC 解析到金鑰檔。這是本檢查最重要的一項——
-    # google.auth.default() 會優先採用環境變數 GOOGLE_APPLICATION_CREDENTIALS，
-    # 而那正是這支程式改版前指向 service_account.json 的地方。若它還留在系統中，
-    # 程式會繼續用金鑰跑，整個改版等於沒生效。
-    # 不能只用 hasattr(creds, "service_account_email") 判斷：金鑰憑證同樣有這個
-    # 屬性，看起來與模擬毫無差別，會誤判為通過。必須看憑證的實際型別。
-    if mod.startswith("google.oauth2.service_account"):
-        env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-        src = f"環境變數 GOOGLE_APPLICATION_CREDENTIALS={env}" if env else "ADC 設定"
+
+def _check_adc() -> tuple[CheckResult, object]:
+    """ADC 憑證是否存在、且是「執行者本人的使用者憑據」。
+
+    型別判斷（金鑰檔殘留／雙層模擬／本人憑據）全在共用套件裡，因為每個專案都
+    會踩到同一批坑，不該有多份副本。回傳 (檢查結果, credentials 或 None)。
+    """
+    result, creds = gchecks.check_adc()
+    return _adapt(result), creds
+
+
+def _check_impersonation() -> CheckResult:
+    """確認要模擬的服務帳號已設定。
+
+    型別檢查（金鑰檔殘留／雙層模擬）已移到 _check_adc 走的共用套件，這裡只剩
+    「本專案要模擬誰」這件事——它現在是 pipeline.py 的常數而不是 ADC 的內容，
+    所以是純本機檢查，不打 Google。真正驗證權限的是下一項 _check_token。
+    """
+    if not IDENTITY.sa_email or not IDENTITY.project_id:
         return CheckResult(
-            "模擬身分", False,
-            f"目前用的是服務帳戶金鑰檔，不是模擬（來源：{src}）",
-            "清除環境變數 GOOGLE_APPLICATION_CREDENTIALS："
-            "Windows → 系統內容 → 環境變數 → 刪除該筆 → 重開終端機後再試",
+            "模擬身分", False, "SA_EMAIL 或 GCP_PROJECT_ID 未設定",
+            "在 pipeline.py 填入服務帳號信箱與 GCP 專案 ID"
+            "（或設環境變數 PIPELINE_SA_EMAIL / PIPELINE_GCP_PROJECT）",
         )
-
-    if not mod.startswith("google.auth.impersonated_credentials"):
-        return CheckResult(
-            "模擬身分", False,
-            f"目前的 ADC 是使用者憑證（{mod}），未啟用服務帳戶模擬",
-            "gcloud auth application-default login "
-            "--impersonate-service-account=<SA_EMAIL>",
-        )
-
-    sa_email = getattr(creds, "service_account_email", None)
-    if not sa_email:
-        return CheckResult(
-            "模擬身分", False, "無法判讀模擬目標",
-            "gcloud auth application-default login "
-            "--impersonate-service-account=<SA_EMAIL>",
-        )
-    if EXPECTED_SA_EMAIL and sa_email != EXPECTED_SA_EMAIL:
-        return CheckResult(
-            "模擬身分", False,
-            f"模擬的是 {sa_email}，但預期為 {EXPECTED_SA_EMAIL}",
-            "重新登入並指定正確的 SA，或修正環境變數 PIPELINE_SA_EMAIL",
-        )
-    return CheckResult("模擬身分", True, f"模擬 {sa_email}")
+    return CheckResult("模擬身分", True,
+                       f"將模擬 {IDENTITY.sa_email}（計費：{IDENTITY.project_id}）")
 
 
-def _check_token(creds) -> CheckResult:
+def _check_token() -> CheckResult:
     """實際換一次權杖。
 
     這是唯一能同時驗證「TokenCreator 角色」與「iamcredentials API 已啟用」
     的檢查——前面的檢查都只看本機檔案，這一項才真的打到 Google。
+    注意換的是「模擬後」的權杖，不是執行者本人的憑據——後者 refresh 成功不代表
+    你有權限模擬服務帳號，所以本函式刻意不接受 credentials 參數。
     """
-    try:
-        from google.auth.transport.requests import Request
-        creds.refresh(Request())
-    except Exception as e:
-        msg = str(e)
-        if "iamcredentials" in msg or "has not been used in project" in msg:
-            fix = ("在 Cloud Console 啟用 IAM Service Account Credentials API"
-                   "（iamcredentials.googleapis.com）")
-        elif "getAccessToken" in msg or "PERMISSION_DENIED" in msg or "403" in msg:
-            fix = ("在該服務帳戶的「權限」分頁，授予你的帳號"
-                   " roles/iam.serviceAccountTokenCreator（授權後最長需 7 分鐘生效）")
-        else:
-            fix = "gcloud auth application-default login --impersonate-service-account=<SA_EMAIL>"
-        return CheckResult("取得權杖", False, msg.split("\n")[0][:200], fix)
-    return CheckResult("取得權杖", True, "已成功換取短期存取權杖")
+    return _adapt(gchecks.check_token(IDENTITY))
 
 
 def _check_sheets() -> CheckResult:
@@ -2445,12 +2424,14 @@ def run_preflight(require_input: bool = True) -> bool:
     logger.info("── preflight：環境與憑證檢查 ──")
     results: list[CheckResult] = [_check_tesseract()]
 
-    adc_result, creds = _check_adc()
+    # 以 adc_result.ok 而非「creds 是否為 None」判斷：ADC 檢查在「解析到金鑰檔」
+    # 這類情況下仍會回傳一個 credentials 物件，只是型別不對。用 creds 判斷會讓
+    # 後續檢查照跑並全數失敗，把真正的根因埋在一串衍生錯誤裡。
+    adc_result, _ = _check_adc()
     results.append(adc_result)
-    if creds is not None:
-        imp = _check_impersonation(creds)
-        results.append(imp)
-        tok = _check_token(creds)
+    if adc_result.ok:
+        results.append(_check_impersonation())
+        tok = _check_token()
         results.append(tok)
         if tok.ok:
             results.append(_check_vision_client())
@@ -2460,7 +2441,7 @@ def run_preflight(require_input: bool = True) -> bool:
             results.append(CheckResult("Google Sheets 存取", False, "（因無法取得權杖而略過）"))
     else:
         for n in ("模擬身分", "取得權杖", "Vision client", "Google Sheets 存取"):
-            results.append(CheckResult(n, False, "（因無 ADC 憑證而略過）"))
+            results.append(CheckResult(n, False, "（因 ADC 憑證不可用而略過）"))
 
     if require_input:
         results.append(_check_dirs())

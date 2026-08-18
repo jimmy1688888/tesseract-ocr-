@@ -53,10 +53,31 @@ _ensure_module("google.api_core.exceptions", {
 })
 
 # google.oauth2.service_account
+# pipeline.py 已不再使用金鑰檔（見 foreign-worker-query/docs/adr/0002）。
+# 這個 stub 留著只為了讓沒裝 google-auth 的環境仍能 import。
 _ensure_module("google.oauth2.service_account", {
     "Credentials": type("Credentials", (), {
         "from_service_account_file": staticmethod(lambda *a, **kw: None)
     })
+})
+
+# gcp_identity（共用套件，靠本機路徑 pip install -e 安裝）
+# 測試不該要求它已安裝：認證是執行期的事，而測試碰不到 Google。
+class _StubProjectIdentity:
+    def __init__(self, sa_email, project_id, label=""):
+        self.sa_email, self.project_id, self.label = sa_email, project_id, label
+
+    def credentials(self, scopes=()):
+        raise AssertionError("測試不應真的取得 Google 憑據")
+
+
+class _StubChecks:
+    SELF, ADMIN = "self", "admin"
+
+
+_ensure_module("gcp_identity", {
+    "ProjectIdentity": _StubProjectIdentity,
+    "checks": _StubChecks,
 })
 
 # googleapiclient
