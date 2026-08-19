@@ -2364,7 +2364,12 @@ def _check_sheets() -> CheckResult:
         ).execute()
     except HttpError as e:
         status = getattr(e.resp, "status", 0)
-        if status == 403:
+        # 計費專案不可用也是 403，但修的是 GCP IAM 而不是 Drive 共用。
+        # 必須排在分享那一支之前，否則會叫人去重做一件已經做對的事。
+        qfix = status == 403 and gchecks.quota_project_fix(IDENTITY, str(e))
+        if qfix:
+            fix = qfix
+        elif status == 403:
             fix = ("開啟該試算表 →「共用」→ 把服務帳戶的信箱加為「編輯者」。"
                    "（這是 Google Drive 的分享權限，與 GCP IAM 是兩套系統）")
         elif status == 404:
