@@ -34,6 +34,11 @@ from address_db import fold_variants
 ROSTER_JSON_URL = "https://apiservice.mol.gov.tw/OdService/download/A17000000J-020001-QHy"
 ROSTER_PATH = Path(__file__).with_name("data") / "agency_roster.json"
 ROSTER_STALE_DAYS = 30   # 超過此天數只記提示,仍照常使用
+# 自建補充仲介:官方名冊尚未收錄或資料已變更者。
+# 不直接改 agency_roster.json(原檔重新下載會整份覆蓋,手改的列會靜靜消失,
+# 而且是下次跑才發現那家又查不到)。補充檔小、進版控、跨機同步——與
+# address_db 的 custom_roads.json 同一個模式。
+CUSTOM_ROSTER_PATH = Path(__file__).with_name("data") / "custom_agencies.json"
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +57,32 @@ def fetch_roster(path: Path = ROSTER_PATH) -> list[dict]:
     age_days = (time.time() - path.stat().st_mtime) / 86400
     if age_days > ROSTER_STALE_DAYS:
         logger.info(f"名冊檔已 {age_days:.0f} 天未更新({path}),建議手動重新下載。")
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    return merge_custom_agencies(json.loads(path.read_text(encoding="utf-8-sig")))
+
+
+def merge_custom_agencies(records: list[dict],
+                          path: Path = CUSTOM_ROSTER_PATH) -> list[dict]:
+    """把自建補充仲介併入名冊,回傳合併後的清單(不改動輸入)。
+
+    同一張許可證兩邊都有時**自訂優先**:會手動加一筆,正是因為官方那筆不合用
+    (常見是新設分公司尚未收錄,或名稱/電話已變更而名冊未更新)。比對用
+    _parse_permit 的正規化結果,所以自訂寫 "9001" 也蓋得掉官方的 "09001"。
+
+    補充檔缺失或格式壞掉一律安靜跳過:那是個可有可無的補丁,不該讓它擋掉整份
+    官方名冊——後者才是許可證與仲介機構之間的權威對照。
+    """
+    try:
+        extra = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return records
+    if not isinstance(extra, list) or not extra:
+        return records
+    keys = {_parse_permit(str(e.get("許可證", ""))) for e in extra}
+    keys.discard(None)
+    kept = [r for r in records
+            if _parse_permit(str(r.get("許可證", ""))) not in keys]
+    logger.info(f"名冊補充 {len(extra)} 筆(覆蓋官方 {len(records) - len(kept)} 筆):{path}")
+    return kept + extra
 
 
 def _parse_permit(permit: str) -> tuple[int, str] | None:
