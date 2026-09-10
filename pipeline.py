@@ -134,8 +134,12 @@ SHEET_NAME     = "工作表1"                        # ← 改為實際工作表
 # 每列寫入 15 欄：A=source_docx, B=final_value(許可證), C=status, D=reason,
 #              E=機構名稱, F=機構地址, G=電話（E~G 由 permit_lookup 查名冊補上）,
 #              H=雇主名稱_中, I=雇主名稱_英, J=雇主地址_中(標準), K=雇主地址_中(OCR),
-#              L=雇主地址_英(標準), M=雇主地址_英(OCR), N=郵遞區號, O=雇主電話
+#              L=疑慮標示, M=雇主地址_英(OCR), N=郵遞區號, O=雇主電話
+#              （L 欄原規劃放英文標準地址,已取消輸出、改放疑慮標示；權威來源是
+#                下方的 _EMPLOYER_COL_KEYS,理由見它旁邊的註解）
 #              （H~O 由 employer_extract 於寫入前逐 docx 擷取；契約頁 OCR 失敗該列留空）
+#              P=已核（人審簽名/日期,**只由人填**；程式只 append A~O,永不寫 P。
+#                gemini_bench.py fetch-truth 只認 P 欄非空的列當回測集）
 # 欄位順序由 _row_to_sheet_values() 組裝決定；若需改順序在那裡調整。
 # 注意：Sheet 標題列需自行補上 E~O 各欄標題（程式 append 不會寫標題列）。
 

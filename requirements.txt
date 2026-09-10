@@ -20,6 +20,11 @@ google-cloud-vision>=3.4.0,<4.0.0        # Vision API 交叉比對 / 雇主契�
 google-api-python-client>=2.100.0,<3.0.0 # Sheets API 寫入
 google-auth>=2.20.0,<3.0.0               # Service Account 認證
 
+# ── Gemini 離線比對（僅 gemini_bench.py 需要，主流程用不到）─────────────────
+# 走 Vertex AI（vertexai=True）而非 AI Studio 免費層：免費層的影像會被用於改善
+# Google 產品，而這裡送的是含身分證號的移工契約。見 docs/adr/0008。
+google-genai>=1.0.0,<2.0.0
+
 # ── 名冊匯出(僅 export_roster_xlsx.py 需要,主流程用不到)────────────────
 openpyxl>=3.1.0,<4.0.0            # 名冊 JSON → Excel,供人工查看
 
