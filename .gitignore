@@ -22,6 +22,9 @@ docs/*
 # 架構檢視存檔（無個資）——供後續維護參考
 !docs/reviews/
 !docs/reviews/**
+# 交接文件（無個資）納入版控：換機器/換 session 時要看得到。
+# 檔名固定為 交接.md（見 CLAUDE.md 的約定），所以單檔 negate 就夠，不需要整個目錄。
+!docs/交接.md
 work/
 output/
 *.docx
