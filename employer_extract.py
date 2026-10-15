@@ -697,8 +697,8 @@ def vision_full_text(image_bytes: bytes, client=None) -> str:
     from google.cloud import vision as gvision
 
     if client is None:
-        from pipeline import get_vision_client
-        client = get_vision_client()
+        from google_clients import vision_client
+        client = vision_client()
     resp = client.document_text_detection(image=gvision.Image(content=image_bytes))
     if resp.error.message:
         raise RuntimeError(f"Vision API 錯誤: {resp.error.message}")
@@ -995,8 +995,8 @@ def _apply_pledge_rescue(fields: dict, docx_path: str, client=None) -> None:
 
 def _ab_compare(img_path: str, dump: str = "", roi: tuple | None = EMPLOYER_ROI) -> None:
     """單張圖:在同一個 ROI 內比較「去紅章前 vs 後」的雇主欄位差異。"""
-    from pipeline import get_vision_client
-    client = get_vision_client()
+    from google_clients import vision_client
+    client = vision_client()
 
     with open(img_path, "rb") as f:
         raw = f.read()

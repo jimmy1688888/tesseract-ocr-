@@ -25,7 +25,7 @@ pipeline.py
 
 Google 認證（程式內服務帳戶模擬，不使用金鑰檔）：
   本程式不讀取 service_account.json。操作者本人登入一次取得 ADC，程式再模擬
-  服務帳戶換取短期權杖。模擬目標是本檔的 SA_EMAIL 常數。
+  服務帳戶換取短期權杖。模擬目標是 identity.py 的 SA_EMAIL 常數。
 
   新機器一次性設定：執行共用腳本 setup-google-adc.bat（每台機器一次，
   供該機器上所有專案共用）。它做的事等同於：
@@ -55,7 +55,6 @@ import time
 import zipfile
 import logging
 import argparse
-import os
 import functools
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, asdict
@@ -74,15 +73,12 @@ from google.cloud import vision as gvision
 from google.api_core import exceptions as gax_exceptions
 
 # Google Sheets
-from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-# 認證：不讀取任何金鑰檔。執行者以自己的公司 Google 帳號登入一次（共用設定
-# 腳本 setup-google-adc.bat 負責），模擬服務帳號由 gcp_identity 在程式內完成。
-# 為什麼模擬不在 gcloud 登入時做：ADC 是機器全域的單一檔案、只能記一個模擬
-# 目標，多專案各用不同服務帳號時會互相覆蓋。見 gcp_identity/credentials.py。
-from gcp_identity import ProjectIdentity
-from gcp_identity import checks as gchecks
+# Google 身分與用它建好的 client（不讀取任何金鑰檔，見 identity.py）。
+# 本檔不持有身分：要 client 跟 google_clients 要，要身分跟 identity 要。
+import identity
+import google_clients
 
 # 許可證 → 機構資料(名稱／地址／電話)查表(來源:data.gov.tw 6682 名冊)
 from permit_lookup import PermitLookup
@@ -128,9 +124,7 @@ TESS_LANG  = "ind+eng"
 # 後續 .convert("RGB") 會處理調色盤/灰階,Tesseract 與 Vision 都吃得下。
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif"}
 
-# Google Sheets
-SPREADSHEET_ID = "1zL5sRhaJHHXd-FBcY7rEm28Sfhz48l32gBwn-ATHalM"
-SHEET_NAME     = "工作表1"                        # ← 改為實際工作表名稱
+# Google Sheets：試算表 ID 與工作表名稱在 google_clients.py。
 # 每列寫入 15 欄：A=source_docx, B=final_value(許可證), C=status, D=reason,
 #              E=機構名稱, F=機構地址, G=電話（E~G 由 permit_lookup 查名冊補上）,
 #              H=雇主名稱_中, I=雇主名稱_英, J=雇主地址_中(標準), K=雇主地址_中(OCR),
@@ -138,22 +132,7 @@ SHEET_NAME     = "工作表1"                        # ← 改為實際工作表
 #              （H~O 由 employer_extract 於寫入前逐 docx 擷取；契約頁 OCR 失敗該列留空）
 # 欄位順序由 _row_to_sheet_values() 組裝決定；若需改順序在那裡調整。
 # 注意：Sheet 標題列需自行補上 E~O 各欄標題（程式 append 不會寫標題列）。
-
-# ─── 認證 scope ───────────────────────────────────────────────────────────
-# Sheets 需要明確要求 spreadsheets scope；Vision client 自行要求 cloud-platform。
-# 走模擬時這些 scope 是「要為 SA 換取哪種權杖」的宣告，由程式端決定，
-# 不需要在 gcloud auth application-default login 時用 --scopes 指定。
-SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-
-# ─── Google 身分 ─────────────────────────────────────────────────────────
-# 要模擬哪個服務帳號、用量記到哪個 GCP 專案。這兩個值不是密鑰（光有它們拿不到
-# 任何權限），因此寫在這裡進版控，所有使用者共用同一組、clone 下來不必修改。
-# 環境變數僅供臨時切換。
-SA_EMAIL       = os.environ.get(
-    "PIPELINE_SA_EMAIL", "lina-ocr@extreme-display-505910-s8.iam.gserviceaccount.com")
-GCP_PROJECT_ID = os.environ.get("PIPELINE_GCP_PROJECT", "extreme-display-505910-s8")
-
-IDENTITY = ProjectIdentity(SA_EMAIL, GCP_PROJECT_ID, label="LinaOCRproject")
+# 要模擬哪個服務帳號、用量記到哪個 GCP 專案：見 identity.py。
 
 # 信心門檻
 CONF_KEY_IN       = 55   # 高於此值直接 key-in；低於則標記送 Google Vision
@@ -1370,20 +1349,6 @@ def build_vision_queue(csv_path: Path) -> tuple[list[VisionQueueItem], list[dict
 # ⑧ Google Vision
 # ═══════════════════════════════════════════════════════════════════════════
 
-@functools.lru_cache(maxsize=1)
-def get_vision_client() -> gvision.ImageAnnotatorClient:
-    """Vision client 在整個進程內共用一個實例（lazy + cached）。
-
-    憑證「明確傳入」，不讓 client library 自己去拿 ADC：ADC 現在是執行者本人的
-    使用者憑據，用它直接打 Vision 會以「你本人」的身分呼叫——那可能還是通的
-    （你自己有權限），但 Sheets 會 403（試算表分享給服務帳號、沒分享給你），
-    而錯誤訊息完全看不出根因。統一走 IDENTITY 就沒有這個歧義。
-
-    lru_cache 的理由不變：避免每次 run_google_vision() 重建 client 與 TLS 連線。
-    """
-    return gvision.ImageAnnotatorClient(credentials=IDENTITY.credentials())
-
-
 @with_retry(
     max_attempts=4,
     initial_wait=2.0,
@@ -1402,7 +1367,7 @@ def run_google_vision(img_path: str) -> str:
     Vision API 屬讀取操作（idempotent），重試安全。連線錯誤或 5xx/429 會自動重試；
     4xx 其他錯誤（403/404 等）直接拋出，不會浪費時間重試。
     """
-    client = get_vision_client()
+    client = google_clients.vision_client()
     with open(img_path, "rb") as f:
         content = f.read()
     image    = gvision.Image(content=content)
@@ -1639,18 +1604,6 @@ def verify_vision_result(
 UPLOAD_LOG_PATH = OUTPUT_DIR / "upload_log.csv"
 
 
-@functools.lru_cache(maxsize=1)
-def get_sheets_service():
-    """Sheets service 在整個進程內共用（lazy + cached）。
-
-    與 Vision 不同，Sheets 必須明確傳入 scopes——googleapiclient 不會自己推斷，
-    漏掉會在第一次寫入時回 "Request had insufficient authentication scopes"。
-    走模擬時 scopes 是「要為服務帳號換取哪種權杖」的宣告，由程式端決定。
-    """
-    return build("sheets", "v4",
-                 credentials=IDENTITY.credentials(tuple(SHEETS_SCOPES)))
-
-
 def _load_upload_log() -> set[tuple[str, str]]:
     """讀取本地上傳日誌，回傳已寫入過的 (source_docx, status) 集合。
 
@@ -1705,11 +1658,11 @@ def _sheets_append_atomic(values: list[list[str]]) -> None:
     Google Sheets 的 values.append 本身在 API 層就是 atomic：成功就全寫入，
     失敗就完全不寫。配合 with_retry 處理連線抖動 / 429 / 5xx。
     """
-    service = get_sheets_service()
+    service = google_clients.sheets_service()
     body = {"values": values}
     service.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f"{SHEET_NAME}!A1",
+        spreadsheetId=google_clients.SPREADSHEET_ID,
+        range=f"{google_clients.SHEET_NAME}!A1",
         valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body=body,
@@ -1770,7 +1723,7 @@ def collect_employer_fields(docx_files) -> None:
     except Exception as e:
         logger.warning(f"  ⚠ employer_extract 載入失敗,雇主欄(H~O)本次全部留空:{e!r}")
         return
-    client = get_vision_client()
+    client = google_clients.vision_client()
     texts: dict[str, dict] = {}
     for dp in docx_files:
         name = Path(dp).name
@@ -1875,7 +1828,7 @@ def rescue_manual_review_via_agency_phone(
         return 0
     try:
         from employer_extract import agency_block_from_next_page
-        client = get_vision_client()
+        client = google_clients.vision_client()
     except Exception as e:
         logger.warning(f"  ⚠ 電話反查救援不可用(略過):{e!r}")
         return 0
@@ -2264,6 +2217,9 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
 # 刻意不做的事：不呼叫 Vision API。建 client 不花額度，實際送圖要花 1 unit，
 # 為了健康檢查每次啟動燒一格額度不划算。Vision 的權限問題會在 Sheets 檢查
 # （同一組憑證、同一條模擬鏈路）就先被抓到。
+#
+# 共用套件的檢查（gcp_identity.checks）在各函式裡才 import：pipeline 本身不該
+# 因為一個只有 preflight 用到的套件沒裝，就整個 import 不了。
 
 @dataclass
 class CheckResult:
@@ -2310,6 +2266,7 @@ def _adapt(r: "gchecks.CheckResult") -> CheckResult:
     共用套件多帶一個 blame（該由執行者或由管理者處理）。本檔的 preflight 只印
     name/detail/fix，所以把 blame 併進 fix 的開頭，資訊不流失。
     """
+    from gcp_identity import checks as gchecks
     fix = r.fix
     if not r.ok and r.blame == gchecks.ADMIN:
         fix = "【需 GCP 專案管理者處理，不是你的設定問題】\n      " + fix
@@ -2322,6 +2279,7 @@ def _check_adc() -> tuple[CheckResult, object]:
     型別判斷（金鑰檔殘留／雙層模擬／本人憑據）全在共用套件裡，因為每個專案都
     會踩到同一批坑，不該有多份副本。回傳 (檢查結果, credentials 或 None)。
     """
+    from gcp_identity import checks as gchecks
     result, creds = gchecks.check_adc()
     return _adapt(result), creds
 
@@ -2330,17 +2288,18 @@ def _check_impersonation() -> CheckResult:
     """確認要模擬的服務帳號已設定。
 
     型別檢查（金鑰檔殘留／雙層模擬）已移到 _check_adc 走的共用套件，這裡只剩
-    「本專案要模擬誰」這件事——它現在是 pipeline.py 的常數而不是 ADC 的內容，
+    「本專案要模擬誰」這件事——它現在是 identity.py 的常數而不是 ADC 的內容，
     所以是純本機檢查，不打 Google。真正驗證權限的是下一項 _check_token。
     """
-    if not IDENTITY.sa_email or not IDENTITY.project_id:
+    ident = identity.current()
+    if not ident.sa_email or not ident.project_id:
         return CheckResult(
             "模擬身分", False, "SA_EMAIL 或 GCP_PROJECT_ID 未設定",
-            "在 pipeline.py 填入服務帳號信箱與 GCP 專案 ID"
+            "在 identity.py 填入服務帳號信箱與 GCP 專案 ID"
             "（或設環境變數 PIPELINE_SA_EMAIL / PIPELINE_GCP_PROJECT）",
         )
     return CheckResult("模擬身分", True,
-                       f"將模擬 {IDENTITY.sa_email}（計費：{IDENTITY.project_id}）")
+                       f"將模擬 {ident.sa_email}（計費：{ident.project_id}）")
 
 
 def _check_token() -> CheckResult:
@@ -2351,29 +2310,32 @@ def _check_token() -> CheckResult:
     注意換的是「模擬後」的權杖，不是執行者本人的憑據——後者 refresh 成功不代表
     你有權限模擬服務帳號，所以本函式刻意不接受 credentials 參數。
     """
-    return _adapt(gchecks.check_token(IDENTITY))
+    from gcp_identity import checks as gchecks
+    return _adapt(gchecks.check_token(identity.current()))
 
 
 def _check_sheets() -> CheckResult:
     """讀取試算表 metadata：一次驗證 scope、Drive 分享權限、工作表名稱。"""
+    spreadsheet_id, sheet_name = google_clients.SPREADSHEET_ID, google_clients.SHEET_NAME
     try:
-        service = get_sheets_service()
+        service = google_clients.sheets_service()
         meta = service.spreadsheets().get(
-            spreadsheetId=SPREADSHEET_ID,
+            spreadsheetId=spreadsheet_id,
             fields="properties.title,sheets.properties.title",
         ).execute()
     except HttpError as e:
         status = getattr(e.resp, "status", 0)
         # 計費專案不可用也是 403，但修的是 GCP IAM 而不是 Drive 共用。
         # 必須排在分享那一支之前，否則會叫人去重做一件已經做對的事。
-        qfix = status == 403 and gchecks.quota_project_fix(IDENTITY, str(e))
+        from gcp_identity import checks as gchecks
+        qfix = status == 403 and gchecks.quota_project_fix(identity.current(), str(e))
         if qfix:
             fix = qfix
         elif status == 403:
             fix = ("開啟該試算表 →「共用」→ 把服務帳戶的信箱加為「編輯者」。"
                    "（這是 Google Drive 的分享權限，與 GCP IAM 是兩套系統）")
         elif status == 404:
-            fix = f"確認 SPREADSHEET_ID 是否正確：{SPREADSHEET_ID}"
+            fix = f"確認 google_clients.py 的 SPREADSHEET_ID 是否正確：{spreadsheet_id}"
         else:
             fix = "檢查 Sheets API 是否已在專案中啟用"
         return CheckResult("Google Sheets 存取", False, f"HTTP {status}: {e}"[:200], fix)
@@ -2382,22 +2344,22 @@ def _check_sheets() -> CheckResult:
                            "檢查網路與憑證設定")
 
     titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
-    if SHEET_NAME not in titles:
+    if sheet_name not in titles:
         return CheckResult(
             "工作表名稱", False,
-            f"找不到工作表 {SHEET_NAME!r}，實際有：{titles}",
-            f"修改 pipeline.py 的 SHEET_NAME 為上列其中之一",
+            f"找不到工作表 {sheet_name!r}，實際有：{titles}",
+            "修改 google_clients.py 的 SHEET_NAME 為上列其中之一",
         )
     return CheckResult(
         "Google Sheets 存取", True,
-        f"《{meta['properties']['title']}》→ 工作表 {SHEET_NAME!r} 可存取",
+        f"《{meta['properties']['title']}》→ 工作表 {sheet_name!r} 可存取",
     )
 
 
 def _check_vision_client() -> CheckResult:
     """只建立 client，不送圖（送圖會消耗 1 unit 免費額度）。"""
     try:
-        get_vision_client()
+        google_clients.vision_client()
     except Exception as e:
         return CheckResult("Vision client", False, repr(e)[:200],
                            "確認 Cloud Vision API 已在專案中啟用")

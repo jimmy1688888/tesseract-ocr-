@@ -335,12 +335,13 @@ class TestVisionTextIsPersisted:
                             lambda *a, **k: (_ for _ in ()).throw(OSError("nope")))
         assert pipeline.write_employer_texts({"a.docx": {"text": "x"}}) == 0
 
-    def test_text_is_moved_out_of_the_row_cache(self, tmp_path, monkeypatch):
+    def test_text_is_moved_out_of_the_row_cache(
+        self, tmp_path, monkeypatch, offline_identity
+    ):
         """全文另存後不留在快取:快取組每一列時都會查,夾一大塊文字只是負擔。"""
         import pipeline
         monkeypatch.setattr(pipeline, "EMPLOYER_TEXT_PATH",
                             tmp_path / "employer_texts.json")
-        monkeypatch.setattr(pipeline, "get_vision_client", lambda: None)
         monkeypatch.setattr(
             "employer_extract.extract_employer_from_docx",
             lambda *a, **k: {"雇主名稱_中": "王小明", "疑慮標示": "",
