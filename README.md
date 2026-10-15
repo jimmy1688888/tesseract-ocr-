@@ -87,7 +87,8 @@ pip install -r requirements.txt
 
 ## Google 服務設定
 
-需要一個 **Service Account**，並啟用兩個 API。
+**不使用金鑰檔。** 操作者用自己的公司 Google 帳號登入一次，程式再「模擬」服務帳號
+換取短期權杖。沒有長期憑證檔需要在機器間複製保管，稽核日誌也記得到「哪個真人」用了服務帳號。
 
 ### Step 1：建立 / 選擇 Google Cloud 專案
 前往 https://console.cloud.google.com/
@@ -96,14 +97,30 @@ pip install -r requirements.txt
 「API 和服務」→「程式庫」啟用：
 - **Google Sheets API**
 - **Cloud Vision API**
+- **IAM Service Account Credentials API**（`iamcredentials.googleapis.com`，模擬要用）
 
-### Step 3：建立 Service Account 金鑰
-「憑證」→「建立憑證」→「服務帳戶」→ 建好後 →「金鑰」→「新增金鑰」→ JSON。
-下載後存為 **`service_account.json`** 放專案根目錄，或設環境變數 `GOOGLE_APPLICATION_CREDENTIALS` 指向它。
+### Step 3：服務帳號與權限（管理者做一次）
+1. 建一個服務帳號（**不要**建立金鑰），把它的信箱填進 `identity.py` 的 `SA_EMAIL`、
+   專案 ID 填進 `GCP_PROJECT_ID`。兩者都不是密鑰，已進版控、所有人共用。
+2. 在該服務帳號的「權限」分頁，授予每位操作者的公司帳號
+   **`roles/iam.serviceAccountTokenCreator`**（授權後最長需 7 分鐘生效）。
+3. 新開的專案還要在專案 IAM 頁把服務帳號自己加為主體，角色
+   **Service Usage Consumer**，否則 Sheets 會回一個看起來像「沒分享」的 403。
 
 ### Step 4：分享試算表
-把金鑰內 `client_email` 加入你的 Google Sheet 共用，權限**編輯者**。
+把**服務帳號的信箱**（`identity.py` 的 `SA_EMAIL`）加入 Google Sheet 共用，權限**編輯者**。
 並在 `google_clients.py` 設定 `SPREADSHEET_ID` 與 `SHEET_NAME`（預設 `工作表1`）。
+
+### Step 5：每台機器登入一次
+雙擊 `重新登入.bat`，或手動執行：
+
+```bash
+gcloud auth application-default login
+```
+
+⚠️ **不要**加 `--impersonate-service-account` —— 模擬由程式負責，登入時再指定會變成雙層模擬而失敗。
+
+設定完用 `python pipeline.py --preflight-only` 檢查，每一項失敗都會印出修復方式。
 
 ---
 
@@ -129,7 +146,6 @@ pip install -r requirements.txt
 專案根目錄/
 ├── pipeline.py                 # 主程式
 ├── permit_lookup.py            # 許可證 → 機構資料 查表
-├── service_account.json        # Google 金鑰（自行放置）
 ├── docs/                       # 放要處理的 .docx
 │   └── *.docx
 ├── data/
@@ -484,7 +500,8 @@ data/agency_roster.json# 仲介名冊（自行下載，不進版控）
 data/AllData.json      # 全國門牌地址庫（自行下載/複製，不進版控）
 data/custom_roads.json # 自建補充路名（官方庫缺的新路加這裡，進版控）
 scan_results/          # matches.csv 與裁切圖（不進版控）
-service_account.json   # Google 金鑰（不進版控）
+identity.py            # Google 身分：要模擬的服務帳號、計費專案
+google_clients.py      # Vision client / Sheets service、試算表 ID 與工作表名稱
 ```
 
 執行測試：
@@ -504,8 +521,13 @@ Tesseract 沒裝或路徑不對。確認已安裝，並檢查 `pipeline.py` 頂�
 安裝 Tesseract 時沒勾印尼語言包。重裝勾選，或下載 `ind.traineddata` 放 `tessdata/`。
 
 **Q3：Sheets 寫入失敗 / 403**
-- `service_account.json` 未設定，或試算表沒分享給該 `client_email`
-- 未啟用 Google Sheets API / Cloud Vision API
+先跑 `python pipeline.py --preflight-only`，它會指出是哪一層、該誰處理。常見原因：
+- 這台機器還沒登入（跑 `重新登入.bat`）
+- 你沒有服務帳號的 `roles/iam.serviceAccountTokenCreator`
+- 試算表沒分享給服務帳號的信箱（`identity.py` 的 `SA_EMAIL`）
+- 新專案的服務帳號缺 Service Usage Consumer（也是 403，但修的是 GCP IAM，不是試算表分享）
+- 未啟用 Google Sheets API / Cloud Vision API / IAM Service Account Credentials API
+- 系統裡還留著環境變數 `GOOGLE_APPLICATION_CREDENTIALS`（指向舊金鑰檔），請刪除
 
 **Q4：機構名稱/地址/電話 欄空白**
 名冊檔 `data/agency_roster.json` 不存在或許可證查無。前者請依「仲介名冊設定」下載。
