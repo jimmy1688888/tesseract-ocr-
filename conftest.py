@@ -11,7 +11,14 @@ import types
 from pathlib import Path
 
 # ─── 路徑設定 ──────────────────────────────────────────────────────────────
-ROOT = Path(__file__).resolve().parent.parent
+# 是 .parent 不是 .parent.parent：本檔就在 repo 根目錄，parent.parent 會插到
+# repo 的上一層（C:\projects），等於什麼都沒做。
+#
+# 寫錯了也不會被發現，因為平常有兩層東西替它做事：pytest 預設的 import mode
+# 會把 rootdir 塞進 sys.path，而 `python -m pytest` 又會把 cwd 塞進 sys.path[0]。
+# 兩層都拿掉才看得到：`pytest --import-mode=importlib`（用執行檔，不是 python -m）
+# 在寫錯時會收集失敗、報 ModuleNotFoundError: No module named 'pipeline'。
+ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 
