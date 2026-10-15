@@ -2404,14 +2404,17 @@ def _check_vision_client() -> CheckResult:
     return CheckResult("Vision client", True, "已建立（未實際呼叫，不消耗額度）")
 
 
-def _check_dirs(input_dir: Path | None = None) -> CheckResult:
+def _check_dirs() -> CheckResult:
     """有沒有東西可處理。沒有就不必開跑，所以這一項是閘門。
 
     刻意不檢查仲介名冊：名冊是降級來源不是閘門，見 _warn_if_roster_unavailable。
-    input_dir 可注入是為了測試——預設在呼叫時才讀 INPUT_DIR，不綁在預設參數上。
+
+    INPUT_DIR 在這裡讀、並明確傳給 list_input_docx：後者的預設參數在 def 時就綁死
+    了（:586），無參呼叫永遠看原始的 ./docs。兩處要看同一個資料夾，否則會出現
+    「說資料夾是空的，卻掃了另一個資料夾」這種對不起來的錯誤訊息。
     """
-    d = INPUT_DIR if input_dir is None else input_dir
-    fix = f"建立 {d} 並放入待處理的 .docx"
+    d = INPUT_DIR
+    fix = f"建立 {d.resolve()} 並放入待處理的 .docx"
     if not d.exists():
         return CheckResult("輸入資料", False, f"輸入資料夾不存在：{d.resolve()}", fix)
     files = list_input_docx(d)
@@ -2420,8 +2423,8 @@ def _check_dirs(input_dir: Path | None = None) -> CheckResult:
     return CheckResult("輸入資料", True, f"{len(files)} 份 .docx 待處理")
 
 
-def _warn_if_roster_unavailable() -> bool:
-    """名冊載不起來就說出來，但不擋。回傳名冊是否可用。
+def _warn_if_roster_unavailable() -> None:
+    """名冊載不起來就說出來，但不擋。
 
     為什麼這不是一個 CheckResult：preflight 的結果列只放「不通過就不該開跑」的
     項目，而名冊不屬於那一類。_permit_lookup 的降級設計、_agency_cols 查無時回
@@ -2430,13 +2433,11 @@ def _warn_if_roster_unavailable() -> bool:
 
     但降級也不等於沉默：E~G 會整欄是空的，人得先知道，否則會以為是名冊查無此證。
     """
-    if _permit_lookup() is not None:
-        return True
-    logger.warning(
-        "  ⚠ 仲介名冊載入失敗：機構名稱／地址／電話（E~G 欄）本批將留空。"
-        "許可證判讀不受影響，整批照常處理。"
-    )
-    return False
+    if _permit_lookup() is None:
+        logger.warning(
+            "  ⚠ 仲介名冊載入失敗：機構名稱／地址／電話（E~G 欄）本批將留空。"
+            "許可證判讀不受影響，整批照常處理。"
+        )
 
 
 def run_preflight(require_input: bool = True) -> bool:
