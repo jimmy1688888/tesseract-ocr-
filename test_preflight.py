@@ -142,6 +142,22 @@ class TestRosterIsNotAGate:
             pipeline.run_preflight(require_input=True)
         assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
+    def test_single_file_mode_also_warns_about_roster(
+        self, caplog, empty_dir, roster_unavailable, google_checks_pass
+    ):
+        """`--file` 指定單一檔案時（require_input=False）也要印這句警告。
+
+        這是一個刻意的取捨，不是順手：單檔模式常是「補跑漏掉的那一份」，E~G
+        一樣會留空，最不該跑完才發現仲介欄空白。代價是連 --preflight-only 都會
+        提早載 2.2MB 名冊——已確認接受。
+
+        empty_dir 讓輸入資料夾是空的：證明這個模式確實跳過了輸入閘門（還是回
+        True），卻仍然印出名冊警告。
+        """
+        with caplog.at_level(logging.WARNING, logger=pipeline.logger.name):
+            assert pipeline.run_preflight(require_input=False) is True
+        assert any("名冊" in r.message for r in caplog.records)
+
 
 class TestSheetRowSurvivesRosterFailure:
     """接力第三段：放行之後，寫出去的那一列長什麼樣。
