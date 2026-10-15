@@ -110,6 +110,37 @@ class TestClients:
         google_clients.vision_client(injected)
         assert injected.asked == [()]
 
+    def test_falsy_identity_is_still_used(self):
+        """「有沒有注入」看的是 None,不是真假值 —— 替身若判為假,不能被默默換掉。"""
+        class Falsy(RecordingIdentity):
+            def __bool__(self):
+                return False
+
+        injected = Falsy(creds=_usable_creds())
+        google_clients.sheets_service(injected)
+        google_clients.vision_client(injected)
+        assert injected.asked == [tuple(google_clients.SHEETS_SCOPES), ()]
+
+    def test_old_identity_is_let_go(self, offline_identity):
+        """換了身分之後,快取不再抓著舊身分。
+
+        共用套件的權杖快取掛在身分實例上;快取若一直抓著舊實例,identity.reset()
+        就只重設了一半 —— 舊的權杖還活在 client 快取的鍵裡。
+        """
+        import gc
+        import weakref
+
+        old = RecordingIdentity(creds=_usable_creds())
+        google_clients.sheets_service(old)
+        google_clients.vision_client(old)
+        gone = weakref.ref(old)
+        del old
+
+        google_clients.sheets_service(offline_identity)
+        google_clients.vision_client(offline_identity)
+        gc.collect()
+        assert gone() is None
+
     def test_default_comes_from_installed_identity(self, offline_identity):
         google_clients.sheets_service()
         google_clients.vision_client()
@@ -152,10 +183,13 @@ class TestNoPipelineNeeded:
             "from google.auth.credentials import AnonymousCredentials\n"
             "ident = identity.current()\n"
             "assert ident.sa_email == identity.SA_EMAIL\n"
+            "asked = []\n"
             "class Anon:\n"
-            "    def credentials(self, scopes=()): return AnonymousCredentials()\n"
-            "assert google_clients.sheets_service(Anon()) is not None\n"
-            "assert google_clients.SPREADSHEET_ID\n"
+            "    def credentials(self, scopes=()):\n"
+            "        asked.append(tuple(scopes)); return AnonymousCredentials()\n"
+            "svc = google_clients.sheets_service(Anon())\n"
+            "assert hasattr(svc, 'spreadsheets'), type(svc)\n"
+            "assert asked == [tuple(google_clients.SHEETS_SCOPES)], asked\n"
             "assert 'pipeline' not in sys.modules, 'pipeline 被拖進來了'\n"
             "assert 'employer_extract' not in sys.modules\n"
         )

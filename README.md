@@ -103,7 +103,7 @@ pip install -r requirements.txt
 
 ### Step 4：分享試算表
 把金鑰內 `client_email` 加入你的 Google Sheet 共用，權限**編輯者**。
-並在 `pipeline.py` 設定 `SPREADSHEET_ID` 與 `SHEET_NAME`（預設 `工作表1`）。
+並在 `google_clients.py` 設定 `SPREADSHEET_ID` 與 `SHEET_NAME`（預設 `工作表1`）。
 
 ---
 
@@ -442,14 +442,23 @@ INPUT_DIR  = Path("./docs")          # 來源 .docx
 OUTPUT_DIR = Path("./scan_results")  # matches.csv 與裁切圖
 TESS_LANG  = "ind+eng"               # Tesseract 語言
 
-SPREADSHEET_ID = "..."               # 目標試算表 ID
-SHEET_NAME     = "工作表1"            # 分頁名稱
-
 CONF_KEY_IN       = 55   # 高於此值直接 key-in，低於則送 Vision
 CONF_VOTE_MIN     = 45   # permit 多數票平均信心低於此值才送 Vision
 CONF_MOL_VOTE_MIN = 50   # small docx mol 多數票高於此值直接 key-in
 CONF_NOVOTE_RESCUE_MAX = 50  # 單一判讀 conf 低於此才走次頁仲介反查（否則維持原 Vision 覆核）
 SMALL_DOCX_THRESHOLD = 3 # 圖片數 ≤ 此值 → small
+```
+
+Google 相關的設定不在 `pipeline.py`：
+
+```python
+# google_clients.py
+SPREADSHEET_ID = "..."               # 目標試算表 ID
+SHEET_NAME     = "工作表1"            # 分頁名稱
+
+# identity.py（環境變數 PIPELINE_SA_EMAIL / PIPELINE_GCP_PROJECT 可臨時覆蓋）
+SA_EMAIL       = "..."               # 要模擬的服務帳號
+GCP_PROJECT_ID = "..."               # 用量記到哪個 GCP 專案
 ```
 
 `permit_lookup.py` 的仲介反查門檻：

@@ -53,7 +53,9 @@ def reset() -> None:
     """丟掉目前的身分，下次 current() 重建。
 
     共用套件的權杖快取（ProjectIdentity._cache）掛在實例上，所以丟掉實例就是
-    重設那一層 —— 不必碰它的私有屬性。依身分快取的 client 見 google_clients.reset。
+    重設那一層 —— 不必碰它的私有屬性。用舊身分建的 client 不會再被拿出來：
+    google_clients 在下一個身分要 client 時就換掉它（並放開舊實例）；要立刻清掉
+    見 google_clients.reset。
     """
     global _current
     _current = None

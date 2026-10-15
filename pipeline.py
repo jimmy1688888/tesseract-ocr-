@@ -2217,9 +2217,6 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
 # 刻意不做的事：不呼叫 Vision API。建 client 不花額度，實際送圖要花 1 unit，
 # 為了健康檢查每次啟動燒一格額度不划算。Vision 的權限問題會在 Sheets 檢查
 # （同一組憑證、同一條模擬鏈路）就先被抓到。
-#
-# 共用套件的檢查（gcp_identity.checks）在各函式裡才 import：pipeline 本身不該
-# 因為一個只有 preflight 用到的套件沒裝，就整個 import 不了。
 
 @dataclass
 class CheckResult:
@@ -2260,15 +2257,23 @@ def _check_tesseract() -> CheckResult:
     return CheckResult("Tesseract 執行檔", True, f"v{ver}，語言包 {TESS_LANG} 齊全")
 
 
-def _adapt(r: "gchecks.CheckResult") -> CheckResult:
+def _gchecks():
+    """共用套件的檢查（gcp_identity.checks），用到時才 import。
+
+    pipeline 本身不該因為一個只有 preflight 用到的套件沒裝，就整個 import 不了。
+    """
+    from gcp_identity import checks
+    return checks
+
+
+def _adapt(r: "gcp_identity.checks.CheckResult") -> CheckResult:
     """把共用套件的檢查結果轉成本檔的 CheckResult。
 
     共用套件多帶一個 blame（該由執行者或由管理者處理）。本檔的 preflight 只印
     name/detail/fix，所以把 blame 併進 fix 的開頭，資訊不流失。
     """
-    from gcp_identity import checks as gchecks
     fix = r.fix
-    if not r.ok and r.blame == gchecks.ADMIN:
+    if not r.ok and r.blame == _gchecks().ADMIN:
         fix = "【需 GCP 專案管理者處理，不是你的設定問題】\n      " + fix
     return CheckResult(r.name, r.ok, r.detail, fix)
 
@@ -2279,8 +2284,7 @@ def _check_adc() -> tuple[CheckResult, object]:
     型別判斷（金鑰檔殘留／雙層模擬／本人憑據）全在共用套件裡，因為每個專案都
     會踩到同一批坑，不該有多份副本。回傳 (檢查結果, credentials 或 None)。
     """
-    from gcp_identity import checks as gchecks
-    result, creds = gchecks.check_adc()
+    result, creds = _gchecks().check_adc()
     return _adapt(result), creds
 
 
@@ -2310,8 +2314,7 @@ def _check_token() -> CheckResult:
     注意換的是「模擬後」的權杖，不是執行者本人的憑據——後者 refresh 成功不代表
     你有權限模擬服務帳號，所以本函式刻意不接受 credentials 參數。
     """
-    from gcp_identity import checks as gchecks
-    return _adapt(gchecks.check_token(identity.current()))
+    return _adapt(_gchecks().check_token(identity.current()))
 
 
 def _check_sheets() -> CheckResult:
@@ -2327,8 +2330,7 @@ def _check_sheets() -> CheckResult:
         status = getattr(e.resp, "status", 0)
         # 計費專案不可用也是 403，但修的是 GCP IAM 而不是 Drive 共用。
         # 必須排在分享那一支之前，否則會叫人去重做一件已經做對的事。
-        from gcp_identity import checks as gchecks
-        qfix = status == 403 and gchecks.quota_project_fix(identity.current(), str(e))
+        qfix = status == 403 and _gchecks().quota_project_fix(identity.current(), str(e))
         if qfix:
             fix = qfix
         elif status == 403:
