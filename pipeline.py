@@ -123,7 +123,7 @@ def _permit_lookup() -> "PermitLookup | None":
 # ═══════════════════════════════════════════════════════════════════════════
 
 INPUT_DIR  = Path("./docs")
-OUTPUT_DIR = Path("./scan_results")
+# 輸出目錄與它衍生的路徑在 batch.py(Batch.output_dir),跟著一批往下傳(ADR-0009)。
 TESS_LANG  = "ind+eng"
 # 含 .gif:部分 docx 把契約頁存成 GIF(image2.gif/image3.gif),漏收會讓
 # 整份只剩護照 JPEG、契約頁被靜默略過(32254-32262 教訓)。PIL 原生可讀,
@@ -707,11 +707,14 @@ def _collect_mol_votes(image_bytes: bytes) -> list[tuple[str, float]]:
     return entries
 
 
-def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes) -> ScanResult:
+def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
+                        out_dir: Path) -> ScanResult:
     """small docx 專用：只掃 mol ROI。
 
     第一階段先跑 PERMIT_VOTE_CONFIGS 多數票；有多數票直接採用並標記 mol_from_vote=True。
     無多數票時退回 first-hit（SCAN_CONFIGS → FALLBACK_CONFIGS）。
+
+    out_dir 是這一批的輸出目錄，命中的裁切圖寫在它底下（#18 會把寫出移到 run_scan）。
     """
     stem = f"{Path(docx_name).stem}_{Path(img_name).stem}"
     result = _empty_result(docx_name, img_name, "small")
@@ -729,7 +732,7 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes) -> Sc
         result.mol_from_vote = True
         result.hit_roi      = "mol"
         raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
-        crop_dir = OUTPUT_DIR / "mol_crops"
+        crop_dir = out_dir / "mol_crops"
         crop_dir.mkdir(parents=True, exist_ok=True)
         crop_path = crop_dir / f"{stem}.png"
         crop_roi(raw_img, roi_coords).save(crop_path)
@@ -760,13 +763,13 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes) -> Sc
             result.hit_roi   = "mol"
             if raw_img is None:
                 raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
-            crop_dir = OUTPUT_DIR / "mol_crops"
+            crop_dir = out_dir / "mol_crops"
             crop_dir.mkdir(parents=True, exist_ok=True)
             crop_path = crop_dir / f"{stem}.png"
             crop_roi(raw_img, roi_coords).save(crop_path)
             result.mol_crop = str(crop_path)
             if conf < CONF_KEY_IN:
-                low_dir = OUTPUT_DIR / "low_conf_crops"
+                low_dir = out_dir / "low_conf_crops"
                 low_dir.mkdir(parents=True, exist_ok=True)
                 low_path = low_dir / f"{stem}_mol_conf{int(conf)}.png"
                 crop_roi(raw_img, roi_coords).save(low_path)
@@ -783,8 +786,10 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes) -> Sc
 
 
 def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
-                     roi_filter: str = "") -> ScanResult | None:
+                     out_dir: Path, roi_filter: str = "") -> ScanResult | None:
     """large docx 專用：掃 mol + permit。
+
+    out_dir 是這一批的輸出目錄，命中的裁切圖寫在它底下（#18 會把寫出移到 run_scan）。
 
     roi_filter：若非空字串，只掃指定的 ROI（對應 CLI --roi）。
     過去版本由 module-level ROI_FILTER 全域變數承載，現改為參數注入，
@@ -816,7 +821,7 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
                 result.hit_roi       = "mol"
                 if raw_img is None:
                     raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
-                crop_dir = OUTPUT_DIR / "mol_crops"
+                crop_dir = out_dir / "mol_crops"
                 crop_dir.mkdir(parents=True, exist_ok=True)
                 crop_path = crop_dir / f"{stem}.png"
                 crop_roi(raw_img, roi_coords).save(crop_path)
@@ -871,13 +876,13 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
                 # 寫對應欄位的 crop（mol_crop 或 permit_crop）
                 crop_attr = f"{field}_crop"   # "mol_crop" or "permit_crop"
                 if not getattr(result, crop_attr, ""):
-                    crop_dir = OUTPUT_DIR / f"{field}_crops"
+                    crop_dir = out_dir / f"{field}_crops"
                     crop_dir.mkdir(parents=True, exist_ok=True)
                     crop_path = crop_dir / f"{stem}.png"
                     crop_roi(raw_img, roi_coords).save(crop_path)
                     setattr(result, crop_attr, str(crop_path))
                 if conf < CONF_KEY_IN and not result.low_conf:
-                    low_dir = OUTPUT_DIR / "low_conf_crops"
+                    low_dir = out_dir / "low_conf_crops"
                     low_dir.mkdir(parents=True, exist_ok=True)
                     low_path = low_dir / f"{stem}_{roi_name}_conf{int(conf)}.png"
                     crop_roi(raw_img, roi_coords).save(low_path)
@@ -1455,17 +1460,16 @@ def _edit_distance(a: str, b: str) -> int:
     return prev[-1]
 
 
-def load_known_permits_from_log(log_path: Path | None = None) -> set[str]:
+def load_known_permits_from_log(log_path: Path) -> set[str]:
     """從 upload_log.csv 累積歷史成功值,建立「軟版已知清單」。
 
     用途:作為交叉比對的補充證據。歷史上出現過的 permit id 比從未出現過的可信度高。
     與決策直接綁定的是 should_keyin 旗標,本清單僅影響 rationale 文字,
     用來告訴審查者「這個值在歷史紀錄裡出現過,可優先處理」。
 
+    log_path 是這一批的 Batch.upload_log。
     回傳:已知 permit value 的集合;檔案不存在或為空時回傳空集合。
     """
-    if log_path is None:
-        log_path = UPLOAD_LOG_PATH
     if not log_path.exists():
         return set()
     known: set[str] = set()
@@ -1596,10 +1600,7 @@ def verify_vision_result(
 # ⑨ Google Sheets key-in
 # ═══════════════════════════════════════════════════════════════════════════
 
-UPLOAD_LOG_PATH = OUTPUT_DIR / "upload_log.csv"
-
-
-def _load_upload_log() -> set[tuple[str, str]]:
+def _load_upload_log(log_path: Path) -> set[tuple[str, str]]:
     """讀取本地上傳日誌，回傳已寫入過的 (source_docx, status) 集合。
 
     用途：若上一次 pipeline 跑到一半失敗、或意外重跑，可避免相同資料重複寫入 Sheets。
@@ -1610,11 +1611,11 @@ def _load_upload_log() -> set[tuple[str, str]]:
     本版改為把 Vision-CONFIRMED 視為 KEYED_IN(自動寫入的一種)。
     為了讓舊 log 仍能正確 dedup,讀取時把 "vision" 正規化為 "keyed_in"。
     """
-    if not UPLOAD_LOG_PATH.exists():
+    if not log_path.exists():
         return set()
     done: set[tuple[str, str]] = set()
     try:
-        with open(UPLOAD_LOG_PATH, encoding="utf-8-sig") as f:
+        with open(log_path, encoding="utf-8-sig") as f:
             for r in csv.DictReader(f):
                 docx = r.get("source_docx", "")
                 status = r.get("status", "")
@@ -1627,12 +1628,12 @@ def _load_upload_log() -> set[tuple[str, str]]:
     return done
 
 
-def _append_upload_log(rows: list[list[str]]) -> None:
+def _append_upload_log(log_path: Path, rows: list[list[str]]) -> None:
     """成功寫入 Sheets 之後，把已上傳的列追加到本地 upload_log.csv 作為審計與重跑保險。"""
-    UPLOAD_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not UPLOAD_LOG_PATH.exists()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not log_path.exists()
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    with open(UPLOAD_LOG_PATH, "a", newline="", encoding="utf-8-sig") as f:
+    with open(log_path, "a", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         if write_header:
             w.writerow(["timestamp", "source_docx", "final_value", "status", "reason"])
@@ -1693,22 +1694,11 @@ _DOUBT_COL_KEY = "疑慮標示"
 
 _EMPLOYER_FIELDS_BY_DOCX: dict[str, dict] = {}
 
-# 雇主 ROI 截圖(去紅章前的契約頁裁切)存放處,供人工複查 H~O 欄位值
-EMPLOYER_CROP_DIR = OUTPUT_DIR / "employer_crops"
-
-# 雇主契約頁的 Vision 全文。這是整條流程唯一花錢買來的東西,而每一次「抽取規則
-# 改對了沒」的驗證都要拿它當素材——丟掉的話,改一次名稱或地址的解析就得再跑一輪
-# Vision 才驗得了,於是實務上就會變成憑猜測改。存這份等於把「離線重放」變成常態。
-# 個資考量:同目錄的 employer_crops 裁切圖已含相同內容,存文字不是新的曝險;
-# scan_results/ 整個在 .gitignore 內。
-EMPLOYER_TEXT_PATH = OUTPUT_DIR / "employer_texts.json"
-
-
-def collect_employer_fields(docx_files) -> None:
-    """對每份 docx 擷取雇主欄位進查表快取（每份一次 Vision 呼叫）。
+def collect_employer_fields(batch: Batch) -> None:
+    """對這一批每份 docx 擷取雇主欄位進查表快取（每份一次 Vision 呼叫）。
 
     契約頁偵測用本機 Tesseract 特徵字計分,只有選中的那一頁送 Vision。
-    送 Vision 的 ROI 裁切圖(去紅章前原貌)同步存到 EMPLOYER_CROP_DIR,
+    送 Vision 的 ROI 裁切圖(去紅章前原貌)同步存到 batch.employer_crop_dir,
     檔名 {docx主檔名}_{圖檔名},供人工複查。
     任何單檔失敗只記 warning、該檔 H~O 留空,絕不中斷主流程;
     employer_extract 或其相依(address_db/AllData.json)缺失時整段安靜跳過。
@@ -1720,11 +1710,11 @@ def collect_employer_fields(docx_files) -> None:
         return
     client = google_clients.vision_client()
     texts: dict[str, dict] = {}
-    for dp in docx_files:
-        name = Path(dp).name
+    for dp in batch.docx_files:
+        name = dp.name
         try:
             fields = extract_employer_from_docx(
-                str(dp), client=client, crop_dir=str(EMPLOYER_CROP_DIR))
+                str(dp), client=client, crop_dir=str(batch.employer_crop_dir))
         except Exception as e:
             logger.warning(f"  ⚠ {name}: 雇主擷取失敗({e!r}),該列 H~O 留空")
             continue
@@ -1745,11 +1735,11 @@ def collect_employer_fields(docx_files) -> None:
                 f"（契約頁 {fields.get('_image', '')} → 截圖 {fields.get('_crop', '')}）"
                 + (f" ⚠ {doubt}" if doubt else "")
             )
-    write_employer_texts(texts)
-    write_doubt_report()
+    write_employer_texts(batch, texts)
+    write_doubt_report(batch)
 
 
-def write_employer_texts(texts: dict[str, dict]) -> int:
+def write_employer_texts(batch: Batch, texts: dict[str, dict]) -> int:
     """把本次各 docx 的 Vision 全文存成 JSON,回傳筆數。
 
     供離線重放:改了抽取規則後,不必再花 Vision 呼叫就能對真實資料驗到底。
@@ -1758,22 +1748,17 @@ def write_employer_texts(texts: dict[str, dict]) -> int:
     if not texts:
         return 0
     try:
-        EMPLOYER_TEXT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        EMPLOYER_TEXT_PATH.write_text(
+        batch.employer_texts_json.parent.mkdir(parents=True, exist_ok=True)
+        batch.employer_texts_json.write_text(
             json.dumps(texts, ensure_ascii=False, indent=1), encoding="utf-8")
     except Exception as e:
         logger.warning(f"  ⚠ Vision 全文存檔失敗({e!r}),本次無法離線重放")
         return 0
-    logger.info(f"  Vision 全文 {len(texts)} 份 → {EMPLOYER_TEXT_PATH}")
+    logger.info(f"  Vision 全文 {len(texts)} 份 → {batch.employer_texts_json}")
     return len(texts)
 
 
-# 疑慮明細另存本機報表。ADR-0003 選擇「寧可多報、不調門檻」,代價是誤報率未知;
-# pipeline 對 Sheets 只寫不讀,誤報率不會自己回來,得靠這份報表人工數一次。
-DOUBT_REPORT_PATH = OUTPUT_DIR / "address_doubts.csv"
-
-
-def write_doubt_report() -> int:
+def write_doubt_report(batch: Batch) -> int:
     """把本次所有帶疑慮標示的 docx 寫成 CSV,回傳筆數(無疑慮則不產檔)。
 
     欄位刻意帶上 OCR 原文與標準值,讓人不必開 Sheets 就能判斷是不是誤報。
@@ -1786,8 +1771,8 @@ def write_doubt_report() -> int:
     if not rows:
         return 0
     try:
-        DOUBT_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(DOUBT_REPORT_PATH, "w", encoding="utf-8-sig", newline="") as fh:
+        batch.doubt_report_csv.parent.mkdir(parents=True, exist_ok=True)
+        with open(batch.doubt_report_csv, "w", encoding="utf-8-sig", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(["docx", "疑慮", "雇主名稱_中", "雇主名稱_英",
                     "地址_中(OCR)", "地址_中(標準)", "郵遞區號"])
@@ -1795,7 +1780,7 @@ def write_doubt_report() -> int:
     except Exception as e:      # 報表產不出來不該拖垮主流程
         logger.warning(f"  ⚠ 疑慮報表寫入失敗({e!r}),本次僅記於 log")
         return len(rows)
-    logger.info(f"  疑慮標示 {len(rows)} 筆 → {DOUBT_REPORT_PATH}")
+    logger.info(f"  疑慮標示 {len(rows)} 筆 → {batch.doubt_report_csv}")
     return len(rows)
 
 
@@ -1998,57 +1983,34 @@ def write_sheets_batched(batches: list[tuple[list, SheetStatus]]) -> int:
     return len(values)
 
 
-# 保留舊版單批 API 作為向後相容（內部呼叫新版批次函數）
-def keyin_to_sheets(rows: list, status: str = "keyed-in"):
-    """
-    舊介面：將一批資料寫入 Google Sheets。
-
-    內部已切換為 write_sheets_batched，原本三次獨立呼叫的場景請改用 write_sheets_batched
-    一次傳入所有 batch，以獲得 atomic 保證。此函數保留以避免外部呼叫者壞掉。
-    """
-    if not rows:
-        return
-    # 容錯：把字串 status 對應回 enum
-    try:
-        sheet_status = SheetStatus(status)
-    except ValueError:
-        sheet_status = SheetStatus.KEYED_IN
-        logger.warning(f"未知的 status={status!r}，預設視為 keyed-in")
-    write_sheets_batched([(rows, sheet_status)])
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # ⑩ 主流程
 # ═══════════════════════════════════════════════════════════════════════════
 
-# 全無命中的 docx：保留關鍵頁原圖供人工比對的資料夾
-NO_HIT_REVIEW_DIR = OUTPUT_DIR / "no_hit_review"
-
-
-def _save_review_images(docx_path: Path, images: list[tuple[str, bytes]],
-                        wanted: set[int]) -> list[str]:
+def _save_review_images(review_dir: Path, docx_path: Path,
+                        images: list[tuple[str, bytes]], wanted: set[int]) -> list[str]:
     """把指定編號（依檔名 imageN 的 N）的原圖存到人工比對資料夾，回傳已存檔名。
 
     用於「全無命中」的 docx：留下關鍵頁原圖，人工可直接開來對照缺漏原因。
     存整張原圖（非 ROI 裁切）；找不到對應編號者略過。
     """
-    NO_HIT_REVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    review_dir.mkdir(parents=True, exist_ok=True)
     saved: list[str] = []
     for name, data in images:
         m = re.search(r"(\d+)", name)
         if m and int(m.group(1)) in wanted:
-            dst = NO_HIT_REVIEW_DIR / f"{docx_path.stem}_{name}"
+            dst = review_dir / f"{docx_path.stem}_{name}"
             dst.write_bytes(data)
             saved.append(dst.name)
     return saved
 
 
 def _scan_tier(docx_name: str, images: list[tuple[str, bytes]],
-               roi_filter: str, tier: int) -> list[ScanResult]:
+               roi_filter: str, tier: int, out_dir: Path) -> list[ScanResult]:
     """掃一層的圖，回傳有命中的結果（已跑過 decide_result 並標上 scan_tier）。"""
     out: list[ScanResult] = []
     for img_name, img_bytes in images:
-        result = scan_image_large(docx_name, img_name, img_bytes,
+        result = scan_image_large(docx_name, img_name, img_bytes, out_dir,
                                   roi_filter=roi_filter)
         if not result:
             logger.debug(f"  {docx_name} / {img_name}  未命中")
@@ -2066,16 +2028,19 @@ def _scan_tier(docx_name: str, images: list[tuple[str, bytes]],
     return out
 
 
-def run_scan(docx_files: list[Path], image_filter: str = "",
+def run_scan(batch: Batch, image_filter: str = "",
              roi_filter: str = "", full_scan: bool = False) -> Path:
-    """執行 Tesseract 掃描，輸出 matches.csv，回傳 csv 路徑。
+    """掃這一批的 docx，輸出 matches.csv，回傳 csv 路徑。
+
+    所有產出（matches.csv、裁切圖、無命中複查圖）都寫在 batch.output_dir 底下。
 
     image_filter：若非空，配合單一 docx 只處理該檔名的圖（對應 --image）。
     roi_filter  ：若非空，只掃指定的 ROI（對應 --roi）。
     full_scan   ：True 則關掉分層，每張圖都掃（對應 --full-scan）。
     """
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    csv_path = OUTPUT_DIR / "matches.csv"
+    out_dir = batch.output_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = batch.matches_csv
 
     total = hits = upper_hits = lower_hits = 0
     large_docs = tier1_docs = expanded_docs = 0
@@ -2085,7 +2050,7 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         writer.writeheader()
 
-        for docx_path in docx_files:
+        for docx_path in batch.docx_files:
             all_images = extract_images_from_docx(docx_path)
             # docx_class 一律用「原始張數」判定，必須在任何過濾之前算：把過濾後
             # 的張數丟進 classify_by_count，5 張圖的 docx 剩 3 張就會被判成
@@ -2115,13 +2080,13 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
                 for img_name, img_bytes in images:
                     total += 1
                     small_bucket.append(
-                        scan_image_mol_only(docx_path.name, img_name, img_bytes)
+                        scan_image_mol_only(docx_path.name, img_name, img_bytes, out_dir)
                     )
             else:
                 large_docs += 1
                 tier1, rest = (images, []) if full_scan else split_tiers(images)
 
-                large_rows = _scan_tier(docx_path.name, tier1, roi_filter, 1)
+                large_rows = _scan_tier(docx_path.name, tier1, roi_filter, 1, out_dir)
                 total += len(tier1)
 
                 if has_permit_vote(large_rows):
@@ -2133,7 +2098,7 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
                         f"  ↻ {docx_path.name} 第一層({len(tier1)}張)無 permit 多數票"
                         f" → 擴掃其餘 {len(rest)} 張"
                     )
-                    large_rows += _scan_tier(docx_path.name, rest, roi_filter, 2)
+                    large_rows += _scan_tier(docx_path.name, rest, roi_filter, 2, out_dir)
                     total += len(rest)
 
                 for result in large_rows:
@@ -2158,7 +2123,8 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
                 # 最典型的表現)在 scan_tier 欄上完全看不出來。
                 fallback.scan_tier     = 2 if expanded else 1
                 writer.writerow(fallback.to_csv_row())
-                saved = _save_review_images(docx_path, images, {2, 5, 6})
+                saved = _save_review_images(batch.no_hit_review_dir, docx_path,
+                                            images, {2, 5, 6})
                 logger.info(
                     f"  ⚠ {docx_path.name} large全無命中 → 標記人工審查"
                     f"，存原圖供比對 {saved}"
@@ -2179,7 +2145,8 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
                     )
                 # mol ROI 全無命中：存該檔 image2、image3 供人工比對
                 if all(r.status == ResultStatus.SMALL_NO_HIT for r in to_write):
-                    saved = _save_review_images(docx_path, images, {2, 3})
+                    saved = _save_review_images(batch.no_hit_review_dir, docx_path,
+                                                images, {2, 3})
                     logger.info(
                         f"  ⚠ {docx_path.name} small全無命中 → 存 image2/3 供比對 {saved}"
                     )
@@ -2449,7 +2416,7 @@ def main(opts: argparse.Namespace) -> None:
 
     # ── 步驟 2：scan → matches.csv ─────────────────────────────────────────
     logger.info("── 步驟 2：Tesseract 掃描 ──")
-    csv_path = run_scan(docx_files, image_filter=opts.image, roi_filter=opts.roi,
+    csv_path = run_scan(batch, image_filter=opts.image, roi_filter=opts.roi,
                         full_scan=opts.full_scan)
     logger.info(f"  matches.csv 已輸出：{csv_path.resolve()}")
 
@@ -2468,7 +2435,7 @@ def main(opts: argparse.Namespace) -> None:
     # 額外規則(LIKELY_OCR_CONFUSION):兩引擎差 1 字元時,不自動填任何值,
     # 一律標人工審查、由人工輸入(兩候選與信心寫進 reason 供參考)。
     logger.info("── 步驟 4a：Google Vision 判讀 + 交叉比對 ──")
-    known_permits = load_known_permits_from_log()
+    known_permits = load_known_permits_from_log(batch.upload_log)
     logger.info(f"  載入已知清單(來自 upload_log.csv):{len(known_permits)} 筆")
 
     vision_auto_keyin: list[dict] = []     # 雙引擎一致(CONFIRMED) → 自動寫
@@ -2526,7 +2493,7 @@ def main(opts: argparse.Namespace) -> None:
     # 這裡對「本次要寫入的所有 docx」都擷取,含 manual_review 列——
     # 許可證待人工複核不代表雇主資料無效,先填好可省一次人工查找。
     logger.info("── 步驟 4b 前置：雇主資料擷取（契約頁 OCR → H~O 欄）──")
-    collect_employer_fields(docx_files)
+    collect_employer_fields(batch)
 
     # ── 步驟 4b 前置②：全無命中救援（次頁仲介電話 → 反查名冊 → 回推許可證）──
     # 全無命中原本 B 欄空、只能人工;改整頁 OCR 契約次一頁(1 次 Vision)、以『台灣仲介』

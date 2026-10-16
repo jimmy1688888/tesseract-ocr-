@@ -73,7 +73,7 @@ Sheets 每列 **15 欄**，H~O 由 `pipeline.py` 於寫入前自動填入：
   - J=雇主地址_中(標準) K=雇主地址_中(OCR) L=疑慮標示（見下） M=雇主地址_英(OCR)
   - N=郵遞區號 O=雇主電話
 - 實作方式（`pipeline.py`）：
-  - `collect_employer_fields(docx_files)`：主流程步驟 4b 前對每份 docx 跑一次
+  - `collect_employer_fields(batch)`：主流程步驟 4b 前對一批的每份 docx 跑一次
     `employer_extract.extract_employer_from_docx()`（契約頁偵測=本機 Tesseract、
     只有選中那頁送 Vision，**每 docx 一次 Vision 呼叫**），結果存
     `_EMPLOYER_FIELDS_BY_DOCX` 快取。manual_review 列也擷取（許可證待複核≠雇主資料無效）。

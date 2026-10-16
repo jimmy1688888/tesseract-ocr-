@@ -10,6 +10,7 @@ keyed-in/manual_review 完全由許可證判讀決定——雇主資料只是搭
 這是已知且接受的缺口。
 """
 import json
+from pathlib import Path
 
 from address_db import normalize_address
 from employer_extract import _standardize_address
@@ -308,11 +309,15 @@ class TestVisionTextIsPersisted:
     write_employer_texts,整份存檔會在跑真實資料時才 NameError。
     """
 
-    def test_writes_json_and_returns_count(self, tmp_path, monkeypatch):
+    @staticmethod
+    def _batch(out):
+        from batch import Batch
+        return Batch((), source=out, output_dir=out)
+
+    def test_writes_json_and_returns_count(self, tmp_path):
         import pipeline
         target = tmp_path / "employer_texts.json"
-        monkeypatch.setattr(pipeline, "EMPLOYER_TEXT_PATH", target)
-        n = pipeline.write_employer_texts({
+        n = pipeline.write_employer_texts(self._batch(tmp_path), {
             "32538.docx": {"image": "image2.jpeg", "text": "甲方名稱: 王小明\n地址:"},
         })
         assert n == 1
@@ -320,34 +325,33 @@ class TestVisionTextIsPersisted:
         assert data["32538.docx"]["text"].startswith("甲方名稱")
         assert data["32538.docx"]["image"] == "image2.jpeg"
 
-    def test_empty_input_writes_nothing(self, tmp_path, monkeypatch):
+    def test_empty_input_writes_nothing(self, tmp_path):
         import pipeline
         target = tmp_path / "employer_texts.json"
-        monkeypatch.setattr(pipeline, "EMPLOYER_TEXT_PATH", target)
-        assert pipeline.write_employer_texts({}) == 0
+        assert pipeline.write_employer_texts(self._batch(tmp_path), {}) == 0
         assert not target.exists()
 
     def test_write_failure_does_not_raise(self, tmp_path, monkeypatch):
         """輔助產物寫不出來,不該拖垮已經跑完的主流程。"""
         import pipeline
-        monkeypatch.setattr(pipeline, "EMPLOYER_TEXT_PATH", tmp_path / "x" / "y")
         monkeypatch.setattr(pipeline.Path, "mkdir",
                             lambda *a, **k: (_ for _ in ()).throw(OSError("nope")))
-        assert pipeline.write_employer_texts({"a.docx": {"text": "x"}}) == 0
+        assert pipeline.write_employer_texts(
+            self._batch(tmp_path / "x"), {"a.docx": {"text": "x"}}) == 0
 
     def test_text_is_moved_out_of_the_row_cache(
         self, tmp_path, monkeypatch, offline_identity
     ):
         """全文另存後不留在快取:快取組每一列時都會查,夾一大塊文字只是負擔。"""
         import pipeline
-        monkeypatch.setattr(pipeline, "EMPLOYER_TEXT_PATH",
-                            tmp_path / "employer_texts.json")
+        from batch import Batch
         monkeypatch.setattr(
             "employer_extract.extract_employer_from_docx",
             lambda *a, **k: {"雇主名稱_中": "王小明", "疑慮標示": "",
                              "_note": "", "_image": "image2.jpeg", "_crop": "",
                              "_text": "甲方名稱: 王小明"})
-        pipeline.collect_employer_fields([tmp_path / "99999.docx"])
+        pipeline.collect_employer_fields(
+            Batch.from_file(tmp_path / "99999.docx", output_dir=tmp_path))
         try:
             cached = pipeline._EMPLOYER_FIELDS_BY_DOCX["99999.docx"]
             assert "_text" not in cached
@@ -357,6 +361,33 @@ class TestVisionTextIsPersisted:
             assert saved["99999.docx"]["text"] == "甲方名稱: 王小明"
         finally:
             pipeline._EMPLOYER_FIELDS_BY_DOCX.pop("99999.docx", None)
+
+
+class TestEmployerOutputFollowsBatch:
+    """疑慮報表與雇主截圖寫在這一批的輸出目錄底下,不是寫死的 scan_results/(#24)。"""
+
+    def test_report_lands_in_output_dir(self, tmp_path, monkeypatch, offline_identity):
+        import pipeline
+        from batch import Batch
+        monkeypatch.chdir(tmp_path)              # 預設的 ./scan_results 會落在這裡
+        crop_dirs = []
+
+        def fake_extract(path, client=None, crop_dir=""):
+            crop_dirs.append(Path(crop_dir))
+            return {"雇主名稱_中": "王小明", "疑慮標示": "郵遞區號與地址不符",
+                    "_note": "", "_image": "image2.jpeg", "_crop": "", "_text": ""}
+
+        monkeypatch.setattr("employer_extract.extract_employer_from_docx", fake_extract)
+        out = tmp_path / "另一處"
+        try:
+            pipeline.collect_employer_fields(
+                Batch.from_file(tmp_path / "99998.docx", output_dir=out))
+            report = (out / "address_doubts.csv").read_text(encoding="utf-8-sig")
+            assert "99998.docx" in report
+            assert crop_dirs == [out / "employer_crops"]   # 雇主截圖也跟著走
+            assert not (tmp_path / "scan_results").exists()
+        finally:
+            pipeline._EMPLOYER_FIELDS_BY_DOCX.pop("99998.docx", None)
 
 
 class TestRealDocsUnaffected:

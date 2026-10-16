@@ -455,7 +455,6 @@ B 欄 = 2674，E~G 由 2674 查名冊自動補上。
 
 ```python
 INPUT_DIR  = Path("./docs")          # 來源 .docx
-OUTPUT_DIR = Path("./scan_results")  # matches.csv 與裁切圖
 TESS_LANG  = "ind+eng"               # Tesseract 語言
 
 CONF_KEY_IN       = 55   # 高於此值直接 key-in，低於則送 Vision
@@ -464,6 +463,9 @@ CONF_MOL_VOTE_MIN = 50   # small docx mol 多數票高於此值直接 key-in
 CONF_NOVOTE_RESCUE_MAX = 50  # 單一判讀 conf 低於此才走次頁仲介反查（否則維持原 Vision 覆核）
 SMALL_DOCX_THRESHOLD = 3 # 圖片數 ≤ 此值 → small
 ```
+
+輸出目錄（預設 `./scan_results`，放 matches.csv、裁切圖、無命中複查圖等）在 `batch.py` 的
+`DEFAULT_OUTPUT_DIR`。
 
 Google 相關的設定不在 `pipeline.py`：
 

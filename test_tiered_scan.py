@@ -14,6 +14,7 @@ import csv
 import pytest
 
 import pipeline as P
+from batch import Batch
 
 
 def _img(n: int) -> tuple[str, bytes]:
@@ -31,12 +32,10 @@ def _vote_row(docx: str, img: str, value: str = "1234",
 
 @pytest.fixture
 def scan_env(tmp_path, monkeypatch):
-    """把 run_scan 的檔案輸出導到 tmp,並攔下實際 OCR,回傳被掃過的圖檔名。
+    """攔下實際 OCR,回傳被掃過的圖檔名。輸出目錄由 _batch 指到 tmp。
 
     decide_result 一併停掉:本組測的是「掃哪幾張」的控制流,不是決策規則。
     """
-    monkeypatch.setattr(P, "OUTPUT_DIR", tmp_path)
-    monkeypatch.setattr(P, "NO_HIT_REVIEW_DIR", tmp_path / "no_hit_review")
     monkeypatch.setattr(P, "decide_result", lambda r: None)
 
     scanned = {"large": [], "small": []}
@@ -44,11 +43,11 @@ def scan_env(tmp_path, monkeypatch):
     def make(images, large_result=lambda docx, name: None):
         monkeypatch.setattr(P, "extract_images_from_docx", lambda p: list(images))
 
-        def _large(docx, name, data, roi_filter=""):
+        def _large(docx, name, data, out_dir, roi_filter=""):
             scanned["large"].append(name)
             return large_result(docx, name)
 
-        def _small(docx, name, data):
+        def _small(docx, name, data, out_dir):
             scanned["small"].append(name)
             return P.ScanResult(source_docx=docx, image_name=name,
                                 docx_class="small",
@@ -60,6 +59,11 @@ def scan_env(tmp_path, monkeypatch):
         return scanned
 
     return make
+
+
+def _batch(tmp_path, name: str) -> Batch:
+    """一份 docx 的一批,輸出寫進 tmp_path。"""
+    return Batch((tmp_path / name,), source=tmp_path, output_dir=tmp_path)
 
 
 def _rows(tmp_path):
@@ -133,14 +137,14 @@ class TestExpansion:
 
     def test_no_vote_expands_to_remaining_images(self, scan_env, tmp_path):
         scanned = scan_env([_img(n) for n in range(1, 8)])
-        P.run_scan([tmp_path / "32512.docx"])
+        P.run_scan(_batch(tmp_path, "32512.docx"))
         assert scanned["large"] == ["image2.jpeg", "image5.jpeg", "image6.jpeg",
                                     "image1.jpeg", "image3.jpeg",
                                     "image4.jpeg", "image7.jpeg"]
 
     def test_second_tier_never_rescans_the_first(self, scan_env, tmp_path):
         scanned = scan_env([_img(n) for n in range(1, 8)])
-        P.run_scan([tmp_path / "32512.docx"])
+        P.run_scan(_batch(tmp_path, "32512.docx"))
         assert len(scanned["large"]) == len(set(scanned["large"]))
 
     def test_vote_in_first_tier_skips_the_rest(self, scan_env, tmp_path):
@@ -149,7 +153,7 @@ class TestExpansion:
             large_result=lambda docx, name: (
                 _vote_row(docx, name) if name == "image5.jpeg" else None),
         )
-        P.run_scan([tmp_path / "32508.docx"])
+        P.run_scan(_batch(tmp_path, "32508.docx"))
         assert scanned["large"] == ["image2.jpeg", "image5.jpeg", "image6.jpeg"]
 
     def test_partial_hit_does_not_block_expansion(self, scan_env, tmp_path):
@@ -163,13 +167,13 @@ class TestExpansion:
             return r
 
         scanned = scan_env([_img(n) for n in range(1, 8)], large_result=partial)
-        P.run_scan([tmp_path / "32512.docx"])
+        P.run_scan(_batch(tmp_path, "32512.docx"))
         assert "image4.jpeg" in scanned["large"]
 
     def test_empty_first_tier_still_scans_everything(self, scan_env, tmp_path):
         """圖檔編號與 {2,5,6} 毫無交集 → 第一層是空的,不能因此什麼都不掃。"""
         scanned = scan_env([_img(1), _img(3), _img(4), _img(7)])
-        P.run_scan([tmp_path / "odd.docx"])
+        P.run_scan(_batch(tmp_path, "odd.docx"))
         assert scanned["large"] == ["image1.jpeg", "image3.jpeg",
                                     "image4.jpeg", "image7.jpeg"]
 
@@ -183,7 +187,7 @@ class TestClassifyUsesOriginalCount:
 
     def test_image_filter_does_not_turn_large_into_small(self, scan_env, tmp_path):
         scanned = scan_env([_img(n) for n in range(1, 8)])
-        P.run_scan([tmp_path / "32509.docx"], image_filter="image5.jpeg")
+        P.run_scan(_batch(tmp_path, "32509.docx"), image_filter="image5.jpeg")
         assert scanned["large"] == ["image5.jpeg"]
         assert scanned["small"] == []
 
@@ -191,7 +195,7 @@ class TestClassifyUsesOriginalCount:
                                                               tmp_path):
         """4 張圖的 docx 第一層只有 image2 一張,仍是 large。"""
         scanned = scan_env([_img(n) for n in range(1, 5)])
-        P.run_scan([tmp_path / "small4.docx"])
+        P.run_scan(_batch(tmp_path, "small4.docx"))
         assert scanned["small"] == []
         assert scanned["large"][0] == "image2.jpeg"
 
@@ -205,12 +209,12 @@ class TestSmallIsNotTiered:
 
     def test_all_images_scanned(self, scan_env, tmp_path):
         scanned = scan_env([_img(1), _img(2), _img(3)])
-        P.run_scan([tmp_path / "tiny.docx"])
+        P.run_scan(_batch(tmp_path, "tiny.docx"))
         assert scanned["small"] == ["image1.jpeg", "image2.jpeg", "image3.jpeg"]
 
     def test_single_image_not_filtered_away(self, scan_env, tmp_path):
         scanned = scan_env([_img(1)])
-        P.run_scan([tmp_path / "one.docx"])
+        P.run_scan(_batch(tmp_path, "one.docx"))
         assert scanned["small"] == ["image1.jpeg"]
 
 
@@ -223,7 +227,7 @@ class TestFullScanFlag:
             large_result=lambda docx, name: (
                 _vote_row(docx, name) if name == "image5.jpeg" else None),
         )
-        P.run_scan([tmp_path / "32508.docx"], full_scan=True)
+        P.run_scan(_batch(tmp_path, "32508.docx"), full_scan=True)
         assert scanned["large"] == [f"image{n}.jpeg" for n in range(1, 8)]
 
     def test_flag_exists_and_defaults_off(self, monkeypatch):
@@ -251,7 +255,7 @@ class TestScanTierIsRecorded:
             return _vote_row(docx, name) if name == "image4.jpeg" else None
 
         scan_env([_img(n) for n in range(1, 8)], large_result=result)
-        P.run_scan([tmp_path / "32538.docx"])
+        P.run_scan(_batch(tmp_path, "32538.docx"))
         tiers = {r["image_name"]: r["scan_tier"] for r in _rows(tmp_path)}
         assert tiers["image2.jpeg"] == "1"
         assert tiers["image4.jpeg"] == "2"
@@ -264,7 +268,7 @@ class TestScanTierIsRecorded:
         偏偏就是這一格看不出來。
         """
         scan_env([_img(n) for n in range(1, 8)])
-        P.run_scan([tmp_path / "32512.docx"])
+        P.run_scan(_batch(tmp_path, "32512.docx"))
         rows = _rows(tmp_path)
         assert [r["status"] for r in rows] == ["large_no_hit"]
         assert rows[0]["scan_tier"] == "2"
@@ -273,7 +277,7 @@ class TestScanTierIsRecorded:
             self, scan_env, tmp_path):
         """--full-scan 沒有第二層可擴,佔位列不該假裝擴掃過。"""
         scan_env([_img(n) for n in range(1, 8)])
-        P.run_scan([tmp_path / "32512.docx"], full_scan=True)
+        P.run_scan(_batch(tmp_path, "32512.docx"), full_scan=True)
         assert _rows(tmp_path)[0]["scan_tier"] == "1"
 
     def test_column_survives_csv_round_trip(self):
@@ -284,3 +288,26 @@ class TestScanTierIsRecorded:
     def test_old_csv_without_the_column_reads_as_first_tier(self):
         """舊 matches.csv 沒有這欄,不能讓缺欄變成無意義的 0。"""
         assert P.ScanResult.from_csv_row({"source_docx": "a.docx"}).scan_tier == 1
+
+
+class TestOutputFollowsBatch:
+    """換一個輸出目錄,掃描的產出全部跟著換位置(#24)。
+
+    以前輸出目錄與無命中複查圖的資料夾是兩個各自綁死的模組常數,換了前者後者
+    不會跟著走 —— 測試得分開 patch,漏 patch 一個就寫進真的 scan_results/。
+    """
+
+    def test_matches_and_no_hit_review_land_in_output_dir(
+        self, scan_env, monkeypatch, tmp_path
+    ):
+        monkeypatch.chdir(tmp_path)             # 預設的 ./scan_results 會落在這裡
+        scan_env([_img(n) for n in (2, 5, 6, 7)])  # large、全無命中
+        out = tmp_path / "另一處"
+        docx = tmp_path / "32512.docx"
+
+        P.run_scan(Batch((docx,), source=tmp_path, output_dir=out))
+
+        assert (out / "matches.csv").exists()
+        assert sorted(p.name for p in (out / "no_hit_review").iterdir()) == [
+            "32512_image2.jpeg", "32512_image5.jpeg", "32512_image6.jpeg"]
+        assert not (tmp_path / "scan_results").exists()

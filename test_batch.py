@@ -78,6 +78,31 @@ class TestProblem:
         assert Batch.from_file(f).problem() is None
 
 
+class TestOutputPaths:
+    """往哪寫。預設值用字面值釘住 —— 搬進一批之前,這些路徑是模組層常數,
+    一批之後的預設產出要落在一模一樣的位置(#24 的「預設參數下產出一致」)。"""
+
+    def test_default_output_paths_are_unchanged(self, tmp_path):
+        b = Batch.from_dir(tmp_path)
+        assert b.output_dir == Path("scan_results")
+        assert b.matches_csv == Path("scan_results/matches.csv")
+        assert b.upload_log == Path("scan_results/upload_log.csv")
+        assert b.employer_crop_dir == Path("scan_results/employer_crops")
+        assert b.employer_texts_json == Path("scan_results/employer_texts.json")
+        assert b.doubt_report_csv == Path("scan_results/address_doubts.csv")
+        assert b.no_hit_review_dir == Path("scan_results/no_hit_review")
+
+    def test_single_file_mode_writes_to_the_same_place(self, tmp_path):
+        """--file 只改從哪讀,不改往哪寫。"""
+        assert Batch.from_file(tmp_path / "x.docx").output_dir == Path("scan_results")
+
+    def test_derived_paths_follow_output_dir(self, tmp_path):
+        b = Batch.from_dir(tmp_path, output_dir=tmp_path / "out")
+        for p in (b.matches_csv, b.upload_log, b.employer_crop_dir,
+                  b.employer_texts_json, b.doubt_report_csv, b.no_hit_review_dir):
+            assert p.parent == tmp_path / "out"
+
+
 class _OneAgencyRoster:
     """名冊替身:任何電話都唯一命中同一家。"""
 
@@ -149,8 +174,8 @@ class TestMainStopsWhenNothingToProcess:
     def scanned(self, monkeypatch):
         calls = []
 
-        def fake_run_scan(docx_files, **kw):
-            calls.append(list(docx_files))
+        def fake_run_scan(batch, **kw):
+            calls.append(list(batch.docx_files))
             raise _Stop      # 本檔只關心「有沒有開跑、跑哪幾份」,後面的步驟不走
 
         monkeypatch.setattr(pipeline, "run_scan", fake_run_scan)
