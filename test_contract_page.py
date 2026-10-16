@@ -14,6 +14,7 @@ import zipfile
 import pytest
 
 import employer_extract as ee
+from real_samples import REAL_DOCX, needs_samples, sample
 
 # 資料表頁:去紅章後才讀得到的欄位標籤(FORM ×2)
 _FORM_TEXT = ("雇主名稱:彰化縣芳苑鄉農會(林木村) "
@@ -162,3 +163,61 @@ class TestScoreCache:
         p = _make_docx(tmp_path / "e.docx", {})
         assert ee._scored_pages(p) == []
         assert counting_scorer == {}
+
+
+# ── 機構類契約樣板(#27)───────────────────────────────────────────────────
+
+class TestInstitutionTemplateLabels:
+    """養護機構/醫院類契約的雇主欄位標籤是「Nama Panti Jompo/Rumah Sakit」,
+    不是家庭類的「Nama Majikan」。認不得它,資料表就少一個 FORM 標籤,輸給次頁(#27)。"""
+
+    def test_institution_name_label_counts_once(self):
+        """一個標籤算一次 —— 拆成兩個分支會讓同一個標籤拿兩份 FORM 加權。"""
+        assert len(ee._FORM_LABELS.findall("Nama Panti Jompo/Rumah Sakit : ")) == 1
+        assert len(ee._FORM_LABELS.findall("Nama Panti Jompo : ")) == 1
+
+    def test_hospital_in_prose_is_not_a_label(self):
+        """條文裡的「Rumah Sakit」(醫院,住院/醫療費用條款常見)不得變成欄位標籤。"""
+        assert not ee._FORM_LABELS.findall(
+            "biaya perawatan di Rumah Sakit ditanggung oleh PIHAK PERTAMA")
+
+
+# 每份真實素材的契約頁(雇主資料表)。33703 由使用者看圖確認;其餘是修 #27 之前
+# 就選中、分數 7~11 遙遙領先的結果。新素材進來時,先由人確認契約頁再加進來。
+EXPECTED_CONTRACT_PAGE = {
+    "33701.docx": "image2.png",  "33702.docx": "image2.png",
+    "33703.docx": "image2.png",  "33704.docx": "image2.jpeg",
+    "33705.docx": "image2.jpeg", "33706.docx": "image2.png",
+    "33707.docx": "image2.jpeg", "33708.docx": "image2.jpeg",
+    "33709.docx": "image2.jpeg", "33710.docx": "image2.jpeg",
+}
+
+
+@pytest.mark.usefixtures("real_ocr")
+class TestRealContractPagePicks:
+    """真實素材上「選哪張當契約頁」(真的跑 Tesseract)。"""
+
+    @staticmethod
+    def _pick(path):
+        best = ee._best_scored_page(ee._scored_pages(str(path)))
+        assert best is not None, f"{path.name}:沒有任何一頁被認成契約頁"
+        return best[1]
+
+    def test_33703_institution_contract_picks_image2(self):
+        """33703 是機構類契約;使用者看圖確認雇主資料表是 image2。
+
+        修正前 image2 只讀到 1 個 FORM 標籤(4 分),輸給次頁 image3(5 分) ——
+        雇主欄 H~O 會從次頁讀出錯的資料,台仲反查也會掃錯頁,都不報錯。
+        修正後是 6 比 5,只贏 1 分,所以這支刻意**常跑**(約 10 秒,不標 real):
+        它是這份素材的守門員,改評分規則時最先倒的會是它。
+        """
+        assert self._pick(sample("33703.docx")) == "image2.png"
+
+    @pytest.mark.real
+    @needs_samples
+    @pytest.mark.parametrize("docx", REAL_DOCX, ids=lambda p: p.name)
+    def test_every_sample_picks_its_contract_page(self, docx):
+        """每份素材選中的契約頁與 EXPECTED_CONTRACT_PAGE 相同。改評分規則時跑這組。"""
+        if docx.name not in EXPECTED_CONTRACT_PAGE:
+            pytest.skip(f"{docx.name} 是新素材:先由人確認契約頁,再加進 EXPECTED_CONTRACT_PAGE")
+        assert self._pick(docx) == EXPECTED_CONTRACT_PAGE[docx.name]

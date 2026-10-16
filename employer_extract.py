@@ -95,8 +95,18 @@ EMPLOYER_ROI = (0.0, 0.0, 1.0, 0.35)
 # 只數總命中會讓 prose 密集的簽名頁壓過真正的資料表(32262 農業契約教訓:
 # image3 簽名頁 prose 命中 4 > image2 資料表 2 → 選錯頁、名稱抽到樣板字)。
 # 加權後資料表(欄位標籤×2)穩定勝出;標題被紅章毀時仍有 FORM 標籤撐分。
+# 機構類(養護機構/醫院)樣板的雇主名稱標籤是「Nama Panti Jompo/Rumah Sakit」,
+# 而且電話標籤落在上緣 35% 之外 —— 不認得它,資料表只剩 1 個 FORM 標籤,輸給
+# 仲介區塊也有 Alamat 的次頁(33703 教訓:image2 4 分敗給 image3 5 分,#27)。
+# 錨定整個標籤、一個標籤只算一次:單獨比對「Rumah Sakit」(醫院)會讓住院、
+# 醫療費用條款的條文頁也拿 FORM 加權(33703 的 image4 就因此多 2 分)。
+# 修正後 33703 是 6 比 5,只贏 1 分 —— 那是真實差距,不要靠重複計分灌大。
+#
+# 另:中文標籤(招募許可/甲方名稱/雇主名稱)目前其實比對不到 —— 上緣 OCR 用
+# ind+eng,沒有載 chi_tra。
 _FORM_LABELS = re.compile(
     r"Nama\s*Majikan|Nama\s*Perusahaan|Pemberi\s*Kerja|Nomor\s*Telepon"
+    r"|Nama\s*Panti\s*Jompo(?:\s*/\s*Rumah\s*Sakit)?"
     r"|Alamat|MOL\s*License|招募許可|甲方名稱|雇主名[稱称]",
     re.I,
 )
