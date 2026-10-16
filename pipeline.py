@@ -279,7 +279,8 @@ class ScanResult:
        r.mol_cnof = 80 現在會在執行時拋 AttributeError，IDE 也標紅。
 
     3. 隱性狀態：cross_match 過去是 "✓" / ""，vision_review 是 "Y" / ""，
-       靠字串比對判斷真假。現在分別是 bool，意圖明確。
+       靠字串比對判斷真假。現在分別是 bool，意圖明確。manual_review 過去混著
+       "Y" 與整句理由，現在也是 bool，理由寫在 note。
 
     CSV 邊界由 to_csv_row()/from_csv_row() 處理。寫到磁碟仍是字串
     （"Y" / "✓" / "" / "80.0"），人類看 CSV 跟以前一樣。
@@ -310,7 +311,7 @@ class ScanResult:
     status: ResultStatus = ResultStatus.OK
 
     # ─── 詮釋資料 ────────────────────────────────────────────────────────
-    manual_review: str = ""    # 保留 str：現有值有 "Y" 也有"mol 無值，需人工判斷"
+    manual_review: bool = False  # 要不要人工；「為什麼」寫在 note
     low_conf: str = ""         # 低信心 crop 圖檔路徑
     hit_config: str = ""       # 命中時用的 Tesseract config 名稱
     hit_roi: str = ""          # 命中時的 ROI 名稱
@@ -349,7 +350,7 @@ class ScanResult:
             "final_conf":    f"{self.final_conf:.1f}" if self.final_conf else "",
             "vision_review": "Y" if self.vision_review else "",
             "note":          self.note,
-            "manual_review": self.manual_review,
+            "manual_review": "Y" if self.manual_review else "",
             "low_conf":      self.low_conf,
             "hit_config":    self.hit_config,
             "hit_roi":       self.hit_roi,
@@ -402,7 +403,9 @@ class ScanResult:
             final_conf    = to_float(row.get("final_conf", "")),
             vision_review = (row.get("vision_review", "") == "Y"),
             note          = row.get("note", ""),
-            manual_review = row.get("manual_review", ""),
+            # 舊 CSV 除了 "Y" 還有整句理由(「mol 無值，需人工判斷」)——非空一律
+            # 算需要人工，不能讓它安靜變成 False、脫離人工審查
+            manual_review = bool(row.get("manual_review", "").strip()),
             low_conf      = row.get("low_conf", ""),
             hit_config    = row.get("hit_config", ""),
             hit_roi       = row.get("hit_roi", ""),
@@ -735,7 +738,8 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
             break
 
     if not mol_found:
-        result.manual_review = "mol 無值，需人工判斷"
+        result.manual_review = True
+        result.note          = "mol 無值，需人工判斷"
         logger.info(f"  ⚠ {img_name}: mol 無值，標記人工審查")
     return result
 
@@ -2079,7 +2083,7 @@ def run_scan(batch: Batch, image_filter: str = "",
                 first_img_name = images[0][0] if images else ""
                 fallback = _empty_result(docx_path.name, first_img_name, "large")
                 fallback.note          = "large:全無命中"
-                fallback.manual_review = "Y"
+                fallback.manual_review = True
                 fallback.status        = ResultStatus.LARGE_NO_HIT
                 # 全無命中的份不會有任何命中列,這張佔位列是它在 CSV 裡的唯一
                 # 代表。擴掃過就得標 2 —— 否則「大量擴掃且仍沒命中」(規則過期

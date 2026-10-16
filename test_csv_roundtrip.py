@@ -103,6 +103,7 @@ _DISK_LITERALS = {
     "id_from_vote":  "Y",
     "cross_match":   "✓",
     "vision_review": "Y",
+    "manual_review": "Y",
 }
 
 
