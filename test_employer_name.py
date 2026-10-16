@@ -215,6 +215,11 @@ class TestHouseNumberCrossCheck:
         assert _house_number_doubt("臺北市信義區虎林街164巷13之1號2樓",
                        "2F., No.13-1, Ln. 164, Hulin St.") == ""
 
+    def test_hyphen_in_chinese_house_number(self):
+        """中文門牌直接寫「N-M號」(33703)時要整段比,不是只抓到 M 就報不符。"""
+        assert _house_number_doubt("新北市某鄉某村某尾12-34號(2樓)",
+                       "2F., No.12-34, Mouwei, Mou Township") == ""
+
     def test_missing_either_side_skips(self):
         assert _house_number_doubt("", "No. 62, Ln. 716") == ""
         assert _house_number_doubt("桃園市新屋區清華路75號", "") == ""

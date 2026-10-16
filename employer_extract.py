@@ -62,8 +62,15 @@ EN_ADDR_KW = re.compile(
 # 平常甲方在前先命中看不出問題,一旦甲方那行被紅章毀掉(32417 的
 # 「甲方名稱」被讀成「用戶名稱」、「以下簡稱為甲方」被讀成「以下統為甲方」),
 # 就會靜默錨到乙方,把整個雇主區塊切在起點之前 → 五欄全空。
-NAME_LABEL  = re.compile(r"(甲方名稱|雇主名[稱称]|以下簡稱為?甲方)")
+# 機構類(養護機構/醫院)樣板的甲方標籤是「養護機構/醫院名稱 (以下簡稱甲方)」(33703)。
+_INSTITUTION_NAME_LABEL = r"養護機構\s*/\s*醫院名稱"
+NAME_LABEL  = re.compile(
+    rf"(甲方名稱|雇主名[稱称]|{_INSTITUTION_NAME_LABEL}|以下簡稱為?甲方)")
 ID_LABEL    = re.compile(r"Nama\s*(Majikan|Perusahaan)", re.I)
+# 機構類的印尼文標籤。與 ID_LABEL 分開,因為退到它時**不往回退一行**:機構全名
+# 長、Vision 斷成兩行排在它之上(33703),往回一行只拿得到後半截名字,括號補齊後
+# 看起來像個正常的名字。從標籤那行起算,中文名留空交人工(L 欄會標未擷取到)。
+ID_LABEL_INSTITUTION = re.compile(r"Nama\s*Panti\s*Jompo", re.I)
 # 甲方區塊的結束線:印尼文樣板「SELANJUTNYA DISEBUT PIHAK PERTAMA」
 # (以下簡稱甲方)固定收在甲方資料之後,其後即乙方(勞工)資料。
 PARTY_END   = re.compile(
@@ -71,7 +78,25 @@ PARTY_END   = re.compile(
     re.I)
 ADDR_LABEL  = re.compile(r"(地址|Alamat)")
 PHONE_LABEL = re.compile(r"(電話|Nomor\s*Telepon|傳真)", re.I)
-LABEL_WORDS = re.compile(r"(甲方名稱|雇主名[稱称]|以下簡稱為?甲方|地址|電話|傳真)")
+LABEL_WORDS = re.compile(
+    rf"(甲方名稱|雇主名[稱称]|{_INSTITUTION_NAME_LABEL}|以下簡稱為?甲方|地址|電話|傳真)")
+# 機構英文名的字樣。機構英文名常含縣市(「XX County Private…Long-term Care」),
+# 不認得它就會被 EN_ADDR_KW 當成地址行:英文名落空、英文地址反而拿到機構名(33703)。
+# 認得的行是名稱不是地址,也不做中文字數 vs 英譯音節數的比對(機構不是人)。
+# 判定一律走 _is_institution_en:字樣之外還要求**不含數字** —— 地址一定有門牌號,
+# 機構名沒有;否則家庭類「No. 5, Welfare Rd.」這種地址行會被當成機構英文名。
+_EN_INSTITUTION = re.compile(
+    r"Long[-\s]*term\s*Care|\b(?:Nursing|Hospital|Foundation|Association|Welfare)\b",
+    re.I)
+
+
+def _is_institution_en(line: str) -> bool:
+    """這行英文是不是機構名(而不是地址)。"""
+    return bool(_EN_INSTITUTION.search(line)) and not re.search(r"\d", line)
+
+
+# 機構類樣板的標題「(NURSING HOME)」:含 Nursing 但不是任何機構的名字。
+_EN_INSTITUTION_TITLE = re.compile(r"\(?\s*NURSING\s*HO(?:ME|USE)\s*\)?", re.I)
 # 表格樣板/浮水印字,絕非雇主名稱
 BOILERPLATE = re.compile(
     r"SEKTOR|INFORMAL|FORMAL|SELANJUTNYA|DISEBUT|PIHAK|PERTAMA|PERJANJIAN"
@@ -369,10 +394,14 @@ def extract_employer_fields(text: str) -> dict:
     start = next((i for i, l in enumerate(lines) if NAME_LABEL.search(l)), None)
     if start is None:
         i = next((i for i, l in enumerate(lines) if ID_LABEL.search(l)), None)
-        if i is None:
+        if i is not None:
+            start = max(0, i - 1)
+        else:
+            start = next((i for i, l in enumerate(lines)
+                          if ID_LABEL_INSTITUTION.search(l)), None)
+        if start is None:
             return {**_EMPTY_FIELDS,
-                    "_note": "雇主區塊錨定失敗(甲方標籤與 Nama Majikan 皆未命中)"}
-        start = max(0, i - 1)
+                    "_note": "雇主區塊錨定失敗(甲方標籤、Nama Majikan、Nama Panti Jompo 皆未命中)"}
     end = next((i for i in range(start + 1, len(lines))
                 if PARTY_END.search(lines[i])), len(lines))
     seg = lines[start:end]
@@ -408,7 +437,8 @@ def extract_employer_fields(text: str) -> dict:
     for idx, l in enumerate(seg):
         if not addr_cn and _has_cjk(l) and CN_ADDR.search(l):
             addr_cn = LABEL_WORDS.sub("", l).lstrip(":： ").strip()
-        if not addr_en and not _has_cjk(l) and EN_ADDR_KW.search(l) and len(l) > 12:
+        if (not addr_en and not _has_cjk(l) and EN_ADDR_KW.search(l) and len(l) > 12
+                and not _is_institution_en(l)):
             en = l
             # 併入下一行的 R.O.C. 之類接續
             if idx + 1 < len(seg) and re.fullmatch(r"[A-Za-z.()\s]{2,8}", seg[idx + 1]):
@@ -425,19 +455,30 @@ def extract_employer_fields(text: str) -> dict:
     # 32508 的「呂偉」排在區塊第 9 行(索引剛好落在舊窗口外),中間隔著從另一欄
     # 串進來的契約標題區塊,於是標題「勞動契約 家庭幫傭」反而先命中成了雇主名。
     name_cn = name_en = ""
-    for l in seg:
+    for idx, l in enumerate(seg):
         if ADDR_LABEL.search(l) or PHONE_LABEL.search(l) or l in (addr_cn, addr_en):
             continue
-        # 英文名:優先取 Nama 標籤後的值(同行),否則取整行(去冒號前綴)
-        if not name_en:
-            cand_en = re.sub(r"^.*Nama\s*(Majikan|Perusahaan)\s*[:：]?", "", l, flags=re.I)
-            if cand_en == l:                       # 該行無 Nama 標籤
+        nxt = seg[idx + 1] if idx + 1 < len(seg) else ""
+        # 英文名:優先取 Nama 標籤後的值(同行),否則取整行(去冒號前綴)。
+        # 機構英文名不去冒號前綴:名字裡就有冒號(33703 的機構英文名括號裡就有一個),
+        # 也不因含縣市字被當地址;下一行若是整行括號的拼音(負責人)就接上。
+        if not name_en and not _EN_INSTITUTION_TITLE.fullmatch(l):
+            is_inst = _is_institution_en(l)
+            cand_en = re.sub(
+                r"^.*Nama\s*(Majikan|Perusahaan|Panti\s*Jompo(\s*/\s*Rumah\s*Sakit)?)\s*[:：]?",
+                "", l, flags=re.I)
+            if cand_en == l and not is_inst:          # 該行無 Nama 標籤
                 cand_en = re.sub(r".*[:：]", "", l)
             cand_en = cand_en.strip()
             if (cand_en and not _has_cjk(cand_en) and re.search(r"[A-Za-z]", cand_en)
-                    and not BOILERPLATE.search(cand_en) and not EN_ADDR_KW.search(cand_en)
+                    and not BOILERPLATE.search(cand_en)
+                    and (is_inst or not EN_ADDR_KW.search(cand_en))
                     and len(cand_en) > 2):
                 name_en = cand_en
+                # 先補齊本行的括號再接:OCR 吃掉的右括號屬於本行(33703 的
+                # 「…Private(…::JLong-term Care」),補在整串尾端會變成「…))」。
+                if is_inst and re.fullmatch(r"\([A-Za-z.,\s-]+\)", nxt):
+                    name_en = f"{_balance_brackets(name_en)} {nxt}"
         # 中文名:有中日韓字、非地址(中式或英式)、去標籤字。
         # EN_ADDR_KW 檢查:紅章殘影字有時會黏在英文地址行首(「司賜聼12.Ln.18…」),
         # 該行含 CJK 又無中文縣市字,若只擋 CN_ADDR 會被誤收為中文名。
@@ -449,7 +490,7 @@ def extract_employer_fields(text: str) -> dict:
                 cand = LABEL_WORDS.sub("", core)
                 cand = re.sub(r"Nama.*", "", cand, flags=re.I).strip(" ()（）:：;；")
                 if cand and _has_cjk(cand) and _is_name_like(cand):
-                    name_cn = cand
+                    name_cn = cand + _name_continuation(cand, nxt)
 
     fields = {
         # 補齊不成對括號:擷取時 strip 或 OCR 可能只留單邊,寫進 Sheets 會缺一邊。
@@ -461,7 +502,12 @@ def extract_employer_fields(text: str) -> dict:
         "_note": "",
     }
     _standardize_address(fields, addr_cn or "", en_hint=en_hint)
-    fields["名稱_疑慮"] = _name_doubt(fields["雇主名稱_中"], fields["雇主名稱_英"])
+    # 括號是補出來的就要講:斷行沒接上時(_name_continuation 只接緊鄰的下一行,
+    # 而 Vision 逐欄序列化不保證相鄰),補齊後的「…機構(王)」看起來完全正常,
+    # 而機構名又不做字數檢查 —— 不標的話就是看不見的錯值。
+    fields["名稱_疑慮"] = "；".join(p for p in (
+        "H:中文名括號不成對,已補齊" if fields["雇主名稱_中"] != name_cn else "",
+        _name_doubt(fields["雇主名稱_中"], fields["雇主名稱_英"])) if p)
     fields["門牌_疑慮"] = _house_number_doubt(fields["地址_中"], fields["地址_英"])
     fields["疑慮標示"] = _compose_doubt(fields)
     return fields
@@ -477,6 +523,23 @@ CN_BOILERPLATE = re.compile(
     r"以下簡稱|以下$|^以下")
 
 
+def _name_continuation(cand: str, nxt: str) -> str:
+    """中文名斷行時,下一行要接上的那段;不是斷行回空字串。
+
+    只在「名字裡有沒閉合的左括號,而下一行是短的中文、帶著右括號」時才接:機構全名
+    長,Vision 會斷成「…長照機構(負責人姓」+「名)」(33703)。不接的話只剩第一行,
+    _balance_brackets 再補出一個假的右括號,變成看起來正常的「…機構(王)」。
+    條件刻意窄:家庭類的名字後面接的是別的欄位,不能被吃進來。
+    """
+    if cand.count("(") + cand.count("（") <= cand.count(")") + cand.count("）"):
+        return ""
+    s = nxt.strip()
+    if (len(s) <= 12 and _has_cjk(s) and re.search(r"[)）]", s)
+            and not re.search(r"[:：;；\d]", s) and not LABEL_WORDS.search(s)):
+        return s
+    return ""
+
+
 def _is_name_like(s: str) -> bool:
     """像不像「雇主名稱」——排除樣板字與帶門牌號的地址殘骸。
 
@@ -489,6 +552,7 @@ def _is_name_like(s: str) -> bool:
 
 
 # 公司型雇主的英文名(XX Co., Ltd.)音節數與中文字數無對應關係,不做數量檢查。
+# 機構型(_is_institution_en)同理。
 _EN_COMPANY = re.compile(
     r"\b(Co|Ltd|Inc|Corp|Company|Limited|Enterprise|Industr|Tech)\b\.?", re.I)
 
@@ -516,7 +580,7 @@ def _name_doubt(name_cn: str, name_en: str) -> str:
     """
     if not name_cn:
         return "H:未擷取到中文名"
-    if not name_en or _EN_COMPANY.search(name_en):
+    if not name_en or _EN_COMPANY.search(name_en) or _is_institution_en(name_en):
         return ""
     n_cn = len(CJK.findall(name_cn))
     n_en = _en_syllables(name_en)
@@ -580,8 +644,9 @@ def rescue_name_from_pledge(docx_path: str, client=None,
     return "", ""
 
 
-# 門牌號:中文取「N號」(含「N之M號」),英文取「No. N」(含「N-M」)。
-_HOUSE_NO_CN = re.compile(r"(\d+(?:\s*之\s*\d+)*)\s*號")
+# 門牌號:中文取「N號」(含「N之M號」,以及直接寫成「N-M號」的,如 33703),
+# 英文取「No. N」(含「N-M」)。
+_HOUSE_NO_CN = re.compile(r"(\d+(?:\s*[之-]\s*\d+)*)\s*號")
 _HOUSE_NO_EN = re.compile(r"\bNo\.?\s*(\d+(?:\s*-\s*\d+)*)", re.I)
 
 

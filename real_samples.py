@@ -4,11 +4,14 @@
 素材放在 samples/docs/(含個資,被 .gitignore 的 samples/ 擋住,不進版控)。
 換一台沒有素材的機器,用到它的測試一律乾淨 skip,不得紅。
 """
+import json
 from pathlib import Path
 
 import pytest
 
 SAMPLES = Path(__file__).resolve().parent / "samples" / "docs"
+# 打過一次 Vision 存下的全文(同樣含個資、不進版控),測試離線重放、不再花錢。
+VISION = SAMPLES.parent / "vision"
 
 # 排除 Word 的鎖定檔 ~$*.docx:有人正開著那份素材時它就在,而且不是 zip。
 REAL_DOCX = sorted(p for p in SAMPLES.glob("*.docx")
@@ -23,6 +26,14 @@ def sample(name: str) -> Path:
     if not p.exists():
         pytest.skip(f"沒有 samples/docs/{name}")
     return p
+
+
+def vision_sample(stem: str) -> dict:
+    """一份存好的 Vision 全文素材(samples/vision/{stem}.json);不在就 skip。"""
+    p = VISION / f"{stem}.json"
+    if not p.exists():
+        pytest.skip(f"沒有 samples/vision/{stem}.json")
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
 def needs_tesseract() -> None:
