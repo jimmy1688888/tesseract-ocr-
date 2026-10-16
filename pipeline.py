@@ -83,6 +83,9 @@ import google_clients
 # 許可證 → 機構資料(名稱／地址／電話)查表(來源:data.gov.tw 6682 名冊)
 from permit_lookup import PermitLookup
 
+# 一批:這次要處理哪些 docx(完整路徑)。只是設定,結果不放進去(ADR-0009)。
+from batch import Batch
+
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 logging.basicConfig(
@@ -560,17 +563,6 @@ def _image_sort_key(name: str) -> tuple[int, int, str]:
     if m:
         return (0, int(m.group()), name)
     return (1, 0, name)
-
-
-def list_input_docx(input_dir: Path = INPUT_DIR) -> list[Path]:
-    """INPUT_DIR 裡要處理的 .docx,已排除 Word 的鎖定檔。
-
-    Word 開著某份文件時會在同目錄產生 `~$檔名.docx`(約 162 bytes,不是 zip)。
-    它符合 *.docx,glob 撈得到,而 extract_images_from_docx 會在它上面拋
-    BadZipFile 讓整批當場掛掉 —— 而觸發條件只是「有人正開著那份檔案在看」。
-    """
-    return sorted(p for p in input_dir.glob("*.docx")
-                  if not p.name.startswith("~$"))
 
 
 def _image_index(name: str) -> int:
@@ -1805,7 +1797,7 @@ def write_doubt_report() -> int:
 
 
 def rescue_manual_review_via_agency_phone(
-        items: list[dict], value_key: str = "final_value") -> int:
+        batch: Batch, items: list[dict], value_key: str = "final_value") -> int:
     """仲介反查救援:整頁 OCR 契約次一頁(1 次 Vision),以『台灣仲介』欄位標籤
     錨定區塊(台仲在左在右皆可,靠標籤非位置),取其「電話／名稱／地址」反查名冊
     回推許可證,覆寫回 items[value_key] / reason;_agency_cols 會據許可證補 E~G。
@@ -1822,6 +1814,7 @@ def rescue_manual_review_via_agency_phone(
       ③ (後備)名稱、地址各比名冊相似度,取相似度(CONF)高者填 B。
       ④ 電話多家、且前綴/名稱/地址皆救不回 → 不填 B,列出各家供人工擇一。
     名冊/Vision 缺失時安靜跳過,不影響主流程。
+    要開的 docx 跟 batch 查完整路徑(items 只帶檔名),見 Batch.path_of。
     同一 docx 的次頁只送一次 Vision(block_cache),多列共用不重複計費。"""
     pl = _permit_lookup()
     if pl is None or not items:
@@ -1836,8 +1829,8 @@ def rescue_manual_review_via_agency_phone(
     block_cache: dict[str, dict] = {}   # source_docx → {phones,name,address}(避免重複送 Vision)
     for item in items:
         docx_name = item["source_docx"]
-        docx_path = INPUT_DIR / docx_name
-        if not docx_path.exists():
+        docx_path = batch.path_of(docx_name)
+        if docx_path is None:
             continue
         if docx_name in block_cache:
             block = block_cache[docx_name]
@@ -2368,23 +2361,22 @@ def _check_vision_client() -> CheckResult:
     return CheckResult("Vision client", True, "已建立（未實際呼叫，不消耗額度）")
 
 
-def _check_dirs() -> CheckResult:
-    """有沒有東西可處理。沒有就不必開跑，所以這一項是閘門。
+def _check_input(batch: Batch) -> CheckResult:
+    """這一批有沒有東西可處理。沒有就不必開跑，所以這一項是閘門。
+
+    判斷本身是 Batch.problem()，main 在 --skip-preflight 時也看同一個，兩處才
+    不會說出對不起來的話。
 
     刻意不檢查仲介名冊：名冊是降級來源不是閘門，見 _warn_if_roster_unavailable。
-
-    INPUT_DIR 在這裡讀、並明確傳給 list_input_docx：後者的預設參數在 def 時就綁死
-    了（:586），無參呼叫永遠看原始的 ./docs。兩處要看同一個資料夾，否則會出現
-    「說資料夾是空的，卻掃了另一個資料夾」這種對不起來的錯誤訊息。
     """
-    d = INPUT_DIR
-    fix = f"建立 {d.resolve()} 並放入待處理的 .docx"
-    if not d.exists():
-        return CheckResult("輸入資料", False, f"輸入資料夾不存在：{d.resolve()}", fix)
-    files = list_input_docx(d)
-    if not files:
-        return CheckResult("輸入資料", False, f"輸入資料夾內沒有 .docx：{d.resolve()}", fix)
-    return CheckResult("輸入資料", True, f"{len(files)} 份 .docx 待處理")
+    problem = batch.problem()
+    if problem is None:
+        return CheckResult("輸入資料", True, f"{len(batch.docx_files)} 份 .docx 待處理")
+    if batch.single_file:
+        fix = "確認 --file 指定的路徑，或改放進 ./docs 後不帶 --file 重跑"
+    else:
+        fix = f"建立 {batch.source.resolve()} 並放入待處理的 .docx"
+    return CheckResult("輸入資料", False, problem, fix)
 
 
 def _warn_if_roster_unavailable() -> None:
@@ -2404,7 +2396,7 @@ def _warn_if_roster_unavailable() -> None:
         )
 
 
-def run_preflight(require_input: bool = True) -> bool:
+def run_preflight(batch: Batch) -> bool:
     """依序執行所有檢查，全部通過回傳 True。
 
     憑證相關的檢查是有順序相依的（沒有 ADC 就談不上模擬與換權杖），
@@ -2433,14 +2425,13 @@ def run_preflight(require_input: bool = True) -> bool:
         for n in ("模擬身分", "取得權杖", "Vision client", "Google Sheets 存取"):
             results.append(CheckResult(n, False, "（因 ADC 憑證不可用而略過）"))
 
-    if require_input:
-        results.append(_check_dirs())
+    results.append(_check_input(batch))
 
     for r in results:
         logger.info(f"  {'✔' if r.ok else '✘'} {r.name}：{r.detail}")
 
     # 降級提醒印在檢查列之後、失敗區之前：它不是檢查項，但人要在開跑前看到。
-    # 即使 --file 指定單一檔案（require_input=False）也照印——E~G 一樣會留空。
+    # 即使 --file 指定單一檔案也照印——E~G 一樣會留空。
     _warn_if_roster_unavailable()
 
     failed = [r for r in results if not r.ok]
@@ -2459,30 +2450,27 @@ def run_preflight(require_input: bool = True) -> bool:
 
 def main(opts: argparse.Namespace) -> None:
     """主流程。接收已解析的 CLI options，不再依賴 module-level 全域變數。"""
+    # 一批:這次要掃哪些 docx。指定 --file 時就是那一份,不看 ./docs。
+    batch = Batch.from_file(Path(opts.file)) if opts.file else Batch.from_dir(INPUT_DIR)
+
     # ── 步驟 0：preflight ──────────────────────────────────────────────────
     # 放在最前面的理由：掃描階段可能跑數十分鐘，跑完才發現 Sheets 沒權限、
     # 結果寫不進去，等於整批白做。憑證問題要在花時間之前就攔下來。
     if not opts.skip_preflight:
-        # 指定 --file 時輸入來源是那個檔案，不需要檢查 ./docs 有沒有東西
-        if not run_preflight(require_input=not opts.file):
+        if not run_preflight(batch):
             return
     if opts.preflight_only:
         return
 
-    # ── 決定要掃哪些 docx ──────────────────────────────────────────────────
-    if opts.file:
-        target = Path(opts.file)
-        if not target.exists():
-            logger.error(f"找不到檔案：{target.resolve()}")
-            return
-        docx_files = [target]
+    # preflight 的輸入閘門看的也是這一句;--skip-preflight 時只剩這裡擋。
+    problem = batch.problem()
+    if problem:
+        logger.error(problem)
+        return
+    docx_files = list(batch.docx_files)
+    if batch.single_file:
         logging.getLogger().setLevel(logging.DEBUG)
-        logger.debug(f"單檔 DEBUG 模式：{target.name}")
-    else:
-        docx_files = list_input_docx()
-        if not docx_files:
-            logger.error(f"找不到 .docx：{INPUT_DIR.resolve()}")
-            return
+        logger.debug(f"單檔 DEBUG 模式：{batch.source.name}")
 
     # ── 步驟 1：prefilter（已在 scan 內呼叫 classify_by_count，此處記錄摘要）
     logger.info("── 步驟 1：prefilter 分類 ──")
@@ -2577,7 +2565,7 @@ def main(opts: argparse.Namespace) -> None:
     # D 欄註明,供人工快速核對。
     if manual_review:
         logger.info("── 步驟 4b 前置②：全無命中 → 次頁仲介電話反查名冊 ──")
-        n_rescued = rescue_manual_review_via_agency_phone(manual_review)
+        n_rescued = rescue_manual_review_via_agency_phone(batch, manual_review)
         logger.info(f"  電話反查救回 {n_rescued}/{len(manual_review)} 筆(填許可證+機構欄)")
 
     # ── 步驟 4b 前置③：非多數票低信心單一判讀救援（比照全無命中,覆寫填 B）──
@@ -2585,7 +2573,7 @@ def main(opts: argparse.Namespace) -> None:
     # 唯一命中 → 覆寫 candidate_value(B)、_agency_cols 補 E~G,仍標 manual_review。
     if novote_rescue:
         logger.info("── 步驟 4b 前置③：非多數票低信心 → 次頁仲介電話反查名冊(覆寫填 B)──")
-        n_nv = rescue_manual_review_via_agency_phone(novote_rescue, value_key="candidate_value")
+        n_nv = rescue_manual_review_via_agency_phone(batch, novote_rescue, value_key="candidate_value")
         logger.info(f"  單一判讀電話反查救回 {n_nv}/{len(novote_rescue)} 筆")
 
     logger.info("── 步驟 4b：合併批次寫入 Google Sheets（atomic）──")

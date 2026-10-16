@@ -20,23 +20,22 @@ import pytest
 
 import permit_lookup
 import pipeline
+from batch import Batch
 
 
 @pytest.fixture
-def docx_dir(monkeypatch, tmp_path):
-    """一個有東西可處理的輸入資料夾，並讓 pipeline 看向它。
+def docx_dir(tmp_path):
+    """一個有東西可處理的輸入資料夾。
 
     內容不必是真的 docx —— 本檔測的是 preflight 要不要放行，不是解壓。
     """
     (tmp_path / "32417.docx").write_bytes(b"placeholder")
-    monkeypatch.setattr(pipeline, "INPUT_DIR", tmp_path)
     return tmp_path
 
 
 @pytest.fixture
-def empty_dir(monkeypatch, tmp_path):
+def empty_dir(tmp_path):
     """沒有 .docx 的輸入資料夾。"""
-    monkeypatch.setattr(pipeline, "INPUT_DIR", tmp_path)
     return tmp_path
 
 
@@ -114,24 +113,24 @@ class TestRosterFailureDegrades:
 class TestRosterIsNotAGate:
     """接力第二段：降級之後 preflight 放行。"""
 
-    def test_check_dirs_passes_when_only_roster_unavailable(
+    def test_check_input_passes_when_only_roster_unavailable(
         self, docx_dir, roster_unavailable
     ):
-        assert pipeline._check_dirs().ok
+        assert pipeline._check_input(Batch.from_dir(docx_dir)).ok
 
     def test_run_preflight_passes_when_only_roster_unavailable(
         self, docx_dir, roster_unavailable, google_checks_pass
     ):
         # run_preflight 回傳 True 就是「main 不會提早 return」——
         # main 對 preflight 的唯一反應是 `if not run_preflight(...): return`。
-        assert pipeline.run_preflight(require_input=True) is True
+        assert pipeline.run_preflight(Batch.from_dir(docx_dir)) is True
 
     def test_roster_failure_is_still_said_out_loud(
         self, caplog, docx_dir, roster_unavailable, google_checks_pass
     ):
         """降級不等於沉默：不擋人，但要讓人知道 E~G 會是空的。"""
         with caplog.at_level(logging.WARNING, logger=pipeline.logger.name):
-            pipeline.run_preflight(require_input=True)
+            pipeline.run_preflight(Batch.from_dir(docx_dir))
         assert any("名冊" in r.message for r in caplog.records)
 
     def test_roster_failure_is_not_counted_as_a_failed_check(
@@ -139,23 +138,26 @@ class TestRosterIsNotAGate:
     ):
         """一個降級不該印成「preflight 未通過（N 項）」。"""
         with caplog.at_level(logging.ERROR, logger=pipeline.logger.name):
-            pipeline.run_preflight(require_input=True)
+            pipeline.run_preflight(Batch.from_dir(docx_dir))
         assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
     def test_single_file_mode_also_warns_about_roster(
-        self, caplog, empty_dir, roster_unavailable, google_checks_pass
+        self, caplog, monkeypatch, empty_dir, roster_unavailable, google_checks_pass
     ):
-        """`--file` 指定單一檔案時（require_input=False）也要印這句警告。
+        """`--file` 指定單一檔案時也要印這句警告。
 
         這是一個刻意的取捨，不是順手：單檔模式常是「補跑漏掉的那一份」，E~G
         一樣會留空，最不該跑完才發現仲介欄空白。代價是連 --preflight-only 都會
         提早載 2.2MB 名冊——已確認接受。
 
-        empty_dir 讓輸入資料夾是空的：證明這個模式確實跳過了輸入閘門（還是回
-        True），卻仍然印出名冊警告。
+        ./docs 是空的：證明這個模式不看 ./docs（還是回 True），卻仍然印出名冊警告。
         """
+        monkeypatch.chdir(empty_dir)
+        target = empty_dir / "別處" / "32417.docx"
+        target.parent.mkdir()
+        target.write_bytes(b"placeholder")
         with caplog.at_level(logging.WARNING, logger=pipeline.logger.name):
-            assert pipeline.run_preflight(require_input=False) is True
+            assert pipeline.run_preflight(Batch.from_file(target)) is True
         assert any("名冊" in r.message for r in caplog.records)
 
 
@@ -199,35 +201,47 @@ class TestSheetRowSurvivesRosterFailure:
 class TestInputStillGates:
     """真正該擋的仍然擋 —— 放行名冊不等於放行一切。"""
 
-    def test_check_dirs_fails_when_input_dir_missing(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(pipeline, "INPUT_DIR", tmp_path / "不存在")
-        result = pipeline._check_dirs()
+    def test_check_input_fails_when_input_dir_missing(self, tmp_path):
+        result = pipeline._check_input(Batch.from_dir(tmp_path / "不存在"))
         assert not result.ok
         assert "不存在" in result.detail
 
-    def test_check_dirs_fails_when_no_docx(self, empty_dir):
-        result = pipeline._check_dirs()
+    def test_check_input_fails_when_no_docx(self, empty_dir):
+        result = pipeline._check_input(Batch.from_dir(empty_dir))
         assert not result.ok
         assert ".docx" in result.detail
 
-    def test_check_dirs_ignores_word_lock_files(self, empty_dir):
+    def test_check_input_ignores_word_lock_files(self, empty_dir):
         """`~$` 開頭的 Word 鎖定檔不算「有東西可處理」。"""
         (empty_dir / "~$32417.docx").write_bytes(b"lock")
-        assert not pipeline._check_dirs().ok
+        assert not pipeline._check_input(Batch.from_dir(empty_dir)).ok
 
-    def test_check_dirs_counts_the_dir_it_reports(self, docx_dir, roster_unavailable):
+    def test_check_input_counts_the_dir_it_reports(self, docx_dir, roster_unavailable):
         """回報的份數來自實際掃過的那個資料夾。
 
-        list_input_docx 的預設參數在 def 時就綁死了（:586），無參呼叫會掃原始的
-        ./docs —— 那會讓 preflight 報出另一個資料夾的份數，而兩個數字都「看起來
-        很合理」，沒人會發現。所以這裡釘的是份數，不只是通過與否。
+        報出另一個資料夾的份數時，兩個數字都「看起來很合理」，沒人會發現。
+        所以這裡釘的是份數，不只是通過與否。
         """
         (docx_dir / "32508.docx").write_bytes(b"placeholder")
-        result = pipeline._check_dirs()
+        result = pipeline._check_input(Batch.from_dir(docx_dir))
         assert result.ok
         assert "2 份" in result.detail
 
     def test_run_preflight_fails_when_input_dir_is_empty(
         self, empty_dir, roster_unavailable, google_checks_pass
     ):
-        assert pipeline.run_preflight(require_input=True) is False
+        assert pipeline.run_preflight(Batch.from_dir(empty_dir)) is False
+
+    def test_run_preflight_fails_when_single_file_is_missing(
+        self, caplog, tmp_path, roster_unavailable, google_checks_pass
+    ):
+        """`--file` 指到不存在的檔案：由 preflight 的輸入閘門擋下，附修復方式。
+
+        以前 --file 時 preflight 不看輸入，Google 檢查全跑完才由 main 說找不到。
+        """
+        missing = tmp_path / "32417.docx"
+        with caplog.at_level(logging.INFO, logger=pipeline.logger.name):
+            assert pipeline.run_preflight(Batch.from_file(missing)) is False
+        text = "\n".join(r.message for r in caplog.records)
+        assert "找不到檔案" in text
+        assert "--file" in text           # 修復方式指向 --file，不是叫人去建 ./docs

@@ -184,7 +184,8 @@ _Avoid_: 一次執行、run、job;也別和 Sheets 的「分段寫入」(`write_
 
 **閘門**:
 preflight 裡「不通過就整批不該開跑」的檢查。認定標準是**缺了它整批必然做白工**:
-Tesseract 與語言包、ADC 憑證、模擬權杖、Sheets 存取、輸入資料夾裡有 .docx。
+Tesseract 與語言包、ADC 憑證、模擬權杖、Sheets 存取、一批裡有東西可處理(輸入資料夾裡有
+.docx,或 `--file` 指定的那份確實存在)。
 preflight 裡不是每一項都是閘門 —— 這正是需要這個詞的原因。
 _Avoid_: 前置檢查、檢查項、gate、validation
 
