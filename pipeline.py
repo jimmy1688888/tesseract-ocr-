@@ -61,7 +61,7 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from io import BytesIO
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import numpy as np
 from PIL import Image, ImageFilter, ImageOps
@@ -85,6 +85,9 @@ from permit_lookup import PermitLookup
 
 # 一批:這次要處理哪些 docx(完整路徑)。只是設定,結果不放進去(ADR-0009)。
 from batch import Batch
+
+if TYPE_CHECKING:   # 只給型別標註看;執行期在 preflight 的函式裡才 import(見該段說明)
+    from gcp_identity.checks import CheckResult
 
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
@@ -2211,16 +2214,15 @@ def run_scan(docx_files: list[Path], image_filter: str = "",
 # 為了健康檢查每次啟動燒一格額度不划算。Vision 的權限問題會在 Sheets 檢查
 # （同一組憑證、同一條模擬鏈路）就先被抓到。
 
-@dataclass
-class CheckResult:
-    name: str
-    ok: bool
-    detail: str = ""
-    fix: str = ""          # 失敗時要印給使用者的修復指令／說明
+# 檢查結果一律用共用套件的 CheckResult：它帶著 blame（該由執行者或管理者處理）
+# 與 skipped（因上游失敗而略過），render 靠這兩個欄位分區、計數。本檔曾經重造過
+# 一份只有四個字串的，於是 skipped 整個丟掉、略過只能印成失敗（#4）。
+# 全部在函式裡延遲 import：pipeline 不該因為只有 preflight 用到的套件沒裝就
+# 整個 import 不了。
 
-
-def _check_tesseract() -> CheckResult:
+def _check_tesseract() -> "CheckResult":
     """Tesseract 執行檔與語言包。"""
+    from gcp_identity.checks import CheckResult
     exe = pytesseract.pytesseract.tesseract_cmd
     if not Path(exe).exists():
         return CheckResult(
@@ -2259,47 +2261,20 @@ def _gchecks():
     return checks
 
 
-def _adapt(r: "gcp_identity.checks.CheckResult") -> CheckResult:
-    """把共用套件的檢查結果轉成本檔的 CheckResult。
-
-    共用套件多帶一個 blame（該由執行者或由管理者處理）。本檔的 preflight 只印
-    name/detail/fix，所以把 blame 併進 fix 的開頭，資訊不流失。
-    """
-    fix = r.fix
-    if not r.ok and r.blame == _gchecks().ADMIN:
-        fix = "【需 GCP 專案管理者處理，不是你的設定問題】\n      " + fix
-    return CheckResult(r.name, r.ok, r.detail, fix)
-
-
-def _check_adc() -> tuple[CheckResult, object]:
+def _check_adc() -> "CheckResult":
     """ADC 憑證是否存在、且是「執行者本人的使用者憑據」。
 
     型別判斷（金鑰檔殘留／雙層模擬／本人憑據）全在共用套件裡，因為每個專案都
-    會踩到同一批坑，不該有多份副本。回傳 (檢查結果, credentials 或 None)。
+    會踩到同一批坑，不該有多份副本。
+
+    共用套件另外回傳 credentials，這裡刻意丟掉：「解析到金鑰檔」這類情況下它
+    仍是一個物件，只是型別不對。下游該看的是檢查結果，不是有沒有拿到 creds。
     """
-    result, creds = _gchecks().check_adc()
-    return _adapt(result), creds
+    result, _ = _gchecks().check_adc()
+    return result
 
 
-def _check_impersonation() -> CheckResult:
-    """確認要模擬的服務帳號已設定。
-
-    型別檢查（金鑰檔殘留／雙層模擬）已移到 _check_adc 走的共用套件，這裡只剩
-    「本專案要模擬誰」這件事——它現在是 identity.py 的常數而不是 ADC 的內容，
-    所以是純本機檢查，不打 Google。真正驗證權限的是下一項 _check_token。
-    """
-    ident = identity.current()
-    if not ident.sa_email or not ident.project_id:
-        return CheckResult(
-            "模擬身分", False, "SA_EMAIL 或 GCP_PROJECT_ID 未設定",
-            "在 identity.py 填入服務帳號信箱與 GCP 專案 ID"
-            "（或設環境變數 PIPELINE_SA_EMAIL / PIPELINE_GCP_PROJECT）",
-        )
-    return CheckResult("模擬身分", True,
-                       f"將模擬 {ident.sa_email}（計費：{ident.project_id}）")
-
-
-def _check_token() -> CheckResult:
+def _check_token() -> "CheckResult":
     """實際換一次權杖。
 
     這是唯一能同時驗證「TokenCreator 角色」與「iamcredentials API 已啟用」
@@ -2307,11 +2282,12 @@ def _check_token() -> CheckResult:
     注意換的是「模擬後」的權杖，不是執行者本人的憑據——後者 refresh 成功不代表
     你有權限模擬服務帳號，所以本函式刻意不接受 credentials 參數。
     """
-    return _adapt(_gchecks().check_token(identity.current()))
+    return _gchecks().check_token(identity.current())
 
 
-def _check_sheets() -> CheckResult:
+def _check_sheets() -> "CheckResult":
     """讀取試算表 metadata：一次驗證 scope、Drive 分享權限、工作表名稱。"""
+    from gcp_identity.checks import ADMIN, CheckResult
     spreadsheet_id, sheet_name = google_clients.SPREADSHEET_ID, google_clients.SHEET_NAME
     try:
         service = google_clients.sheets_service()
@@ -2325,17 +2301,18 @@ def _check_sheets() -> CheckResult:
         # 必須排在分享那一支之前，否則會叫人去重做一件已經做對的事。
         qfix = status == 403 and _gchecks().quota_project_fix(identity.current(), str(e))
         if qfix:
-            fix = qfix
-        elif status == 403:
+            return CheckResult(_SHEETS_CHECK, False, f"HTTP {status}: {e}"[:200],
+                               qfix, blame=ADMIN)
+        if status == 403:
             fix = ("開啟該試算表 →「共用」→ 把服務帳戶的信箱加為「編輯者」。"
                    "（這是 Google Drive 的分享權限，與 GCP IAM 是兩套系統）")
         elif status == 404:
             fix = f"確認 google_clients.py 的 SPREADSHEET_ID 是否正確：{spreadsheet_id}"
         else:
             fix = "檢查 Sheets API 是否已在專案中啟用"
-        return CheckResult("Google Sheets 存取", False, f"HTTP {status}: {e}"[:200], fix)
+        return CheckResult(_SHEETS_CHECK, False, f"HTTP {status}: {e}"[:200], fix)
     except Exception as e:
-        return CheckResult("Google Sheets 存取", False, repr(e)[:200],
+        return CheckResult(_SHEETS_CHECK, False, repr(e)[:200],
                            "檢查網路與憑證設定")
 
     titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
@@ -2351,17 +2328,7 @@ def _check_sheets() -> CheckResult:
     )
 
 
-def _check_vision_client() -> CheckResult:
-    """只建立 client，不送圖（送圖會消耗 1 unit 免費額度）。"""
-    try:
-        google_clients.vision_client()
-    except Exception as e:
-        return CheckResult("Vision client", False, repr(e)[:200],
-                           "確認 Cloud Vision API 已在專案中啟用")
-    return CheckResult("Vision client", True, "已建立（未實際呼叫，不消耗額度）")
-
-
-def _check_input(batch: Batch) -> CheckResult:
+def _check_input(batch: Batch) -> "CheckResult":
     """這一批有沒有東西可處理。沒有就不必開跑，所以這一項是閘門。
 
     判斷本身是 Batch.problem()，main 在 --skip-preflight 時也看同一個，兩處才
@@ -2369,6 +2336,7 @@ def _check_input(batch: Batch) -> CheckResult:
 
     刻意不檢查仲介名冊：名冊是降級來源不是閘門，見 _warn_if_roster_unavailable。
     """
+    from gcp_identity.checks import CheckResult
     problem = batch.problem()
     if problem is None:
         return CheckResult("輸入資料", True, f"{len(batch.docx_files)} 份 .docx 待處理")
@@ -2396,56 +2364,57 @@ def _warn_if_roster_unavailable() -> None:
         )
 
 
+# 憑證檢查失敗時，下游「略過」的那幾列要用和真正跑起來時同一個名稱，否則同一項
+# 在不同情況下會印成兩個名字。模擬服務帳號那一項的名稱是共用套件 check_token
+# 寫死的，test_google_identity 釘住兩邊一致。
+_TOKEN_CHECK  = "模擬服務帳號"
+_SHEETS_CHECK = "Google Sheets 存取"
+
+
+def _skipped(name: str, because: str) -> "CheckResult":
+    """因上游失敗而沒跑的那一項。不算失敗：根因已經在上游那一列。"""
+    from gcp_identity.checks import CheckResult
+    return CheckResult(name, True, f"（因{because}而略過）", skipped=True)
+
+
 def run_preflight(batch: Batch) -> bool:
     """依序執行所有檢查，全部通過回傳 True。
 
-    憑證相關的檢查是有順序相依的（沒有 ADC 就談不上模擬與換權杖），
-    所以前一項失敗時後續直接標記為「略過」，避免印出一堆衍生的假錯誤，
-    讓使用者一眼看到真正的根因在哪一行。
-    """
-    logger.info("── preflight：環境與憑證檢查 ──")
-    results: list[CheckResult] = [_check_tesseract()]
+    憑證相關的檢查是有順序相依的（沒有 ADC 就談不上換權杖，換不到權杖就談不上
+    Sheets），所以前一項失敗時後續標記為「略過」而不是失敗：一個根因只印一行，
+    使用者一眼看到真正要修的是哪一項。
 
-    # 以 adc_result.ok 而非「creds 是否為 None」判斷：ADC 檢查在「解析到金鑰檔」
-    # 這類情況下仍會回傳一個 credentials 物件，只是型別不對。用 creds 判斷會讓
-    # 後續檢查照跑並全數失敗，把真正的根因埋在一串衍生錯誤裡。
-    adc_result, _ = _check_adc()
-    results.append(adc_result)
-    if adc_result.ok:
-        results.append(_check_impersonation())
+    渲染交給共用套件的 render：它依 blame 把失敗分成「自己處理」與「找管理者」
+    兩區，略過的不計入。順序則刻意不用共用套件的 google_checks —— 它多跑一個
+    check_gcloud，沒裝 gcloud CLI 的機器會被擋，而執行期根本不需要 gcloud。
+    """
+    checks = _gchecks()
+    results = [_check_tesseract()]
+
+    adc = _check_adc()
+    results.append(adc)
+    if adc.ok:
         tok = _check_token()
         results.append(tok)
         if tok.ok:
-            results.append(_check_vision_client())
             results.append(_check_sheets())
         else:
-            results.append(CheckResult("Vision client", False, "（因無法取得權杖而略過）"))
-            results.append(CheckResult("Google Sheets 存取", False, "（因無法取得權杖而略過）"))
+            results.append(_skipped(_SHEETS_CHECK, "無法取得權杖"))
     else:
-        for n in ("模擬身分", "取得權杖", "Vision client", "Google Sheets 存取"):
-            results.append(CheckResult(n, False, "（因 ADC 憑證不可用而略過）"))
+        results.append(_skipped(_TOKEN_CHECK, "ADC 憑證不可用"))
+        results.append(_skipped(_SHEETS_CHECK, "ADC 憑證不可用"))
 
     results.append(_check_input(batch))
 
-    for r in results:
-        logger.info(f"  {'✔' if r.ok else '✘'} {r.name}：{r.detail}")
+    passed = checks.render(results, "preflight：環境與憑證檢查")
 
-    # 降級提醒印在檢查列之後、失敗區之前：它不是檢查項，但人要在開跑前看到。
+    # 降級提醒不是檢查項（見 _warn_if_roster_unavailable），但人要在開跑前看到。
     # 即使 --file 指定單一檔案也照印——E~G 一樣會留空。
     _warn_if_roster_unavailable()
 
-    failed = [r for r in results if not r.ok]
-    if not failed:
-        logger.info("  preflight 全數通過")
-        return True
-
-    logger.error(f"── preflight 未通過（{len(failed)} 項）──")
-    for r in failed:
-        if r.fix:
-            logger.error(f"  [{r.name}] 修復方式：")
-            logger.error(f"      {r.fix}")
-    logger.error("  排除後重跑；只想重新檢查可用 --preflight-only")
-    return False
+    if not passed:
+        logger.error("preflight 未通過：排除後重跑；只想重新檢查可用 --preflight-only")
+    return passed
 
 
 def main(opts: argparse.Namespace) -> None:

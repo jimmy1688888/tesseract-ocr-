@@ -53,17 +53,26 @@ def roster_unavailable(monkeypatch):
 
 
 @pytest.fixture
-def google_checks_pass(monkeypatch):
-    """把打到 Google 的那幾項換成通過，只留下本檔關心的輸入／名冊。"""
+def gchecks():
+    """preflight 的檢查結果與渲染都來自共用套件；沒裝的機器上乾淨略過。"""
+    return pytest.importorskip("gcp_identity.checks")
+
+
+@pytest.fixture
+def google_checks_pass(monkeypatch, gchecks):
+    """把外部邊界換成通過，只留下本檔關心的輸入／名冊。
+
+    換的是共用套件的 check_adc／check_token、Tesseract、Sheets —— 不換 pipeline
+    怎麼串它們，所以「上游失敗時下游標略過」那段邏輯照樣真的跑。
+    """
     def ok(name):
-        return pipeline.CheckResult(name, True, "（測試替身）")
+        return gchecks.CheckResult(name, True, "（測試替身）")
 
     monkeypatch.setattr(pipeline, "_check_tesseract", lambda: ok("Tesseract 執行檔"))
-    monkeypatch.setattr(pipeline, "_check_adc", lambda: (ok("ADC 憑證"), object()))
-    monkeypatch.setattr(pipeline, "_check_impersonation", lambda: ok("模擬身分"))
-    monkeypatch.setattr(pipeline, "_check_token", lambda: ok("取得權杖"))
-    monkeypatch.setattr(pipeline, "_check_vision_client", lambda: ok("Vision client"))
+    monkeypatch.setattr(gchecks, "check_adc", lambda: (ok("Google 認證(ADC)"), object()))
+    monkeypatch.setattr(gchecks, "check_token", lambda ident: ok("模擬服務帳號"))
     monkeypatch.setattr(pipeline, "_check_sheets", lambda: ok("Google Sheets 存取"))
+    return gchecks
 
 
 class TestRosterFailureDegrades:
@@ -114,7 +123,7 @@ class TestRosterIsNotAGate:
     """接力第二段：降級之後 preflight 放行。"""
 
     def test_check_input_passes_when_only_roster_unavailable(
-        self, docx_dir, roster_unavailable
+        self, gchecks, docx_dir, roster_unavailable
     ):
         assert pipeline._check_input(Batch.from_dir(docx_dir)).ok
 
@@ -198,8 +207,10 @@ class TestSheetRowSurvivesRosterFailure:
         assert pipeline._agency_cols(self.PERMIT) == ["", "", ""]
 
 
+@pytest.mark.usefixtures("gchecks")
 class TestInputStillGates:
     """真正該擋的仍然擋 —— 放行名冊不等於放行一切。"""
+
 
     def test_check_input_fails_when_input_dir_missing(self, tmp_path):
         result = pipeline._check_input(Batch.from_dir(tmp_path / "不存在"))
@@ -233,15 +244,64 @@ class TestInputStillGates:
         assert pipeline.run_preflight(Batch.from_dir(empty_dir)) is False
 
     def test_run_preflight_fails_when_single_file_is_missing(
-        self, caplog, tmp_path, roster_unavailable, google_checks_pass
+        self, capsys, tmp_path, roster_unavailable, google_checks_pass
     ):
         """`--file` 指到不存在的檔案：由 preflight 的輸入閘門擋下，附修復方式。
 
         以前 --file 時 preflight 不看輸入，Google 檢查全跑完才由 main 說找不到。
         """
         missing = tmp_path / "32417.docx"
-        with caplog.at_level(logging.INFO, logger=pipeline.logger.name):
-            assert pipeline.run_preflight(Batch.from_file(missing)) is False
-        text = "\n".join(r.message for r in caplog.records)
+        assert pipeline.run_preflight(Batch.from_file(missing)) is False
+        text = capsys.readouterr().out
         assert "找不到檔案" in text
         assert "--file" in text           # 修復方式指向 --file，不是叫人去建 ./docs
+
+
+class TestOneRootCauseOneLine:
+    """一個根因印一行，不是五個 ✘(#4)。
+
+    憑證檢查有順序相依：ADC 不可用就談不上換權杖，換不到權杖就談不上 Sheets。
+    下游那幾項是「略過」，不是失敗 —— 算成失敗的話，「preflight 未通過（5 項）」
+    會把真正的根因埋在一串衍生錯誤裡。
+
+    替身只放在外部邊界：共用套件的 check_adc／check_token、Tesseract、Sheets。
+    """
+
+    @pytest.fixture
+    def checks(self, roster_unavailable, google_checks_pass):
+        """預設全通過；各測試只把要壞掉的那一項換掉。"""
+        return google_checks_pass
+
+    @staticmethod
+    def _must_not_run(*a, **kw):
+        raise AssertionError("上游已失敗，這一項不該真的去打 Google")
+
+    def test_adc_failure_is_the_only_failure(self, capsys, monkeypatch, checks, docx_dir):
+        monkeypatch.setattr(checks, "check_adc", lambda: (
+            checks.CheckResult("Google 認證(ADC)", False, "找不到 ADC", "重跑 重新登入.bat"),
+            None))
+        monkeypatch.setattr(checks, "check_token", self._must_not_run)
+        monkeypatch.setattr(pipeline, "_check_sheets", self._must_not_run)
+
+        assert pipeline.run_preflight(Batch.from_dir(docx_dir)) is False
+        out = capsys.readouterr().out
+        assert "你可以自己處理（1 項）" in out
+        assert "管理者處理" not in out
+        assert out.count("⏭") == 2            # 換權杖、Sheets 標為略過
+
+    def test_token_failure_skips_sheets(self, capsys, monkeypatch, checks, docx_dir):
+        monkeypatch.setattr(checks, "check_token", lambda ident: checks.CheckResult(
+            "模擬服務帳號", False, "PERMISSION_DENIED", "請管理者授予 TokenCreator",
+            blame=checks.ADMIN))
+        monkeypatch.setattr(pipeline, "_check_sheets", self._must_not_run)
+
+        assert pipeline.run_preflight(Batch.from_dir(docx_dir)) is False
+        out = capsys.readouterr().out
+        # blame 原樣保留：需要管理者處理的，單獨列在管理者那一區
+        assert "需要 GCP 專案管理者處理（1 項）" in out
+        assert "你可以自己處理" not in out
+        assert out.count("⏭") == 1
+
+    def test_all_pass(self, capsys, checks, docx_dir):
+        assert pipeline.run_preflight(Batch.from_dir(docx_dir)) is True
+        assert "⏭" not in capsys.readouterr().out

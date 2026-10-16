@@ -217,8 +217,16 @@ class TestCheckToken:
         assert "尚未填寫" in r.detail
         assert "請填入服務帳號" in r.fix
 
-    def test_permission_denied_is_blamed_on_admin(self):
+    def test_skipped_row_uses_the_same_name(self):
+        """ADC 壞掉時印「略過」的那一列，名稱要和這一項真的跑起來時相同。
+
+        名稱是共用套件寫死的；它改名而這邊沒跟上，同一項就會印成兩個名字。
+        """
         pytest.importorskip("gcp_identity")
+        assert pipeline._check_token().name == pipeline._TOKEN_CHECK
+
+    def test_permission_denied_is_blamed_on_admin(self):
+        checks = pytest.importorskip("gcp_identity.checks")
 
         class Denied:
             def refresh(self, request):
@@ -227,7 +235,7 @@ class TestCheckToken:
         identity.install(RecordingIdentity(creds=Denied()))
         r = pipeline._check_token()
         assert not r.ok
-        assert "需 GCP 專案管理者處理" in r.fix
+        assert r.blame == checks.ADMIN        # render 據此列進「管理者處理」那一區
         assert "serviceAccountTokenCreator" in r.fix
 
     def test_token_ok(self):
@@ -292,12 +300,17 @@ class TestCheckSheets:
         assert not r.ok
         assert "Service Usage Consumer" in r.fix
         assert "共用" not in r.fix.split("⚠️")[0]
+        # 修法是「請管理者…」，就要列進管理者那一區，不能叫執行者自己處理
+        from gcp_identity.checks import ADMIN
+        assert r.blame == ADMIN
 
     def test_plain_403_is_a_sharing_problem(self, sheets_returns):
         sheets_returns(error=_http_error(403, "The caller does not have permission"))
         r = pipeline._check_sheets()
         assert not r.ok
         assert "共用" in r.fix
+        from gcp_identity.checks import SELF
+        assert r.blame == SELF                # 分享試算表是執行者自己能做的
 
     def test_404_points_at_spreadsheet_id(self, sheets_returns):
         sheets_returns(error=_http_error(404, "Requested entity was not found"))
@@ -319,11 +332,3 @@ class TestCheckSheets:
             "sheets": [{"properties": {"title": google_clients.SHEET_NAME}}]})
         assert pipeline._check_sheets().ok
 
-
-class TestCheckVisionClient:
-    def test_ok_with_usable_identity(self, offline_identity):
-        assert pipeline._check_vision_client().ok
-
-    def test_failure_is_reported_not_raised(self):
-        """護欄身分下建 client 會失敗 —— 要變成一列 ✘,不能讓例外衝出 preflight。"""
-        assert not pipeline._check_vision_client().ok
