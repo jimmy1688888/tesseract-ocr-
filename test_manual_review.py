@@ -8,29 +8,50 @@
 那份 docx 就悄悄脫離人工審查,不拋錯、不少欄。
 """
 import csv
-from pathlib import Path
 
 import pytest
 
 import pipeline as P
 from batch import Batch
+from real_samples import old_matches_csv
 
 
-SCAN_RESULTS = Path(__file__).resolve().parent / "scan_results"
-BACKUP_CSV = SCAN_RESULTS / "matches.21份.backup.csv"
+def _csv_rows(path):
+    with open(path, encoding="utf-8-sig") as f:
+        return list(csv.DictReader(f))
+
+
+def _no_ocr_hits(monkeypatch):
+    """small 的 mol 掃描每一組設定都讀不到東西。"""
+    monkeypatch.setattr(P, "_collect_mol_votes", lambda data: [])
+    monkeypatch.setattr(P, "preprocess", lambda data, cfg: None)
+    monkeypatch.setattr(P, "ocr_with_conf", lambda img, lang, cfg: ("", 0.0))
 
 
 class TestFlagIsSetWithReasonInNote:
 
     def test_small_image_without_mol(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(P, "_collect_mol_votes", lambda data: [])
-        monkeypatch.setattr(P, "preprocess", lambda data, cfg: None)
-        monkeypatch.setattr(P, "ocr_with_conf", lambda img, lang, cfg: ("", 0.0))
+        _no_ocr_hits(monkeypatch)
 
         r = P.scan_image_mol_only("a.docx", "image1.png", b"", tmp_path)
 
         assert r.manual_review is True
         assert "mol 無值" in r.note
+
+    def test_small_docx_without_any_hit_reaches_csv(self, monkeypatch, tmp_path):
+        """寫到 CSV 時理由是整份的「small:無命中」(每張都讀不到 mol 的總結),旗標保留。"""
+        _no_ocr_hits(monkeypatch)
+        monkeypatch.setattr(P.docx_images, "read_images",
+                            lambda p: [("image1.png", b""), ("image2.png", b"")])
+
+        P.run_scan(Batch((tmp_path / "a.docx",), source=tmp_path, output_dir=tmp_path))
+
+        rows = _csv_rows(tmp_path / "matches.csv")
+        assert len(rows) == 2
+        for r in map(P.ScanResult.from_csv_row, rows):
+            assert r.manual_review is True
+            assert r.note == "small:無命中"
+            assert r.status == P.ResultStatus.SMALL_NO_HIT
 
     def test_large_docx_without_any_hit(self, monkeypatch, tmp_path):
         monkeypatch.setattr(P.docx_images, "read_images",
@@ -40,8 +61,7 @@ class TestFlagIsSetWithReasonInNote:
 
         P.run_scan(Batch((tmp_path / "a.docx",), source=tmp_path, output_dir=tmp_path))
 
-        with open(tmp_path / "matches.csv", encoding="utf-8-sig") as f:
-            [row] = list(csv.DictReader(f))
+        [row] = _csv_rows(tmp_path / "matches.csv")
         r = P.ScanResult.from_csv_row(row)
         assert r.manual_review is True
         assert r.note == "large:全無命中"
@@ -60,17 +80,16 @@ def test_old_csv_values_read_back(on_disk, expected):
 def test_real_old_matches_csv(tmp_path):
     """真實的舊 matches.csv:需要人工的列一列都不能變 False;再寫出、讀回逐欄比對。
 
-    素材唯讀(只開來讀),輸出只寫 tmp。不在就 skip。
+    素材唯讀(只開來讀),輸出只寫 tmp。不在就 skip。現有備份只有 "Y",整句描述
+    那種值目前只有上面的參數化案例在驗 —— 使用者給了含整句的舊檔再換上。
     """
-    if not BACKUP_CSV.exists():
-        pytest.skip(f"沒有 {BACKUP_CSV.name}")
-    with open(BACKUP_CSV, encoding="utf-8-sig") as f:
-        raw = list(csv.DictReader(f))
-    assert any(row["manual_review"] for row in raw), "素材裡沒有需要人工的列,驗不到東西"
+    raw = _csv_rows(old_matches_csv())
+    needs_review = lambda v: bool(v.strip())
+    assert any(needs_review(row["manual_review"]) for row in raw), "素材裡沒有需要人工的列,驗不到東西"
 
     results = [P.ScanResult.from_csv_row(row) for row in raw]
     for row, r in zip(raw, results):
-        assert r.manual_review is bool(row["manual_review"]), row["source_docx"]
+        assert r.manual_review is needs_review(row["manual_review"]), row["source_docx"]
 
     out = tmp_path / "matches.csv"
     with open(out, "w", newline="", encoding="utf-8-sig") as f:
@@ -78,13 +97,12 @@ def test_real_old_matches_csv(tmp_path):
         writer.writeheader()
         for r in results:
             writer.writerow(r.to_csv_row())
-    with open(out, encoding="utf-8-sig") as f:
-        rewritten = list(csv.DictReader(f))
+    rewritten = _csv_rows(out)
 
     assert [P.ScanResult.from_csv_row(row) for row in rewritten] == results
     for old, new in zip(raw, rewritten):
         for col in old:
             if col == "manual_review":
-                assert bool(new[col]) is bool(old[col]), old["source_docx"]
+                assert needs_review(new[col]) is needs_review(old[col]), old["source_docx"]
             else:
                 assert new[col] == old[col], (old["source_docx"], col)

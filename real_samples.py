@@ -36,6 +36,14 @@ def vision_sample(stem: str) -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+def old_matches_csv() -> Path:
+    """#15 之前寫出的真實 matches.csv(21 份實跑的備份,唯讀);不在就 skip。"""
+    p = SAMPLES.parent.parent / "scan_results" / "matches.21份.backup.csv"
+    if not p.exists():
+        pytest.skip(f"沒有 scan_results/{p.name}")
+    return p
+
+
 def needs_tesseract() -> None:
     """與正式流程同一套方式找 tesseract.exe;找不到就 skip。"""
     import shutil
