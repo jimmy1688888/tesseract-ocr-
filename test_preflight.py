@@ -180,7 +180,7 @@ class TestSheetRowSurvivesRosterFailure:
     PERMIT = "2340"
 
     def _row(self, record):
-        return pipeline._row_to_sheet_values(record, pipeline.SheetStatus.KEYED_IN)
+        return pipeline._row_to_sheet_values(record, pipeline.SheetStatus.KEYED_IN, {})
 
     def test_queue_item_keeps_permit_and_blanks_agency_cols(self, roster_unavailable):
         row = self._row(pipeline.VisionQueueItem(

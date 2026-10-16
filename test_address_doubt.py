@@ -259,13 +259,9 @@ class TestSheetWiring:
 
     def _row(self, docx, fields):
         import pipeline
-        pipeline._EMPLOYER_FIELDS_BY_DOCX[docx] = fields
-        try:
-            return pipeline._row_to_sheet_values(
-                {"source_docx": docx, "final_value": "2340"},
-                pipeline.SheetStatus.KEYED_IN)
-        finally:
-            pipeline._EMPLOYER_FIELDS_BY_DOCX.pop(docx, None)
+        return pipeline._row_to_sheet_values(
+            {"source_docx": docx, "final_value": "2340"},
+            pipeline.SheetStatus.KEYED_IN, {docx: fields})
 
     def test_row_is_fifteen_columns(self):
         assert len(self._row("a.docx", {})) == 15
@@ -298,7 +294,7 @@ class TestSheetWiring:
     def test_unknown_docx_gives_empty_doubt_not_crash(self):
         import pipeline
         row = pipeline._row_to_sheet_values(
-            {"source_docx": "never-seen.docx"}, pipeline.SheetStatus.MANUAL_REVIEW)
+            {"source_docx": "never-seen.docx"}, pipeline.SheetStatus.MANUAL_REVIEW, {})
         assert len(row) == 15 and row[self.L] == ""
 
 
@@ -339,10 +335,10 @@ class TestVisionTextIsPersisted:
         assert pipeline.write_employer_texts(
             self._batch(tmp_path / "x"), {"a.docx": {"text": "x"}}) == 0
 
-    def test_text_is_moved_out_of_the_row_cache(
+    def test_text_is_moved_out_of_the_returned_fields(
         self, tmp_path, monkeypatch, offline_identity
     ):
-        """全文另存後不留在快取:快取組每一列時都會查,夾一大塊文字只是負擔。"""
+        """全文另存後不留在回傳的欄位裡:組每一列時都會查,夾一大塊文字只是負擔。"""
         import pipeline
         from batch import Batch
         monkeypatch.setattr(
@@ -350,17 +346,14 @@ class TestVisionTextIsPersisted:
             lambda *a, **k: {"雇主名稱_中": "王小明", "疑慮標示": "",
                              "_note": "", "_image": "image2.jpeg", "_crop": "",
                              "_text": "甲方名稱: 王小明"})
-        pipeline.collect_employer_fields(
+        employer = pipeline.collect_employer_fields(
             Batch.from_file(tmp_path / "99999.docx", output_dir=tmp_path))
-        try:
-            cached = pipeline._EMPLOYER_FIELDS_BY_DOCX["99999.docx"]
-            assert "_text" not in cached
-            assert cached["雇主名稱_中"] == "王小明"
-            saved = json.loads(
-                (tmp_path / "employer_texts.json").read_text(encoding="utf-8"))
-            assert saved["99999.docx"]["text"] == "甲方名稱: 王小明"
-        finally:
-            pipeline._EMPLOYER_FIELDS_BY_DOCX.pop("99999.docx", None)
+        fields = employer["99999.docx"]
+        assert "_text" not in fields
+        assert fields["雇主名稱_中"] == "王小明"
+        saved = json.loads(
+            (tmp_path / "employer_texts.json").read_text(encoding="utf-8"))
+        assert saved["99999.docx"]["text"] == "甲方名稱: 王小明"
 
 
 class TestEmployerOutputFollowsBatch:
@@ -379,15 +372,57 @@ class TestEmployerOutputFollowsBatch:
 
         monkeypatch.setattr("employer_extract.extract_employer_from_docx", fake_extract)
         out = tmp_path / "另一處"
-        try:
-            pipeline.collect_employer_fields(
-                Batch.from_file(tmp_path / "99998.docx", output_dir=out))
-            report = (out / "address_doubts.csv").read_text(encoding="utf-8-sig")
-            assert "99998.docx" in report
-            assert crop_dirs == [out / "employer_crops"]   # 雇主截圖也跟著走
-            assert not (tmp_path / "scan_results").exists()
-        finally:
-            pipeline._EMPLOYER_FIELDS_BY_DOCX.pop("99998.docx", None)
+        b = Batch.from_file(tmp_path / "99998.docx", output_dir=out)
+        pipeline.write_doubt_report(b, pipeline.collect_employer_fields(b))
+        report = (out / "address_doubts.csv").read_text(encoding="utf-8-sig")
+        assert "99998.docx" in report
+        assert crop_dirs == [out / "employer_crops"]   # 雇主截圖也跟著走
+        assert not (tmp_path / "scan_results").exists()
+
+
+class TestDoubtReportOrder:
+    """疑慮報表依檔名排序 —— 人工數誤報率時要能跟上一次的報表逐列對照。"""
+
+    def test_rows_sorted_by_docx_name(self, tmp_path):
+        import pipeline
+        from batch import Batch
+        doubt = {"疑慮標示": "郵遞區號與地址不符"}
+        employer_by_docx = {"32574.docx": doubt, "32503.docx": doubt, "32538.docx": doubt}
+        b = Batch((), source=tmp_path, output_dir=tmp_path)
+        assert pipeline.write_doubt_report(b, employer_by_docx) == 3
+        lines = (tmp_path / "address_doubts.csv").read_text(encoding="utf-8-sig").splitlines()
+        assert [ln.split(",")[0] for ln in lines[1:]] == [
+            "32503.docx", "32538.docx", "32574.docx"]
+
+
+class TestTwoBatchesDoNotLeak:
+    """同一個 process 連跑兩批,第二批的疑慮報表不帶到第一批的結果(#25)。
+
+    雇主欄位以前寄放在 process 全域的 dict,寫入方與讀取方從簽名上看不出來,
+    而且只增不減 —— 第二批的報表會把第一批的疑慮也列進去。CLI 一次只跑一批所以
+    平常看不到,但測試、或任何在同一個 process 裡跑兩批的呼叫端都會撞到。
+    """
+
+    def test_second_report_lists_only_second_batch(
+        self, tmp_path, monkeypatch, offline_identity
+    ):
+        import pipeline
+        from batch import Batch
+        monkeypatch.setattr(
+            "employer_extract.extract_employer_from_docx",
+            lambda path, **k: {"雇主名稱_中": "王小明", "疑慮標示": "郵遞區號與地址不符",
+                               "_note": "", "_image": "image2.jpeg", "_crop": "",
+                               "_text": ""})
+
+        def run(name, out):
+            b = Batch.from_file(tmp_path / name, output_dir=out)
+            pipeline.write_doubt_report(b, pipeline.collect_employer_fields(b))
+            return (out / "address_doubts.csv").read_text(encoding="utf-8-sig")
+
+        assert "11111.docx" in run("11111.docx", tmp_path / "第一批")
+        second = run("22222.docx", tmp_path / "第二批")
+        assert "22222.docx" in second
+        assert "11111.docx" not in second
 
 
 class TestRealDocsUnaffected:

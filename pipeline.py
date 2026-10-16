@@ -1676,9 +1676,10 @@ def _agency_cols(permit_value: str) -> list[str]:
 
 
 # H~O 欄：雇主資料（employer_extract 產出）。寫入 Sheets 前先對每份 docx 跑一次
-# collect_employer_fields()（契約頁偵測 → ROI → 去紅章 → Vision），結果存進
-# _EMPLOYER_FIELDS_BY_DOCX；組列時依 source_docx 查表填入，
+# collect_employer_fields()（契約頁偵測 → ROI → 去紅章 → Vision），回傳
+# {檔名: 欄位}，由 main 交給組列（依 source_docx 查表填入）與疑慮報表。
 # 順序對齊標題列註解 H=雇主名稱_中 … O=雇主電話。擷取失敗該 docx 的 H~O 留空。
+# 結果走回傳值，不寄放在模組層或 Batch 上（見 ADR-0009、#25）。
 _EMPLOYER_COL_KEYS = (
     "雇主名稱_中", "雇主名稱_英",
     "地址_中_標準", "地址_中",        # J=標準, K=OCR原文
@@ -1692,23 +1693,26 @@ _EMPLOYER_COL_KEYS = (
 # 與 D 欄 reason 仍刻意分開:D 欄專講許可證判讀,一個欄位不承載兩種語意(ADR-0003)。
 _DOUBT_COL_KEY = "疑慮標示"
 
-_EMPLOYER_FIELDS_BY_DOCX: dict[str, dict] = {}
-
-def collect_employer_fields(batch: Batch) -> None:
-    """對這一批每份 docx 擷取雇主欄位進查表快取（每份一次 Vision 呼叫）。
+def collect_employer_fields(batch: Batch) -> dict[str, dict]:
+    """對這一批每份 docx 擷取雇主欄位，回傳 {檔名: 欄位}（每份一次 Vision 呼叫）。
 
     契約頁偵測用本機 Tesseract 特徵字計分,只有選中的那一頁送 Vision。
     送 Vision 的 ROI 裁切圖(去紅章前原貌)同步存到 batch.employer_crop_dir,
     檔名 {docx主檔名}_{圖檔名},供人工複查。
     任何單檔失敗只記 warning、該檔 H~O 留空,絕不中斷主流程;
     employer_extract 或其相依(address_db/AllData.json)缺失時整段安靜跳過。
+
+    Vision 全文在這裡就存檔(write_employer_texts),不放進回傳值:它只供離線重放,
+    下游沒有任何一步要讀它,而回傳的欄位每組一列都會查一次。疑慮報表則要讀回傳
+    的欄位,所以交給 main 接。
     """
     try:
         from employer_extract import extract_employer_from_docx
     except Exception as e:
         logger.warning(f"  ⚠ employer_extract 載入失敗,雇主欄(H~O)本次全部留空:{e!r}")
-        return
+        return {}
     client = google_clients.vision_client()
+    employer_by_docx: dict[str, dict] = {}
     texts: dict[str, dict] = {}
     for dp in batch.docx_files:
         name = dp.name
@@ -1722,7 +1726,7 @@ def collect_employer_fields(batch: Batch) -> None:
         text = fields.pop("_text", "")
         if text:
             texts[name] = {"image": fields.get("_image", ""), "text": text}
-        _EMPLOYER_FIELDS_BY_DOCX[name] = fields
+        employer_by_docx[name] = fields
         if fields.get("_note"):
             logger.info(f"  {name}: {fields['_note']} → H~O 留空"
                         f"（截圖 {fields.get('_crop', '') or '無'}）")
@@ -1736,7 +1740,7 @@ def collect_employer_fields(batch: Batch) -> None:
                 + (f" ⚠ {doubt}" if doubt else "")
             )
     write_employer_texts(batch, texts)
-    write_doubt_report(batch)
+    return employer_by_docx
 
 
 def write_employer_texts(batch: Batch, texts: dict[str, dict]) -> int:
@@ -1758,7 +1762,7 @@ def write_employer_texts(batch: Batch, texts: dict[str, dict]) -> int:
     return len(texts)
 
 
-def write_doubt_report(batch: Batch) -> int:
+def write_doubt_report(batch: Batch, employer_by_docx: dict[str, dict]) -> int:
     """把本次所有帶疑慮標示的 docx 寫成 CSV,回傳筆數(無疑慮則不產檔)。
 
     欄位刻意帶上 OCR 原文與標準值,讓人不必開 Sheets 就能判斷是不是誤報。
@@ -1766,7 +1770,7 @@ def write_doubt_report(batch: Batch) -> int:
     rows = [(name, f.get(_DOUBT_COL_KEY, ""),
              f.get("雇主名稱_中", ""), f.get("雇主名稱_英", ""), f.get("地址_中", ""),
              f.get("地址_中_標準", ""), f.get("郵遞區號", ""))
-            for name, f in sorted(_EMPLOYER_FIELDS_BY_DOCX.items())
+            for name, f in sorted(employer_by_docx.items())
             if f.get(_DOUBT_COL_KEY)]
     if not rows:
         return 0
@@ -1904,25 +1908,26 @@ def rescue_manual_review_via_agency_phone(
     return rescued
 
 
-def _employer_cols(r) -> list[str]:
-    """依 _EMPLOYER_COL_KEYS 取雇主 8 欄:row 自帶的 key 優先,否則查 docx 快取。"""
+def _employer_cols(r, employer_by_docx: dict[str, dict]) -> list[str]:
+    """依 _EMPLOYER_COL_KEYS 取雇主 8 欄:row 自帶的 key 優先,否則查 employer。"""
     if isinstance(r, dict):
         docx = r.get("source_docx", "")
     else:
         docx = getattr(r, "source_docx", "")
-    cached = _EMPLOYER_FIELDS_BY_DOCX.get(docx, {})
+    fields = employer_by_docx.get(docx, {})
     out = []
     for k in _EMPLOYER_COL_KEYS:
         own = r.get(k, "") if isinstance(r, dict) else ""
-        out.append(str(own or cached.get(k, "") or ""))
+        out.append(str(own or fields.get(k, "") or ""))
     return out
 
 
-def _row_to_sheet_values(r, status: SheetStatus) -> list[str]:
+def _row_to_sheet_values(r, status: SheetStatus,
+                         employer_by_docx: dict[str, dict]) -> list[str]:
     """把一筆紀錄轉成 Sheets 的一列（15 欄：A~D 識別/決策、E~G 機構、H~O 雇主）。
 
     支援 dict（manual 用）與 VisionQueueItem。E~G 欄由 B 欄的許可證值查名冊補上；
-    H~O 為雇主欄位，依 source_docx 查 collect_employer_fields() 建好的快取
+    H~O 為雇主欄位，依 source_docx 查 collect_employer_fields() 回傳的 employer_by_docx
     （見 _employer_cols），未擷取或失敗則留空。其中 L 欄不是資料而是疑慮標示，
     說明中文標準地址（J）為何留空（見 ADR-0003）。
     """
@@ -1938,15 +1943,16 @@ def _row_to_sheet_values(r, status: SheetStatus) -> list[str]:
             status.value,
             r.get("reason") or r.get("note", ""),
         ]
-    return base + _agency_cols(value) + _employer_cols(r)
+    return base + _agency_cols(value) + _employer_cols(r, employer_by_docx)
 
 
-def write_sheets_batched(batches: list[tuple[list, SheetStatus]]) -> int:
+def write_sheets_batched(row_groups: list[tuple[list, SheetStatus]],
+                         employer_by_docx: dict[str, dict]) -> int:
     """
-    一次性把多批資料 atomic 寫入 Google Sheets。
+    一次性把多組列 atomic 寫入 Google Sheets。
 
     參數：
-      batches：[(rows, status), ...]
+      row_groups：[(rows, status), ...]（同一 status 的列為一組；與「一批」無關）
         rows 可以是 dict list 或 VisionQueueItem list；
         status 為 SheetStatus 列舉值（keyed-in / vision / manual_review）。
 
@@ -1954,13 +1960,15 @@ def write_sheets_batched(batches: list[tuple[list, SheetStatus]]) -> int:
       1. 合併成一次 API 呼叫 → 中途網路失敗時不會出現「半成功」狀態。
       2. 5xx / 429 / 連線錯誤自動退避重試；4xx 直接拋出。
 
+    employer_by_docx 是 collect_employer_fields() 的回傳值，用來填 H~O 欄。
+
     回傳實際寫入 Sheets 的列數。
     """
     values: list[list[str]] = []
 
-    for rows, status in batches:
+    for rows, status in row_groups:
         for r in rows:
-            values.append(_row_to_sheet_values(r, status))
+            values.append(_row_to_sheet_values(r, status, employer_by_docx))
 
     if not values:
         logger.info("  （此次無新資料需寫入 Sheets）")
@@ -2493,7 +2501,8 @@ def main(opts: argparse.Namespace) -> None:
     # 這裡對「本次要寫入的所有 docx」都擷取,含 manual_review 列——
     # 許可證待人工複核不代表雇主資料無效,先填好可省一次人工查找。
     logger.info("── 步驟 4b 前置：雇主資料擷取（契約頁 OCR → H~O 欄）──")
-    collect_employer_fields(batch)
+    employer_by_docx = collect_employer_fields(batch)
+    write_doubt_report(batch, employer_by_docx)
 
     # ── 步驟 4b 前置②：全無命中救援（次頁仲介電話 → 反查名冊 → 回推許可證）──
     # 全無命中原本 B 欄空、只能人工;改整頁 OCR 契約次一頁(1 次 Vision)、以『台灣仲介』
@@ -2513,8 +2522,8 @@ def main(opts: argparse.Namespace) -> None:
         logger.info(f"  單一判讀電話反查救回 {n_nv}/{len(novote_rescue)} 筆")
 
     logger.info("── 步驟 4b：合併批次寫入 Google Sheets（atomic）──")
-    auto_keyin_batch = keyin_items + vision_auto_keyin   # VisionQueueItem + dict 混合,_row_to_sheet_values 兼容
-    review_batch = vision_review_rows + novote_rescue + [
+    auto_keyin_rows = keyin_items + vision_auto_keyin   # VisionQueueItem + dict 混合,_row_to_sheet_values 兼容
+    review_rows = vision_review_rows + novote_rescue + [
         # 電話反查救回的許可證放 candidate_value,_agency_cols 會據此補 E~G。
         {"source_docx": d["source_docx"],
          "candidate_value": d.get("final_value", ""),
@@ -2522,22 +2531,22 @@ def main(opts: argparse.Namespace) -> None:
         for d in manual_review
     ]
     written = write_sheets_batched([
-        (auto_keyin_batch, SheetStatus.KEYED_IN),
-        (review_batch,     SheetStatus.MANUAL_REVIEW),
-    ])
+        (auto_keyin_rows, SheetStatus.KEYED_IN),
+        (review_rows,     SheetStatus.MANUAL_REVIEW),
+    ], employer_by_docx)
     logger.info(
-        f"  本次寫入彙總:auto_keyin={len(auto_keyin_batch)} 筆"
+        f"  本次寫入彙總:auto_keyin={len(auto_keyin_rows)} 筆"
         f"(其中 Tesseract 直接 {len(keyin_items)} 筆 + Vision 確認 {len(vision_auto_keyin)} 筆) "
-        f"/ manual_review={len(review_batch)} 筆"
+        f"/ manual_review={len(review_rows)} 筆"
         f"(其中 Vision 交叉比對失敗 {len(vision_review_rows)} 筆 "
         f"+ 單一判讀電話反查 {len(novote_rescue)} 筆 + 全無命中 {len(manual_review)} 件)"
         f"(實際寫入 Sheets:{written} 筆)"
     )
 
     # ── 步驟 4c：列出人工審查清單，方便人類確認 ────────────────────────────
-    if review_batch:
-        logger.info(f"── 人工審查清單(共 {len(review_batch)} 件,reason 欄已標註原因)：")
-        for row in review_batch:
+    if review_rows:
+        logger.info(f"── 人工審查清單(共 {len(review_rows)} 件,reason 欄已標註原因)：")
+        for row in review_rows:
             logger.info(f"    {row['source_docx']}: {row['reason']}")
 
     logger.info("── 全部完成 ──")

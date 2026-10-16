@@ -75,9 +75,9 @@ Sheets 每列 **15 欄**，H~O 由 `pipeline.py` 於寫入前自動填入：
 - 實作方式（`pipeline.py`）：
   - `collect_employer_fields(batch)`：主流程步驟 4b 前對一批的每份 docx 跑一次
     `employer_extract.extract_employer_from_docx()`（契約頁偵測=本機 Tesseract、
-    只有選中那頁送 Vision，**每 docx 一次 Vision 呼叫**），結果存
-    `_EMPLOYER_FIELDS_BY_DOCX` 快取。manual_review 列也擷取（許可證待複核≠雇主資料無效）。
-  - `_employer_cols(r)`：組列時依 `source_docx` 查快取；row dict 自帶同名 key 優先。
+    只有選中那頁送 Vision，**每 docx 一次 Vision 呼叫**），回傳
+    `{檔名: 欄位}`，由 main 交給組列與疑慮報表（#25，不寄放在全域）。manual_review 列也擷取（許可證待複核≠雇主資料無效）。
+  - `_employer_cols(r, employer)`：組列時依 `source_docx` 查 employer；row dict 自帶同名 key 優先。
     擷取失敗/找不到契約頁 → 該列 H~O 留空，絕不中斷主流程。
 - **提醒**：Sheet 標題列要手動補上 **E~O**（程式 append 不寫標題列）。
 - **英文標準地址取消輸出**：契約英譯沒有單一正確寫法（Panshih／Panshi 都出現得到），
