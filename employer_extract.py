@@ -20,6 +20,9 @@ from io import BytesIO
 import numpy as np
 from PIL import Image, ImageOps
 
+# docx 內嵌圖與圖序只有一份,與 pipeline 共用(#5);兩側不互相 import。
+from docx_images import image_sort_key, read_images
+
 logger = logging.getLogger(__name__)
 
 CJK        = re.compile(r"[一-鿿]")
@@ -134,12 +137,6 @@ def _balance_brackets(s: str) -> str:
     return s
 
 
-def _natural_key(name: str):
-    """image2 < image10 的自然排序鍵(避免字典序把 image10 排到 image2 前)。"""
-    m = re.search(r"(\d+)", name)
-    return (int(m.group(1)) if m else 1 << 30, name)
-
-
 def crop_fraction(image_bytes: bytes, roi: tuple = EMPLOYER_ROI) -> bytes:
     """依相對比例 roi=(x1,y1,x2,y2) 裁切影像,回傳 PNG bytes。先做 EXIF 方向校正。"""
     img = ImageOps.exif_transpose(Image.open(BytesIO(image_bytes)).convert("RGB"))
@@ -219,7 +216,7 @@ def find_contract_image(images: list[tuple[str, bytes]],
     """
     best: tuple[str, bytes] | None = None
     best_score = 0
-    for name, b in sorted(images, key=lambda x: _natural_key(x[0])):
+    for name, b in sorted(images, key=lambda x: image_sort_key(x[0])):
         s = score_contract_page(b)
         if s > best_score:
             best_score, best = s, (name, b)
@@ -257,7 +254,8 @@ def _scored_pages(docx_path: str) -> list[tuple[int, str, bytes]]:
 
 
 def _sorted_images(docx_path: str) -> list[tuple[str, bytes]]:
-    return sorted(_docx_images(docx_path), key=lambda x: _natural_key(x[0]))
+    """docx 內嵌圖,依圖序。與許可證掃描看到的是同一組(docx_images.read_images)。"""
+    return read_images(docx_path)
 
 
 def _cached_marks(docx_path: str, images: list[tuple[str, bytes]]
@@ -721,17 +719,6 @@ def extract_employer(img_path: str, client=None, deink: bool = True,
         content = deink_red_stamp(content)
     text = vision_full_text(content, client=client)
     return extract_employer_fields(text)
-
-
-def _docx_images(docx_path: str) -> list[tuple[str, bytes]]:
-    """讀 docx 內嵌圖(word/media/*),回傳 (檔名, bytes) 清單。"""
-    import zipfile
-    from pathlib import Path
-    # 含 .gif:契約頁有時存成 GIF(image2.gif),漏收會只剩護照 JPEG(32254 教訓)。
-    exts = {".jpg", ".jpeg", ".png", ".gif"}
-    with zipfile.ZipFile(docx_path) as z:
-        return [(Path(n).name, z.read(n)) for n in z.namelist()
-                if n.startswith("word/media/") and Path(n).suffix.lower() in exts]
 
 
 # 台灣/印尼仲介區塊標記。台印電話都以 0 開頭、格式會重疊,無法靠純格式區分,

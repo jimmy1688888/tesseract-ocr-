@@ -57,6 +57,7 @@ image1  雜訊/空白  │ image2 契約頁 │ image3 次頁 │ image4~ 切結
 故許可證落在 image5 或 image6(隨切結書頁數),mol ROI 只有契約頁讀得到。
 談位置一律用**絕對序號**,不用「倒數第 N 張」——尾端掛著數量不定的空白圖,
 倒數會數到空白(見 [ADR-0005](docs/adr/0005-tiered-permit-image-scan.md))。
+程式碼裡讀圖與排序只有一份:`docx_images.py`(許可證掃描與雇主擷取共用)。
 _Avoid_: 頁碼、第幾頁(docx 的分頁由 Word 排版決定,zip 裡沒有這個資訊)
 
 ## 擷取與決策

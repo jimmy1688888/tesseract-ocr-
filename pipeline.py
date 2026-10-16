@@ -52,7 +52,6 @@ import re
 import csv
 import json
 import time
-import zipfile
 import logging
 import argparse
 import functools
@@ -85,6 +84,9 @@ from permit_lookup import PermitLookup
 
 # 一批:這次要處理哪些 docx(完整路徑)。只是設定,結果不放進去(ADR-0009)。
 from batch import Batch
+
+# docx 內嵌圖與圖序只有一份,與 employer_extract 共用(#5)。
+import docx_images
 
 if TYPE_CHECKING:   # 只給型別標註看;執行期在 preflight 的函式裡才 import(見該段說明)
     from gcp_identity.checks import CheckResult
@@ -125,10 +127,7 @@ def _permit_lookup() -> "PermitLookup | None":
 INPUT_DIR  = Path("./docs")
 # 輸出目錄與它衍生的路徑在 batch.py(Batch.output_dir),跟著一批往下傳(ADR-0009)。
 TESS_LANG  = "ind+eng"
-# 含 .gif:部分 docx 把契約頁存成 GIF(image2.gif/image3.gif),漏收會讓
-# 整份只剩護照 JPEG、契約頁被靜默略過(32254-32262 教訓)。PIL 原生可讀,
-# 後續 .convert("RGB") 會處理調色盤/灰階,Tesseract 與 Vision 都吃得下。
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif"}
+# 會讀哪些內嵌圖(副檔名集合)與圖序在 docx_images.py。
 
 # Google Sheets：試算表 ID 與工作表名稱在 google_clients.py。
 # 每列寫入 15 欄：A=source_docx, B=final_value(許可證), C=status, D=reason,
@@ -546,34 +545,6 @@ def find_permits(text: str, permit_id_list=None,
 # ④ 影像工具
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _image_sort_key(name: str) -> tuple[int, int, str]:
-    """為圖檔名提供 natural sort key,讓 image1 < image2 < ... < image10。
-
-    docx 內的圖通常命名為 image{N}.{ext}。預設的 lexical sort 會把
-    image10.jpeg 排在 image2.jpeg 之前(因為字串 '1' < '2'),導致 pipeline
-    可能先掃到第 10 頁的舊資料而非第 2 頁的當前資料。
-
-    本函數從檔名抽出第一個數字當排序鍵:
-      - 有數字 → (0, 數字值, 原名)
-      - 無數字 → (1, 0, 原名) (排在所有有數字的後面)
-
-    範例:
-      _image_sort_key("image1.jpeg")  → (0, 1, "image1.jpeg")
-      _image_sort_key("image10.jpeg") → (0, 10, "image10.jpeg")
-      _image_sort_key("cover.png")    → (1, 0, "cover.png")
-    """
-    m = re.search(r"\d+", name)
-    if m:
-        return (0, int(m.group()), name)
-    return (1, 0, name)
-
-
-def _image_index(name: str) -> int:
-    """imageN.jpeg → N。檔名沒有數字回傳 0(永遠不屬於第一層)。"""
-    key = _image_sort_key(name)
-    return key[1] if key[0] == 0 else 0
-
-
 def split_tiers(images: list[tuple[str, bytes]]
                 ) -> tuple[list[tuple[str, bytes]], list[tuple[str, bytes]]]:
     """把圖分成 (第一層, 其餘),兩者聯集恆等於輸入,順序不變。
@@ -581,8 +552,8 @@ def split_tiers(images: list[tuple[str, bytes]]
     命名不是 imageN 的圖一律歸第二層 —— 第一層是一組「賭它在這裡」的位置,
     賭不到就擴掃,把身分不明的檔名放進第一層只會白花時間。
     """
-    tier1  = [x for x in images if _image_index(x[0]) in TIER1_IMAGES]
-    rest   = [x for x in images if _image_index(x[0]) not in TIER1_IMAGES]
+    tier1  = [x for x in images if docx_images.image_index(x[0]) in TIER1_IMAGES]
+    rest   = [x for x in images if docx_images.image_index(x[0]) not in TIER1_IMAGES]
     return tier1, rest
 
 
@@ -599,22 +570,6 @@ def has_permit_vote(rows: list[ScanResult]) -> bool:
                         多數票可能就在還沒掃的那幾張圖上(見 ADR-0005)。
     """
     return any(r.id_from_vote and r.id and r.id_conf > CONF_VOTE_MIN for r in rows)
-
-
-def extract_images_from_docx(docx_path: Path) -> list[tuple[str, bytes]]:
-    """從 docx 取出所有圖檔,**保證以 natural sort 順序回傳**。
-
-    順序很重要:同一份 docx 內的 image1, image2, ... image10 應該嚴格依數字序處理,
-    避免 lexical sort 把 image10 排在 image2 之前,導致先掃到後面頁的舊資料。
-    """
-    images = []
-    with zipfile.ZipFile(docx_path, "r") as z:
-        for fname in z.namelist():
-            if fname.startswith("word/media/") and Path(fname).suffix.lower() in IMAGE_EXTENSIONS:
-                images.append((Path(fname).name, z.read(fname)))
-    # natural sort:image1 < image2 < ... < image10(避免 lexical sort 的 image10 < image2 問題)
-    images.sort(key=lambda x: _image_sort_key(x[0]))
-    return images
 
 
 def auto_rotate(img: Image.Image) -> Image.Image:
@@ -1134,7 +1089,7 @@ def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
             # 衝突時以 permit ROI 的最早圖為主，避免 mol 誤讀覆蓋正確的 permit 值。
             priority_pool = permit_rows if permit_rows else mol_rows
             earliest_row, earliest_val, earliest_conf = min(
-                priority_pool, key=lambda x: _image_sort_key(x[0].image_name)
+                priority_pool, key=lambda x: docx_images.image_sort_key(x[0].image_name)
             )
             queue.append(VisionQueueItem(
                 source_docx     = earliest_row.source_docx,
@@ -1159,7 +1114,7 @@ def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
             if r.id_from_vote and r.id and r.id_conf > CONF_VOTE_MIN
         ]
         if vote_rows:
-            best_row = min(vote_rows, key=lambda r: _image_sort_key(r.image_name))
+            best_row = min(vote_rows, key=lambda r: docx_images.image_sort_key(r.image_name))
             queue.append(VisionQueueItem(
                 source_docx     = best_row.source_docx,
                 image_name      = best_row.image_name,
@@ -2059,7 +2014,7 @@ def run_scan(batch: Batch, image_filter: str = "",
         writer.writeheader()
 
         for docx_path in batch.docx_files:
-            all_images = extract_images_from_docx(docx_path)
+            all_images = docx_images.read_images(docx_path)
             # docx_class 一律用「原始張數」判定，必須在任何過濾之前算：把過濾後
             # 的張數丟進 classify_by_count，5 張圖的 docx 剩 3 張就會被判成
             # small，整份改走 mol-only 的另一條路（ADR-0005）。
@@ -2419,7 +2374,7 @@ def main(opts: argparse.Namespace) -> None:
     # ── 步驟 1：prefilter（已在 scan 內呼叫 classify_by_count，此處記錄摘要）
     logger.info("── 步驟 1：prefilter 分類 ──")
     for dp in docx_files:
-        imgs = extract_images_from_docx(dp)
+        imgs = docx_images.read_images(dp)
         logger.info(f"  {dp.name}: {len(imgs)} 張 → {classify_by_count(len(imgs))}")
 
     # ── 步驟 2：scan → matches.csv ─────────────────────────────────────────

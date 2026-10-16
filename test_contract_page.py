@@ -97,7 +97,7 @@ def _clear_cache():
 
 
 def _make_docx(path, images: dict[str, bytes]):
-    """做一份只含 word/media/* 的假 docx(_docx_images 只讀這些項)。"""
+    """做一份只含 word/media/* 的假 docx(docx_images.read_images 只讀這些項)。"""
     with zipfile.ZipFile(path, "w") as z:
         for name, data in images.items():
             z.writestr(f"word/media/{name}", data)

@@ -21,7 +21,7 @@ class TestFromDir:
     """Word 的鎖定檔不得進入處理清單。
 
     Word 開著某份文件時會在同目錄產生 `~$檔名.docx`(約 162 bytes,不是 zip)。
-    它符合 *.docx,而 extract_images_from_docx 會在它上面拋 BadZipFile 讓整批
+    它符合 *.docx,而 docx_images.read_images 會在它上面拋 BadZipFile 讓整批
     當場掛掉——觸發條件只是「有人正開著那份檔案在看」。
     """
 
@@ -179,7 +179,7 @@ class TestMainStopsWhenNothingToProcess:
             raise _Stop      # 本檔只關心「有沒有開跑、跑哪幾份」,後面的步驟不走
 
         monkeypatch.setattr(pipeline, "run_scan", fake_run_scan)
-        monkeypatch.setattr(pipeline, "extract_images_from_docx", lambda p: [])
+        monkeypatch.setattr(pipeline.docx_images, "read_images", lambda p: [])
         return calls
 
     def test_missing_file_is_not_scanned(self, caplog, scanned, tmp_path):

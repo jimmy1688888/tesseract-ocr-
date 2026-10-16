@@ -25,7 +25,7 @@ class Batch:
         """資料夾裡要處理的 .docx,已排除 Word 的鎖定檔。
 
         Word 開著某份文件時會在同目錄產生 `~$檔名.docx`(約 162 bytes,不是 zip)。
-        它符合 *.docx,glob 撈得到,而 extract_images_from_docx 會在它上面拋
+        它符合 *.docx,glob 撈得到,而 docx_images.read_images 會在它上面拋
         BadZipFile 讓整批當場掛掉 —— 而觸發條件只是「有人正開著那份檔案在看」。
         """
         return cls(tuple(sorted(p for p in input_dir.glob("*.docx")

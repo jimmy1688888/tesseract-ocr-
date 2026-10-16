@@ -41,7 +41,7 @@ def scan_env(tmp_path, monkeypatch):
     scanned = {"large": [], "small": []}
 
     def make(images, large_result=lambda docx, name: None):
-        monkeypatch.setattr(P, "extract_images_from_docx", lambda p: list(images))
+        monkeypatch.setattr(P.docx_images, "read_images", lambda p: list(images))
 
         def _large(docx, name, data, out_dir, roi_filter=""):
             scanned["large"].append(name)
