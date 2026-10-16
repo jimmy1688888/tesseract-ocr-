@@ -138,3 +138,16 @@ def offline_identity():
     ident = _OfflineIdentity()
     identity.install(ident)
     return ident
+
+
+
+# ─── 真實素材 + 真的跑 Tesseract 的測試共用 ─────────────────────────────────
+@pytest.fixture
+def real_ocr():
+    """找得到 tesseract.exe 才跑;前後清掉契約頁評分快取,不讓前一支測試的分數漏進來。"""
+    import employer_extract
+    from real_samples import needs_tesseract
+    needs_tesseract()
+    employer_extract._page_score_cache.clear()
+    yield
+    employer_extract._page_score_cache.clear()

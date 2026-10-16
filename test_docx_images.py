@@ -12,7 +12,6 @@
 可能導致先掃到後面頁的舊資料。
 """
 
-import shutil
 import zipfile
 import tempfile
 from io import BytesIO
@@ -23,6 +22,7 @@ from PIL import Image
 
 import employer_extract as ee
 from docx_images import IMAGE_EXTENSIONS, image_index, image_sort_key, read_images
+from real_samples import REAL_DOCX, needs_samples, sample
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -154,11 +154,6 @@ class TestImageIndex:
 # 真實素材:samples/docs/(使用者提供,含個資,不進版控;不在時 skip)
 # ═══════════════════════════════════════════════════════════════════════════
 
-SAMPLES = Path(__file__).resolve().parent / "samples" / "docs"
-# 排除 Word 的鎖定檔 ~$*.docx:有人正開著那份素材時它就在,而且不是 zip。
-REAL_DOCX = sorted(p for p in SAMPLES.glob("*.docx")
-                   if not p.name.startswith("~$")) if SAMPLES.is_dir() else []
-needs_samples = pytest.mark.skipif(not REAL_DOCX, reason="沒有真實素材 samples/docs/*.docx")
 
 
 def _as_tif(src: Path, dst: Path, media_name: str) -> Path:
@@ -224,23 +219,10 @@ class TestTifContractPage:
     差距最大、判定最穩,所以用它。
     """
 
-    SAMPLE = SAMPLES / "33701.docx"
-
-    @pytest.fixture(autouse=True)
-    def _needs_real_ocr(self):
-        if not self.SAMPLE.exists():
-            pytest.skip("沒有 samples/docs/33701.docx")
-        import pytesseract
-        ee._ensure_tesseract()            # 與正式流程同一套找 tesseract.exe 的方式
-        cmd = pytesseract.pytesseract.tesseract_cmd
-        if not Path(cmd).exists() and not shutil.which(cmd):
-            pytest.skip("沒有 Tesseract")
-        ee._page_score_cache.clear()
-        yield
-        ee._page_score_cache.clear()
+    pytestmark = pytest.mark.usefixtures("real_ocr")
 
     def test_tif_contract_page_is_picked(self, tmp_path):
-        tif = _as_tif(self.SAMPLE, tmp_path / "33701.docx", "image2.png")
+        tif = _as_tif(sample("33701.docx"), tmp_path / "33701.docx", "image2.png")
         best = ee._best_scored_page(ee._scored_pages(str(tif)))
         assert best is not None
         assert best[1] == "image2.tif"
