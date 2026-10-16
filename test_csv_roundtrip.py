@@ -11,6 +11,9 @@ False,整批安靜地改走衝突路徑——不拋錯、不少欄。
   - 所有欄位同時設成非預設值 → 同上
 以後 ScanResult 新增欄位,自動被涵蓋;忘了加進 CSV_FIELDS 也會紅。
 
+round-trip 抓不到「寫出端與讀回端一起改」——但那會讓磁碟上既有的 matches.csv
+讀錯,所以另外用一列磁碟格式釘住 bool 欄位的字面值。
+
 CSV 檔的寫法(CSV_FIELDS、utf-8-sig、newline="")照 pipeline 寫 matches.csv
 與 build_vision_queue 讀回的方式,讓 "✓" 這類非 ASCII 字面值真的過一次編碼。
 """
@@ -22,11 +25,11 @@ from enum import Enum
 
 import pytest
 
-from pipeline import CSV_FIELDS, ScanResult
+from pipeline import CSV_FIELDS, ResultStatus, ScanResult
 
 
 _HINTS = typing.get_type_hints(ScanResult)
-_FIELDS = [f for f in dataclasses.fields(ScanResult)]
+_FIELDS = list(dataclasses.fields(ScanResult))
 
 
 def _non_default(field: dataclasses.Field):
@@ -46,7 +49,7 @@ def _non_default(field: dataclasses.Field):
     raise TypeError(f"{field.name}: 測試不認得型別 {t!r},請在 _non_default 補上")
 
 
-def _base() -> ScanResult:
+def _minimal_result() -> ScanResult:
     """只填必填欄位,其餘維持預設值。"""
     return ScanResult(source_docx="a.docx", image_name="image1.png", docx_class="large")
 
@@ -69,14 +72,14 @@ def test_csv_fields_cover_every_scanresult_field():
 
 
 def test_defaults_round_trip(tmp_path):
-    r = _base()
+    r = _minimal_result()
     assert _through_csv_file(r, tmp_path) == r
 
 
 @pytest.mark.parametrize("field", _FIELDS, ids=lambda f: f.name)
 def test_each_field_round_trips_alone(field, tmp_path):
-    r = dataclasses.replace(_base(), **{field.name: _non_default(field)})
-    assert getattr(r, field.name) != getattr(_base(), field.name), "測試值必須與預設不同,否則驗不到東西"
+    r = dataclasses.replace(_minimal_result(), **{field.name: _non_default(field)})
+    assert getattr(r, field.name) != getattr(_minimal_result(), field.name), "測試值必須與預設不同,否則驗不到東西"
     assert _through_csv_file(r, tmp_path) == r
 
 
@@ -86,3 +89,28 @@ def test_all_fields_non_default_round_trip(tmp_path):
         if f.default is not dataclasses.MISSING:
             assert getattr(r, f.name) != f.default, f.name
     assert _through_csv_file(r, tmp_path) == r
+
+
+@pytest.mark.parametrize("status", list(ResultStatus), ids=lambda s: s.name)
+def test_every_status_round_trips(status, tmp_path):
+    r = dataclasses.replace(_minimal_result(), status=status)
+    assert _through_csv_file(r, tmp_path) == r
+
+
+# 既有 matches.csv 上的字面值。要改格式，得連舊檔的讀法一起想清楚，不能兩端一起換字。
+_DISK_LITERALS = {
+    "mol_from_vote": "Y",
+    "id_from_vote":  "Y",
+    "cross_match":   "✓",
+    "vision_review": "Y",
+}
+
+
+def test_bool_literals_match_existing_csv_files():
+    on_disk = {"source_docx": "a.docx", "image_name": "image1.png",
+               "docx_class": "large", **_DISK_LITERALS}
+    r = ScanResult.from_csv_row(on_disk)
+    for name in _DISK_LITERALS:
+        assert getattr(r, name) is True, name
+    written = r.to_csv_row()
+    assert {k: written[k] for k in _DISK_LITERALS} == _DISK_LITERALS
