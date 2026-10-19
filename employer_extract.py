@@ -362,12 +362,12 @@ def deink_red_stamp(image_bytes: bytes, *, whiten_thresh: int = 45,
     return buf.getvalue()
 
 
-# 抽取失敗時回傳的空欄位。鍵與成功路徑一致(含 _standardize_address 補的四個),
+# 抽取失敗時回傳的空欄位。鍵與成功路徑一致(含 _standardize_address 補的五個),
 # 讓呼叫端不必分辨走的是哪條路。
 _EMPTY_FIELDS = {
     "雇主名稱_中": "", "雇主名稱_英": "", "地址_中": "", "地址_英": "", "電話": "",
     "地址_中_標準": "", "郵遞區號": "", "地址_比對": False,
-    "地址_疑慮": "", "名稱_疑慮": "", "門牌_疑慮": "", "疑慮標示": "",
+    "地址_疑慮": "", "縣市_疑慮": "", "名稱_疑慮": "", "門牌_疑慮": "", "疑慮標示": "",
 }
 
 
@@ -433,10 +433,15 @@ def extract_employer_fields(text: str) -> dict:
         phone = max(pool, key=lambda p: pool[p])
 
     # ── 地址:中文靠行政區+街道 pattern;英文靠地址關鍵字 ──
-    addr_cn = addr_en = en_hint = ""
+    # 中文先看雇主區塊內「地址」標籤之後幾行:兩欄版面被逐欄序列化時,仲介框的
+    # 下半段(含仲介的中文地址)會夾進雇主區塊、排在雇主地址之前(33704)。
+    # 找不到才退回「區塊內第一個像地址的行」—— 標籤與地址也會被拆開(32510、
+    # 32518、33701)。只看區塊內的標籤:仲介框也有地址標籤(ADR-0003 追加)。
+    addr_cn = _labelled_cn_address(seg)
+    addr_en = en_hint = ""
     for idx, l in enumerate(seg):
-        if not addr_cn and _has_cjk(l) and CN_ADDR.search(l):
-            addr_cn = LABEL_WORDS.sub("", l).lstrip(":： ").strip()
+        if not addr_cn and _is_cn_address(l):
+            addr_cn = _clean_cn_address(l)
         if (not addr_en and not _has_cjk(l) and EN_ADDR_KW.search(l) and len(l) > 12
                 and not _is_institution_en(l)):
             en = l
@@ -521,6 +526,31 @@ def extract_employer_fields(text: str) -> dict:
 CN_BOILERPLATE = re.compile(
     r"勞動契約|家庭幫傭|監護工|看護工|家庭看護|製造工|廠工|漁工|"
     r"以下簡稱|以下$|^以下")
+
+
+# 只認行首的「地址」:標籤一定在行首,內文提到地址(「通訊地址…」)的不是標籤。
+_CN_ADDR_LABEL = re.compile(r"^地址")
+# 標籤之後看幾行:逐欄序列化會在標籤與值之間夾進別欄的一兩行(印尼文標籤、職類)。
+_LABEL_LOOKAHEAD = 3
+
+
+def _is_cn_address(line: str) -> bool:
+    return _has_cjk(line) and bool(CN_ADDR.search(line))
+
+
+def _clean_cn_address(line: str) -> str:
+    return LABEL_WORDS.sub("", line).lstrip(":： ").strip()
+
+
+def _labelled_cn_address(seg: list[str]) -> str:
+    """雇主區塊內「地址」標籤那行(含)起幾行內的第一個中文地址;沒有就空字串。"""
+    for i, l in enumerate(seg):
+        if not _CN_ADDR_LABEL.search(l):
+            continue
+        for cand in seg[i:i + 1 + _LABEL_LOOKAHEAD]:
+            if _is_cn_address(cand):
+                return _clean_cn_address(cand)
+    return ""
 
 
 def _name_continuation(cand: str, nxt: str) -> str:
@@ -674,6 +704,27 @@ def _house_number_doubt(addr_cn: str, addr_en: str) -> str:
     return "" if cn == en else f"J:門牌號中英不符({cn}／{en})"
 
 
+def _city_mismatch_doubt(city_cn: str, en_text: str) -> str:
+    """標準化後的中文縣市與英文地址的官方縣市名不同即標示(ADR-0003 追加 2026-10-19)。
+
+    「英文地址不納入判定」的限縮例外:官方英文**縣市名**是固定的,只做精確包含、
+    取最長命中(Taipei City 不誤配 New Taipei City),沒有拼法變體的問題。
+    兩邊都確定才比:中文縣市比不到另有疑慮;英文比不到任何官方縣市就不標
+    (寧可漏報,不用模糊比對製造誤報)。不比到「區」:區名拼法變體多。
+
+    33704:仲介的中文地址夾進雇主區塊被挑中,英文地址卻是雇主的 —— 門牌檢查因
+    中文門牌被切到下一行而沉默,這是唯一看得出來的地方。
+    """
+    if not city_cn or not en_text:
+        return ""
+    from address_db import _match_city_area_en
+    hit = _match_city_area_en(en_text)
+    if not hit:
+        return ""
+    (city_raw, city_eng, _areas), _area = hit
+    return "" if city_raw == city_cn else f"J:縣市中英不符({city_cn}／{city_eng})"
+
+
 def _compose_doubt(fields: dict) -> str:
     """把各欄的疑慮併成 L 欄一格,每條冠上欄名指明是哪一格。
 
@@ -681,14 +732,14 @@ def _compose_doubt(fields: dict) -> str:
     雇主資料,是同一個主題下的多個欄位,合在一格不算一詞多義。
     """
     parts = [fields.get("名稱_疑慮", ""), fields.get("地址_疑慮", ""),
-             fields.get("門牌_疑慮", "")]
+             fields.get("縣市_疑慮", ""), fields.get("門牌_疑慮", "")]
     return "；".join(p for p in parts if p)
 
 
 def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
     """用官方地址庫(address_db)校正地址,非破壞式補上標準欄位。
 
-    - 新增:地址_中_標準、郵遞區號、地址_比對(是否命中)、地址_疑慮。
+    - 新增:地址_中_標準、郵遞區號、地址_比對(是否命中)、地址_疑慮、縣市_疑慮。
     - **不動 地址_英**:英文欄純粹是 OCR 讀到什麼就是什麼,讀不到就空。官方英譯
       既不輸出也不回填——契約英譯沒有單一正確寫法,官方譯名並不比契約上的更權威,
       混進來只會讓「M 欄是 OCR 原文」這件事出現例外。
@@ -703,13 +754,14 @@ def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
     fields.setdefault("郵遞區號", "")
     fields.setdefault("地址_比對", False)
     fields.setdefault("地址_疑慮", "")
+    fields.setdefault("縣市_疑慮", "")
     if not raw_cn.strip():
         fields["地址_疑慮"] = "J:中文地址未擷取到"
         return
+    en_text = fields.get("地址_英", "") or en_hint
     try:
         from address_db import normalize_address
-        r = normalize_address(
-            raw_cn, en_text=fields.get("地址_英", "") or en_hint)
+        r = normalize_address(raw_cn, en_text=en_text)
     except Exception:
         fields["地址_疑慮"] = "J:地址庫無法使用"
         return
@@ -718,6 +770,7 @@ def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
         return
 
     fields["地址_比對"] = True
+    fields["縣市_疑慮"] = _city_mismatch_doubt(r["city"], en_text)
     # 縣市只靠模糊比對湊上、且路名也沒配到時,郵遞區號不採用:模糊配錯縣市時,
     # 「中山區」「中山路」這類全台通用的名字在錯誤縣市底下照樣配得到,會產出
     # 確信的錯值(實測「台桃市中壢區」→ 臺北市中山區、郵遞 104)。
