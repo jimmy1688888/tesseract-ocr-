@@ -967,6 +967,25 @@ def agency_phones_from_next_page(docx_path: str, client=None) -> list[str]:
     return agency_block_from_next_page(docx_path, client=client)["phones"]
 
 
+def pick_contract_page(scored: list[tuple[int, str, bytes]]
+                       ) -> tuple[int, str, bytes, bool] | None:
+    """正式流程選哪張當契約頁:(分數, 檔名, bytes, 是否找到)。
+
+    最高分頁;未達 MIN_CONTRACT_SCORE 時仍回它當候選(找到=False,呼叫端不送
+    Vision、只留截圖);全零分則退 image2(樣本慣例上契約頁多在第 2 張),沒有
+    image2 就用第一張。雇主擷取與真實素材錄製(snapshots.py)共用這一套規則。
+    """
+    best = _best_scored_page(scored)
+    if best is None:
+        return None
+    best_s, name, raw = best
+    found = best_s >= MIN_CONTRACT_SCORE
+    if not found and best_s == 0:
+        name, raw = next(((n, b) for _s, n, b in scored
+                          if n.startswith("image2.")), (name, raw))
+    return best_s, name, raw, found
+
+
 def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
                                roi: tuple | None = EMPLOYER_ROI,
                                crop_dir: str = "") -> dict:
@@ -991,12 +1010,7 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
     if not scored:
         return {**empty, "_image": "", "_note": "docx 無內嵌圖", "_crop": ""}
 
-    best_s, name, raw = _best_scored_page(scored)
-    found = best_s >= MIN_CONTRACT_SCORE
-    if not found and best_s == 0:
-        # 全零分:退 image2(樣本慣例上契約頁多在第 2 張),沒有再用第一張
-        name, raw = next(((n, b) for _s, n, b in scored
-                          if n.startswith("image2.")), (name, raw))
+    best_s, name, raw, found = pick_contract_page(scored)
 
     content = raw
     if roi:

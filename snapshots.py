@@ -11,6 +11,9 @@ _note(錨定失敗原因);內部鍵不記 —— 疑慮怎麼組裝是內部的�
   - pytest 只比對、絕不寫入
   - 重錄只能用 `python snapshots.py record`:先印逐格 diff(這就是審查畫面),
     舊快照加日期留存,不直接覆蓋
+
+新素材(放進 samples/docs/ 的 docx)由同一個指令先補 Vision 全文:列出選中的契約頁
+請人確認、說好共幾次 Vision 才打,每份只打一次(fill_missing_vision)。
 """
 import hashlib
 import json
@@ -136,10 +139,114 @@ def record(out: Callable[[str], None] = print,
     return p
 
 
+# ─── 新素材:補 Vision 全文與契約頁核對值(#33) ──────────────────────────
+
+ASK_PAGE = "  y=對 / 圖檔名=改用那張 / g=只打不記核對值 / Enter=跳過:"
+
+
+def _vision_ok() -> tuple[bool, str]:
+    """真的送一張小圖確認 Vision 可用(約 1 unit)。"""
+    import identity
+    from gcp_identity.checks import check_vision
+    r = check_vision(identity.current())
+    return (r.ok and not r.skipped), (r.detail or r.fix)
+
+
+def _fetch_text(content: bytes) -> str:
+    import google_clients
+    from employer_extract import vision_full_text
+    return vision_full_text(content, client=google_clients.vision_client())
+
+
+def _prepare(raw: bytes) -> bytes:
+    """與正式流程同樣的送 Vision 前處理:ROI 裁切 → 去紅章。"""
+    from employer_extract import EMPLOYER_ROI, crop_fraction, deink_red_stamp
+    return deink_red_stamp(crop_fraction(raw, EMPLOYER_ROI))
+
+
+def _score_pages(docx: Path) -> list[tuple[int, str, bytes]]:
+    from employer_extract import _scored_pages
+    return _scored_pages(str(docx))
+
+
+def fill_missing_vision(ask: Callable[[str], str] = input,
+                        out: Callable[[str], None] = print,
+                        vision_ok: Callable[[], tuple[bool, str]] = _vision_ok,
+                        fetch_text: Callable[[bytes], str] = _fetch_text,
+                        score_pages: Callable[[Path], list] = _score_pages,
+                        prepare: Callable[[bytes], bytes] = _prepare) -> list[str]:
+    """有 docx、沒有 Vision 全文的素材:選契約頁 → 人確認 → 每份打一次 Vision 存全文。
+
+    契約頁用正式流程同一套規則(pick_contract_page)。人回答「對」或指定別張,
+    那張才記成契約頁核對值;只說「打」不記 —— 程式不把機器的選擇升格成真值。
+    打之前先列出共幾次並等確認,再確認 Vision 可用;不可用就停,不重試。
+    回傳這次存了全文的 stem。
+    """
+    from employer_extract import EMPLOYER_ROI, pick_contract_page
+
+    missing = [d for d in rs.docx_samples() if not rs.vision_path(d.stem).exists()]
+    if not missing:
+        return []
+    out(f"{len(missing)} 份素材還沒有 Vision 全文。請打開圖檔確認契約頁:")
+
+    plan: list[tuple[str, str, bytes]] = []
+    for docx in missing:
+        scored = score_pages(docx)
+        pick = pick_contract_page(scored)
+        if pick is None:
+            out(f"{docx.name}:docx 無內嵌圖,略過")
+            continue
+        score, name, raw, found = pick
+        second = max((s for s, n, _b in scored if n != name), default=0)
+        review = rs.ROOT / "review" / f"{docx.stem}_{name}"
+        review.parent.mkdir(parents=True, exist_ok=True)
+        review.write_bytes(raw)
+        out(f"{docx.name} → {name}(分數 {score},次高 {second})"
+            + ("" if found else "  ⚠ 未達門檻,正式流程不會送 Vision")
+            + f"  圖:{review}")
+        pages = {n: b for _s, n, b in scored}
+        while True:
+            answer = ask(ASK_PAGE).strip()
+            if answer == "":
+                break
+            if answer == "y" or answer in pages:
+                page = name if answer == "y" else answer
+                rs.record_checked_contract_page(docx.name, page)
+                plan.append((docx.stem, page, pages[page]))
+                break
+            if answer == "g":
+                if not found:
+                    out("  未達門檻的候選頁不送 Vision:請指定圖檔名,或 Enter 跳過")
+                    continue
+                plan.append((docx.stem, name, raw))
+                break
+            out(f"  看不懂 {answer!r},請重答")
+
+    if not plan:
+        return []
+    if ask(f"共 {len(plan)} 次 Vision,開打?[y/N]").strip().lower() != "y":
+        out("未打 Vision。")
+        return []
+    ok, detail = vision_ok()
+    if not ok:
+        out(f"Vision 不可用,停止(不重試):{detail}"
+            "\n若是要求重新登入,請先跑 重新登入.bat")
+        return []
+
+    roi = str(EMPLOYER_ROI[3])
+    done = []
+    for stem, page, raw in plan:
+        rs.save_vision_text(stem, page, roi, fetch_text(prepare(raw)))
+        done.append(stem)
+        out(f"{stem}:已存 Vision 全文({page})")
+    return done
+
+
 def main(argv: list[str]) -> int:
     if argv[1:] != ["record"]:
         print("用法:python snapshots.py record")
         return 2
+    fill_missing_vision()
     record()
     return 0
 

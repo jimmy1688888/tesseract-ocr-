@@ -165,6 +165,33 @@ class TestScoreCache:
         assert counting_scorer == {}
 
 
+# ── 正式流程選哪頁(雇主擷取與素材錄製共用,#33)────────────────────────────
+
+class TestPickContractPage:
+    """最高分頁;未達門檻標成找不到(不送 Vision);全零分退 image2 慣例位置。"""
+
+    M = ee.MIN_CONTRACT_SCORE
+
+    def test_highest_score_is_found(self):
+        scored = [(1, "image1.png", b"1"), (self.M + 2, "image3.png", b"3")]
+        assert ee.pick_contract_page(scored) == (self.M + 2, "image3.png", b"3", True)
+
+    def test_below_threshold_keeps_best_but_not_found(self):
+        scored = [(self.M - 1, "image1.png", b"1"), (0, "image2.png", b"2")]
+        assert ee.pick_contract_page(scored) == (self.M - 1, "image1.png", b"1", False)
+
+    def test_all_zero_falls_back_to_image2(self):
+        scored = [(0, "image1.png", b"1"), (0, "image2.jpeg", b"2")]
+        assert ee.pick_contract_page(scored) == (0, "image2.jpeg", b"2", False)
+
+    def test_all_zero_without_image2_keeps_first(self):
+        scored = [(0, "image1.png", b"1"), (0, "image3.png", b"3")]
+        assert ee.pick_contract_page(scored) == (0, "image1.png", b"1", False)
+
+    def test_no_images(self):
+        assert ee.pick_contract_page([]) is None
+
+
 # ── 機構類契約樣板(#27)───────────────────────────────────────────────────
 
 class TestInstitutionTemplateLabels:
