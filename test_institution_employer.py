@@ -12,8 +12,10 @@
 
 以下用捏造的機構資料重現 33703 的 Vision 序列化形態(不貼個資)。
 """
+import pytest
+
 from employer_extract import extract_employer_fields
-from real_samples import vision_sample
+from real_samples import checked_employer_fields, employer_text
 
 # 33703 在現行 ROI 下的 Vision 序列化順序:中文名斷兩行;Nama 標籤之後先插進
 # 「地址:」與中文地址,才輪到機構英文名(兩行,第二行是負責人拼音)
@@ -182,8 +184,13 @@ class TestFamilyContractNameNotJoined:
 
 
 def test_33703_replayed_from_saved_vision_text():
-    """33703 的真實 Vision 全文(現行 ROI)離線重放;素材不在就 skip。"""
-    s = vision_sample("33703")
-    f = extract_employer_fields(s["texts"][s["roi"]])
-    for k, v in s["expected"].items():
+    """33703 的真實 Vision 全文(現行 ROI)離線重放,比對核對值;素材不在就 skip。
+
+    核對值只收人看圖可確認的欄;疑慮是程式的陳述,交給快照守(test_snapshots)。
+    """
+    f = extract_employer_fields(employer_text("33703"))
+    checked = checked_employer_fields("33703")
+    if not checked:
+        pytest.skip("33703 沒有雇主欄位核對值")
+    for k, v in checked.items():
         assert f[k] == v, k

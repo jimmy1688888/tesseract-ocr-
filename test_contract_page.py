@@ -14,7 +14,7 @@ import zipfile
 import pytest
 
 import employer_extract as ee
-from real_samples import REAL_DOCX, needs_samples, sample
+from real_samples import REAL_DOCX, checked_contract_page, needs_samples, sample
 
 # 資料表頁:去紅章後才讀得到的欄位標籤(FORM ×2)
 _FORM_TEXT = ("雇主名稱:彰化縣芳苑鄉農會(林木村) "
@@ -182,17 +182,6 @@ class TestInstitutionTemplateLabels:
             "biaya perawatan di Rumah Sakit ditanggung oleh PIHAK PERTAMA")
 
 
-# 每份真實素材的契約頁(雇主資料表)。33703 由使用者看圖確認;其餘是修 #27 之前
-# 就選中、分數 7~11 遙遙領先的結果。新素材進來時,先由人確認契約頁再加進來。
-EXPECTED_CONTRACT_PAGE = {
-    "33701.docx": "image2.png",  "33702.docx": "image2.png",
-    "33703.docx": "image2.png",  "33704.docx": "image2.jpeg",
-    "33705.docx": "image2.jpeg", "33706.docx": "image2.png",
-    "33707.docx": "image2.jpeg", "33708.docx": "image2.jpeg",
-    "33709.docx": "image2.jpeg", "33710.docx": "image2.jpeg",
-}
-
-
 @pytest.mark.usefixtures("real_ocr")
 class TestRealContractPagePicks:
     """真實素材上「選哪張當契約頁」(真的跑 Tesseract)。"""
@@ -217,7 +206,12 @@ class TestRealContractPagePicks:
     @needs_samples
     @pytest.mark.parametrize("docx", REAL_DOCX, ids=lambda p: p.name)
     def test_every_sample_picks_its_contract_page(self, docx):
-        """每份素材選中的契約頁與 EXPECTED_CONTRACT_PAGE 相同。改評分規則時跑這組。"""
-        if docx.name not in EXPECTED_CONTRACT_PAGE:
-            pytest.skip(f"{docx.name} 是新素材:先由人確認契約頁,再加進 EXPECTED_CONTRACT_PAGE")
-        assert self._pick(docx) == EXPECTED_CONTRACT_PAGE[docx.name]
+        """每份素材選中的契約頁與它的契約頁核對值相同。改評分規則時跑這組。
+
+        核對值在 samples/checked_values.json(跟著素材走,不進版控)。
+        """
+        expected = checked_contract_page(docx.name)
+        if expected is None:
+            pytest.skip(f"{docx.name} 沒有契約頁核對值:先由人看圖確認"
+                        "(python snapshots.py record 會列出來請你確認)")
+        assert self._pick(docx) == expected
