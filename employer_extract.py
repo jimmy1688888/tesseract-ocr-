@@ -972,7 +972,7 @@ def pick_contract_page(scored: list[tuple[int, str, bytes]]
     """正式流程選哪張當契約頁:(分數, 檔名, bytes, 是否找到)。
 
     最高分頁;未達 MIN_CONTRACT_SCORE 時仍回它當候選(找到=False,呼叫端不送
-    Vision、只留截圖);全零分則退 image2(樣本慣例上契約頁多在第 2 張),沒有
+    Vision、只留截圖);全零分則退 image2(實測慣例上契約頁多在第 2 張),沒有
     image2 就用第一張。雇主擷取與真實素材錄製(snapshots.py)共用這一套規則。
     """
     best = _best_scored_page(scored)

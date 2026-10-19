@@ -25,10 +25,12 @@ def test_employer_fields_match_snapshot(stem):
     assert msg is None, msg
 
 
-def test_keys_are_the_sheets_employer_columns_plus_note():
-    """快照的鍵抄自 Sheets 的 H~O(錄製指令不載入整個 pipeline);兩邊不得走樣。"""
+def test_every_sheets_employer_column_is_in_the_snapshot():
+    """快照記的是解析輸出,不是 Sheets 欄:Sheets 拿掉欄(#30)時值照算,快照的鍵不跟著少;
+    但 Sheets 寫出的每一欄都必須被快照守著。"""
     import pipeline
-    assert snap.KEYS == (*pipeline._EMPLOYER_COL_KEYS, "_note")
+    assert set(pipeline._EMPLOYER_COL_KEYS) <= set(snap.KEYS)
+    assert "_note" in snap.KEYS
 
 
 # ─── 錄製與比對本身(tmp 底下的假 corpus、假解析器) ─────────────────────
@@ -102,6 +104,17 @@ class TestRecord:
         _record([], extract=_parser(電話="三"))
         kept = sorted(p.name for p in snap.snapshot_path().parent.glob("employer_fields.*.json"))
         assert kept == ["employer_fields.2026-10-19.2.json", "employer_fields.2026-10-19.json"]
+
+    def test_no_vision_text_at_all_refuses_to_record(self, corpus):
+        """vision/ 整個不見時錄下去會是一份空快照,把每份素材都當成「已移除」。"""
+        _record([])
+        before = snap.snapshot_path().read_bytes()
+        for p in rs.ROOT.joinpath("vision").iterdir():
+            p.unlink()
+        lines = []
+        assert _record(lines) is None
+        assert snap.snapshot_path().read_bytes() == before
+        assert any("沒有任何 Vision 全文" in l for l in lines)
 
     def test_nothing_changed_writes_nothing(self, corpus):
         _record([])

@@ -103,6 +103,26 @@ def test_page_list_shows_pick_scores_count_and_image_to_open(corpus):
     assert review.read_bytes() == b"p2" and str(review) in text
 
 
+def test_every_page_is_exported_so_another_can_be_named(corpus):
+    """人要改指定別張,得先看得到別張。"""
+    Fake(["", "", "y"]).run()
+    assert sorted(p.name for p in (corpus / "review").glob("33711_*")) == [
+        "33711_image1.png", "33711_image2.png", "33711_image3.png"]
+
+
+def test_uppercase_answer_is_understood(corpus):
+    f = Fake(["Y", "", "Y"])
+    assert f.run() == ["33711"]
+
+
+def test_confirming_a_page_below_threshold_warns_scoring_should_be_fixed(corpus):
+    """人說這張就是契約頁,但正式流程找不到它 —— 那是評分規則該修的訊號,不能安靜帶過。"""
+    f = Fake(["", "y", "y"])
+    f.run()
+    assert rs.checked_contract_page("33712.docx") == "image2.jpeg"
+    assert any("評分" in l and "-m real" in l for l in f.lines)
+
+
 def test_already_saved_text_is_never_fetched_again(corpus):
     f = Fake(["y", "y", "y"])
     f.run()

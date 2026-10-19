@@ -12,6 +12,7 @@
                                  允許只填部分;沒填的不驗
   samples/snapshots/             快照(機器輸出,不是真值),見 snapshots.py
   samples/legacy/                舊格式檔(如 #15 之前寫出的 matches.csv)
+  samples/review/                錄製新素材時匯出的各頁圖,供人確認契約頁
 
 核對值跟著素材放、不放測試程式裡:沒有素材,核對值毫無用處。
 """

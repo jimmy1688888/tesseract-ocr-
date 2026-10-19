@@ -24,7 +24,8 @@ from typing import Callable
 
 import real_samples as rs
 
-# 與 Sheets H~O 同一組鍵(pipeline._EMPLOYER_COL_KEYS),外加錨定失敗原因。
+# 解析輸出的 8 欄(寫 Sheets 的 H~O 一律取自這裡)加錨定失敗原因。快照記解析輸出、
+# 不是 Sheets 欄:Sheets 少寫幾欄(#30)時值照算,這裡不跟著少。
 KEYS = (
     "雇主名稱_中", "雇主名稱_英",
     "地址_中_標準", "地址_中",
@@ -108,6 +109,9 @@ def record(out: Callable[[str], None] = print,
     """重錄快照:印逐格 diff → 舊快照加日期留存 → 寫入新快照。沒有變化就什麼都不寫。"""
     data_hash = alldata_sha256() if data_hash is None else data_hash
     today = today or date.today().isoformat()
+    if not rs.vision_stems():
+        out("沒有任何 Vision 全文,不錄(否則每份素材都會被當成已移除)。")
+        return None
     new = current_fields(extract=extract)
     saved = load()
     old_fields = saved["fields"] if saved else {}
@@ -198,21 +202,30 @@ def fill_missing_vision(ask: Callable[[str], str] = input,
             continue
         score, name, raw, found = pick
         second = max((s for s, n, _b in scored if n != name), default=0)
-        review = rs.ROOT / "review" / f"{docx.stem}_{name}"
-        review.parent.mkdir(parents=True, exist_ok=True)
-        review.write_bytes(raw)
+        # 每一頁都匯出:人要改指定別張,得先看得到別張。
+        review_dir = rs.ROOT / "review"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        for _s, n, b in scored:
+            (review_dir / f"{docx.stem}_{n}").write_bytes(b)
+        review = review_dir / f"{docx.stem}_{name}"
         out(f"{docx.name} → {name}(分數 {score},次高 {second})"
             + ("" if found else "  ⚠ 未達門檻,正式流程不會送 Vision")
             + f"  圖:{review}")
         pages = {n: b for _s, n, b in scored}
         while True:
             answer = ask(ASK_PAGE).strip()
+            if answer.lower() in ("y", "g"):
+                answer = answer.lower()
             if answer == "":
                 break
             if answer == "y" or answer in pages:
                 page = name if answer == "y" else answer
                 rs.record_checked_contract_page(docx.name, page)
                 plan.append((docx.stem, page, pages[page]))
+                if page != name or not found:
+                    out(f"  ⚠ 正式流程不會選 {page}(它選 {name}"
+                        + ("" if found else ",且未達門檻") + "):契約頁評分該修,"
+                        "pytest -m real 的契約頁測試會因此變紅")
                 break
             if answer == "g":
                 if not found:
@@ -233,7 +246,7 @@ def fill_missing_vision(ask: Callable[[str], str] = input,
             "\n若是要求重新登入,請先跑 重新登入.bat")
         return []
 
-    roi = str(EMPLOYER_ROI[3])
+    roi = str(EMPLOYER_ROI[3])     # ROI 下緣比例,與既有素材的 texts 鍵同格式("0.35")
     done = []
     for stem, page, raw in plan:
         rs.save_vision_text(stem, page, roi, fetch_text(prepare(raw)))

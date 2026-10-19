@@ -237,8 +237,8 @@ class TestRealContractPagePicks:
 
         核對值在 samples/checked_values.json(跟著素材走,不進版控)。
         """
-        expected = checked_contract_page(docx.name)
-        if expected is None:
+        checked = checked_contract_page(docx.name)
+        if checked is None:
             pytest.skip(f"{docx.name} 沒有契約頁核對值:先由人看圖確認"
                         "(python snapshots.py record 會列出來請你確認)")
-        assert self._pick(docx) == expected
+        assert self._pick(docx) == checked
