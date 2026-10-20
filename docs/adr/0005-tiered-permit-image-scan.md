@@ -57,7 +57,7 @@ image1 / image7 → 從未讀出任何東西
 mol 信心是 37 與 28 —— 讓這種值擋掉擴掃,等於用雜訊決定要不要去找真正的許可證。
 
 **`PERMIT_PARTIAL` 不算。** 「幾個設定各讀出不同的值、湊不出多數」的 row 是有
-`r.id` 的,很容易被誤認為「讀到了」。但 `process_large_vs` 的規則A2 不會採用它,
+`r.id` 的,很容易被誤認為「讀到了」。但送審決策(`submission_decision`,#40 前是 `process_large_vs`)的規則A2 不會採用它,
 反而會掉進規則B 並以 `no_vote_rescue` 把整份推去走**台仲反查救援**:
 
 ```
@@ -105,7 +105,7 @@ bug:`--image` 指定單張時 `len(images)==1` → 判成 small → 整份改走
 
 ## 已知殘餘風險(明示接受)
 
-`process_large_vs` 規則A 取 `mol_values ∩ permit_values` 的交集,而分層之後這個
+送審決策(#40 前是 `process_large_vs`)規則A 取 `mol_values ∩ permit_values` 的交集,而分層之後這個
 交集**只由第一層三張圖的值組成**:
 
 ```

@@ -9,14 +9,16 @@ D 欄只陳述事實,比照 Vision 沒讀到值(FORMAT_INVALID)的既有做法�
 """
 import pytest
 
-from pipeline import VisionQueueItem, run_vision_items
+from pipeline import VisionQueueItem
+from vision_verification import run_vision_items
 
 
 def _item(img_path, **kw):
     kw.setdefault("candidate_value", "1234")
     kw.setdefault("candidate_conf", 60.0)
     return VisionQueueItem(source_docx="a.docx", image_name="image5.jpeg",
-                           img_path=img_path, reason="permit部分命中無多數", **kw)
+                           img_path=img_path, reason="permit部分命中無多數",
+                           hit_roi="permit_lower", **kw)
 
 
 @pytest.mark.parametrize("img_path", ["", "MISSING"])
@@ -24,7 +26,8 @@ def test_missing_crop_goes_to_manual_review_not_nowhere(tmp_path, img_path):
     path = str(tmp_path / "nope.png") if img_path == "MISSING" else ""
     calls = []
     auto, review, rescue = run_vision_items(
-        [_item(path)], known_permits=set(), read=lambda p: calls.append(p) or "1234")
+        [_item(path)], known_permits=set(),
+        read_text=lambda p: calls.append(p) or "No. Izin: 1234")
     assert calls == []                                   # 沒圖就不打 Vision
     assert auto == [] and rescue == []
     assert len(review) == 1
@@ -38,7 +41,7 @@ def test_existing_crop_still_goes_through_vision(tmp_path):
     crop = tmp_path / "crop.png"
     crop.write_bytes(b"x")
     auto, review, rescue = run_vision_items(
-        [_item(str(crop))], known_permits=set(), read=lambda p: "1234")
+        [_item(str(crop))], known_permits=set(), read_text=lambda p: "No. Izin: 1234")
     assert [r["candidate_value"] for r in auto] == ["1234"] and review == [] and rescue == []
 
 
@@ -46,6 +49,6 @@ def test_low_conf_single_read_goes_to_rescue_without_vision(tmp_path):
     calls = []
     auto, review, rescue = run_vision_items(
         [_item("", no_vote_rescue=True, candidate_conf=40.0)], known_permits=set(),
-        read=lambda p: calls.append(p) or "")
+        read_text=lambda p: calls.append(p) or "")
     assert calls == [] and auto == [] and review == []
     assert len(rescue) == 1 and rescue[0]["candidate_value"] == "1234"

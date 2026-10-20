@@ -1,7 +1,7 @@
 """從勞動契約圖片擷取「雇主資料」(名稱中/英、地址中/英、電話)。
 
 用 Google Vision DOCUMENT_TEXT_DETECTION 取全文後,以內容啟發式解析。
-與許可證流程(run_google_vision 抓 4 碼號碼)分開,互不影響。
+與許可證流程(vision_text + permit_in_text 抓 4 碼號碼)分開,互不影響。
 
 難點與對策:
 - 版面是中印尼雙語兩欄表,Vision 逐欄序列化常錯行 → 不依賴嚴格「標籤緊接值」,

@@ -116,7 +116,7 @@ class TestHasPermitVote:
     def test_permit_partial_is_not_enough(self):
         """幾個設定各讀出不同的值、湊不出多數 —— r.id 有值但不算讀到。
 
-        若讓它擋掉擴掃,process_large_vs 的規則A2 不會採用這個值,反而掉進
+        若讓它擋掉擴掃,送審決策的規則A2 不會採用這個值,反而掉進
         規則B 並以 no_vote_rescue 把整份推去走台仲反查,而真正的多數票可能
         就在還沒掃的那幾張圖上。這是分層最危險的一條路徑。
         """
