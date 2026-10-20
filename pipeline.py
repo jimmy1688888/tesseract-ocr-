@@ -140,13 +140,11 @@ TESS_LANG  = "ind+eng"
 # 要模擬哪個服務帳號、用量記到哪個 GCP 專案：見 identity.py。
 
 # 信心門檻
-CONF_KEY_IN       = 55   # 高於此值直接 key-in；低於則標記送 Google Vision
-CONF_VOTE_MIN     = 45   # permit 多數票平均信心低於此值才送 Vision
-CONF_MOL_VOTE_MIN = 50   # small docx mol 多數票平均信心高於此值直接 key-in
-# 單一判讀(非多數票:small mol 單一命中 / large permit 部分命中)且信心低於此值,
-# 送 Vision 覆核仍失敗時,才比照「全無命中」走契約次頁台仲電話反查名冊救援;
-# 信心 ≥ 此值者維持原本 Vision 覆核邏輯、不走電話救援。
-CONF_NOVOTE_RESCUE_MAX = 50
+# 送審決策的門檻只記一份,在 submission_decision(#40);這裡沿用同名供掃描與
+# decide_result 使用。
+from submission_decision import (  # noqa: E402
+    CONF_KEY_IN, CONF_MOL_VOTE_MIN, CONF_NOVOTE_RESCUE_MAX, CONF_VOTE_MIN,
+    Destination, decide, is_permit_vote)
 
 # ─── prefilter ────────────────────────────────────────────────────────────
 SMALL_DOCX_THRESHOLD = 3   # 圖片數 ≤ 此值 → "small"
@@ -205,8 +203,6 @@ _VOTE_NAMES = {
 }
 PERMIT_VOTE_CONFIGS = [c for c in SCAN_CONFIGS if c["name"] in _VOTE_NAMES]
 
-# vision_submit key-in 門檻（與 CONF_KEY_IN 相同，明確宣告供 vision_submit 邏輯使用）
-CONF_KEY_IN_VS = 55
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -252,6 +248,7 @@ class VisionQueueItem:
     # 再用 Vision 掃同一個位置意義不大 → 直接改走契約次頁台仲電話反查名冊救援
     # (略過 ROI 的 Vision 覆核,不多花那一格額度),唯一命中則覆寫填 B。
     no_vote_rescue: bool = False
+    hit_roi: str = ""          # 截圖屬於哪個 ROI(#41:Vision 取號依此選 pattern)
 
 
 # ─── CSV 欄位順序（同時供寫入與讀取使用，避免兩端走樣） ───────────────────
@@ -568,11 +565,11 @@ def has_permit_vote(rows: list[ScanResult]) -> bool:
       mol 命中          mol 只證明這是契約頁,不是許可證的讀值。32523/32529 的
                         mol 信心是 37 與 28,拿這種值擋掉擴掃等於用雜訊做決策。
       PERMIT_PARTIAL    幾個設定各讀出不同的值、湊不出多數。r.id 雖有值,但
-                        process_large_vs 的規則A2 不會採用它,反而會掉進規則B
+                        送審決策的規則A2 不會採用它,反而會掉進規則B
                         並以 no_vote_rescue 把整份推去走台仲反查 —— 而真正的
                         多數票可能就在還沒掃的那幾張圖上(見 ADR-0005)。
     """
-    return any(r.id_from_vote and r.id and r.id_conf > CONF_VOTE_MIN for r in rows)
+    return any(is_permit_vote(r) for r in rows)
 
 
 def auto_rotate(img: Image.Image) -> Image.Image:
@@ -1009,261 +1006,18 @@ def aggregate_small_docx(results: list[ScanResult]) -> list[ScanResult]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ⑦ vision_submit（決定送 Vision 或直接 key-in）
+# ⑦ 送審決策（每份 docx 一個決定，見 submission_decision）
 # ═══════════════════════════════════════════════════════════════════════════
-
-def _best_img_path(r: ScanResult) -> str:
-    return r.permit_crop or r.mol_crop or ""
-
-
-def _describe_vision_reason(r: ScanResult) -> str:
-    """描述某列「為何」需送 Vision(vision_review=True),供 reason/rationale 使用。
-
-    有些階段(如 aggregate_small_docx)只設了 vision_review 旗標卻沒寫 note,
-    若直接把旗標名稱 "vision_review=True" 塞進 reason 欄,審查者看不出成因。
-    這裡優先沿用既有 note;note 為空時,依 ScanResult 現況還原
-    「哪個階段、為什麼」判定要送 Vision。
-    """
-    if r.note:
-        return r.note
-    conf = r.final_conf or max(r.mol_conf, r.id_conf)
-    # small docx:唯一自動 key-in 的路徑是「mol 多數票且高信心」,其餘 winner 都送 Vision
-    if r.docx_class == "small":
-        if r.mol_from_vote:
-            return (
-                f"small:mol多數票但平均信心{r.mol_conf}未達直接key-in門檻"
-                f"{CONF_MOL_VOTE_MIN},需人工確認"
-            )
-        return f"small:mol非多數票(單一判讀 conf={conf:.1f}),需人工複核"
-    # large docx(正常情況 decide_result 已寫 note,以下為 note 遺漏時的防禦性描述)
-    if r.cross_match:
-        return f"large:mol與permit交叉比對吻合但信心低(conf={conf:.1f} ≤ {CONF_KEY_IN}),需人工確認"
-    if r.mol and r.id:
-        return f"large:mol與permit均有值但信心偏低(conf={conf:.1f} ≤ {CONF_KEY_IN}),需人工確認"
-    if r.mol:
-        return f"large:僅mol有值且信心偏低(conf={conf:.1f} ≤ {CONF_KEY_IN}),需人工確認"
-    if r.id:
-        return f"large:僅permit有值且信心偏低(conf={conf:.1f} ≤ {CONF_KEY_IN}),需人工確認"
-    return f"OCR結果需人工確認(conf={conf:.1f})"
-
-
-def process_large_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
-    """large docx：回傳要送 Vision 的 VisionQueueItem 清單（含 direct_keyin 旗標）。
-
-    過去用 dict + "permit部分命中無多數" 字串比對來識別部分命中；
-    現改成檢查 r.status == ResultStatus.PERMIT_PARTIAL，note 文字可自由調整。
-    """
-    queue: list[VisionQueueItem] = []
-    mol_rows    = [(r, r.mol, r.mol_conf) for r in rows if r.mol]
-    permit_rows = [(r, r.id,  r.id_conf)  for r in rows if r.id]
-
-    # 規則A：mol + permit 均有值
-    if mol_rows and permit_rows:
-        mol_values    = {v for _, v, _ in mol_rows}
-        permit_values = {v for _, v, _ in permit_rows}
-        common        = mol_values & permit_values
-        if common:
-            candidates = [(r, v, c) for r, v, c in mol_rows + permit_rows if v in common]
-            best_row, best_val, best_conf = max(candidates, key=lambda x: x[2])
-            if best_conf > CONF_KEY_IN_VS:
-                # 高信心吻合 → 直接 key-in，不送 Vision
-                queue.append(VisionQueueItem(
-                    source_docx     = best_row.source_docx,
-                    image_name      = best_row.image_name,
-                    img_path        = _best_img_path(best_row),
-                    candidate_value = best_val,
-                    candidate_conf  = best_conf,
-                    reason          = f"cross_match(file)_高信心 conf={best_conf}",
-                    direct_keyin    = True,
-                ))
-            else:
-                queue.append(VisionQueueItem(
-                    source_docx     = best_row.source_docx,
-                    image_name      = best_row.image_name,
-                    img_path        = _best_img_path(best_row),
-                    candidate_value = best_val,
-                    candidate_conf  = best_conf,
-                    reason          = f"cross_match(file)_低信心 conf={best_conf}",
-                    direct_keyin    = False,
-                ))
-            return queue
-        else:
-            # mol ≠ permit：ROI 優先（permit ROI > mol ROI）+ 位置次要。
-            # permit ROI 是目的明確的掃描區域，mol ROI 為輔助 cross-check，
-            # 衝突時以 permit ROI 的最早圖為主，避免 mol 誤讀覆蓋正確的 permit 值。
-            priority_pool = permit_rows if permit_rows else mol_rows
-            earliest_row, earliest_val, earliest_conf = min(
-                priority_pool, key=lambda x: docx_images.image_sort_key(x[0].image_name)
-            )
-            queue.append(VisionQueueItem(
-                source_docx     = earliest_row.source_docx,
-                image_name      = earliest_row.image_name,
-                img_path        = _best_img_path(earliest_row),
-                candidate_value = earliest_val,
-                candidate_conf  = earliest_conf,
-                reason          = (
-                    f"mol≠permit衝突_permit優先_最早圖({earliest_row.image_name})"
-                    f" conf={earliest_conf}"
-                ),
-                direct_keyin    = False,
-            ))
-            return queue
-
-    # 規則A2：僅 permit（無 mol）且已有高信心多數票 → 直接 key-in。
-    #          此時同 docx 內其餘「部分命中無多數」的圖不需再送 Vision;
-    #          多張多數票取最早的圖（image 序號小者優先，如 image5 < image8）。
-    if not mol_rows:
-        vote_rows = [
-            r for r in rows
-            if r.id_from_vote and r.id and r.id_conf > CONF_VOTE_MIN
-        ]
-        if vote_rows:
-            best_row = min(vote_rows, key=lambda r: docx_images.image_sort_key(r.image_name))
-            queue.append(VisionQueueItem(
-                source_docx     = best_row.source_docx,
-                image_name      = best_row.image_name,
-                img_path        = _best_img_path(best_row),
-                candidate_value = best_row.id,
-                candidate_conf  = best_row.id_conf,
-                reason          = (
-                    f"permit多數票_高信心_最早圖({best_row.image_name})"
-                    f" conf={best_row.id_conf}"
-                ),
-                direct_keyin    = True,
-            ))
-            return queue
-
-    # 規則B：permit 部分命中無多數（用 status 判斷，不再依賴 note 文字）
-    partial_rows = [r for r in rows if r.status == ResultStatus.PERMIT_PARTIAL]
-    for r in partial_rows:
-        cand_conf = r.id_conf or r.final_conf
-        queue.append(VisionQueueItem(
-            source_docx     = r.source_docx,
-            image_name      = r.image_name,
-            img_path        = r.permit_crop or _best_img_path(r),
-            candidate_value = r.id or r.final_value,
-            candidate_conf  = cand_conf,
-            reason          = "permit部分命中無多數",
-            direct_keyin    = False,
-            # conf < 門檻 → 該位置品質差,略過 ROI Vision,改走次頁電話反查救援
-            no_vote_rescue  = cand_conf < CONF_NOVOTE_RESCUE_MAX,
-        ))
-
-    # 規則C：其餘 vision_review=True
-    handled = {r.image_name for r in partial_rows}
-    for r in rows:
-        if r.vision_review and r.image_name not in handled:
-            queue.append(VisionQueueItem(
-                source_docx     = r.source_docx,
-                image_name      = r.image_name,
-                img_path        = _best_img_path(r),
-                candidate_value = r.final_value,
-                candidate_conf  = r.final_conf,
-                reason          = _describe_vision_reason(r),
-                direct_keyin    = False,
-            ))
-
-    # 若完全沒有需 Vision 且也沒有直接 key-in → 取 final_conf 最高的列直接 key-in
-    if not queue:
-        rows_with_value = [r for r in rows if r.final_value]
-        if rows_with_value:
-            best_row = max(rows_with_value, key=lambda r: r.final_conf)
-            queue.append(VisionQueueItem(
-                source_docx     = best_row.source_docx,
-                image_name      = best_row.image_name,
-                img_path        = _best_img_path(best_row),
-                candidate_value = best_row.final_value,
-                candidate_conf  = best_row.final_conf,
-                reason          = f"高信心直接key-in conf={best_row.final_conf}",
-                direct_keyin    = True,
-            ))
-
-    return queue
-
-
-def process_small_vs(rows: list[ScanResult]) -> list[VisionQueueItem]:
-    """small docx：全部無命中 → 人工審查；否則依規則送件或直接 key-in。
-
-    決策優先順序：
-      1. 全 SMALL_NO_HIT → 回傳 []（上游會歸到 manual_review）
-      2. mol 多數票且高信心（mol_from_vote=True, mol_conf > CONF_MOL_VOTE_MIN）
-         → direct_keyin=True，不送 Vision
-      3. vision_review=True → 送 Vision
-      4. [C: defensive fallback] 有 final_value 但 (2)(3) 都沒觸發 → 強制送 Vision
-         並記 warning。正常流程不該走進這條;走進來代表上游某個旗標漏設,
-         避免該 docx 被靜默吃掉(這是過去 bug 的形態:scan 階段把 mol_from_vote
-         設好但忘記寫進 CSV,讀回後兩條件都失敗、row 直接消失)。
-    """
-    all_no_match = all(r.status == ResultStatus.SMALL_NO_HIT for r in rows)
-    if all_no_match:
-        return []
-
-    queue: list[VisionQueueItem] = []
-    for r in rows:
-        if r.mol_from_vote and r.mol_conf > CONF_MOL_VOTE_MIN and r.final_value:
-            queue.append(VisionQueueItem(
-                source_docx     = r.source_docx,
-                image_name      = r.image_name,
-                img_path        = _best_img_path(r),
-                candidate_value = r.final_value,
-                candidate_conf  = r.mol_conf,
-                reason          = f"mol多數票_高信心 avg_conf={r.mol_conf}",
-                direct_keyin    = True,
-            ))
-        elif r.vision_review:
-            queue.append(VisionQueueItem(
-                source_docx     = r.source_docx,
-                image_name      = r.image_name,
-                img_path        = _best_img_path(r),
-                candidate_value = r.final_value,
-                candidate_conf  = r.final_conf,
-                reason          = _describe_vision_reason(r),
-                direct_keyin    = False,
-                # 單一判讀(非多數票)且 conf < 門檻 → 略過 ROI Vision,改走次頁電話反查。
-                # mol 多數票但信心低者不算單一判讀,維持原 Vision 覆核。
-                no_vote_rescue  = (not r.mol_from_vote)
-                                  and r.final_conf < CONF_NOVOTE_RESCUE_MAX,
-            ))
-        # 其他 row(非 winner、無觸發旗標)刻意 skip:winner 已代表整個 docx。
-
-    # ── C: defensive fallback ──────────────────────────────────────────────
-    # queue 空但仍有 row 帶 final_value → 上游旗標漏設,撈一張當錨點送 Vision
-    # 避免該 docx 在 build_vision_queue 既不進 keyin、也不進 vision、也不進
-    # manual_review(status 不是 SMALL_NO_HIT) 而靜默消失。
-    if not queue and any(r.final_value for r in rows):
-        anchor = next(r for r in rows if r.final_value)
-        statuses = [r.status.value for r in rows]
-        logger.warning(
-            f"  ⚠ process_small_vs fallback:{anchor.source_docx} "
-            f"有 final_value={anchor.final_value!r} 但 mol_from_vote / vision_review "
-            f"兩條件皆未觸發(statuses={statuses})→ 強制送 Vision"
-        )
-        queue.append(VisionQueueItem(
-            source_docx     = anchor.source_docx,
-            image_name      = anchor.image_name,
-            img_path        = _best_img_path(anchor),
-            candidate_value = anchor.final_value,
-            candidate_conf  = anchor.final_conf,
-            reason          = (
-                f"[fallback] 有 final_value 但無觸發旗標 "
-                f"(mol_from_vote={anchor.mol_from_vote}, "
-                f"vision_review={anchor.vision_review}, "
-                f"mol_conf={anchor.mol_conf})"
-            ),
-            direct_keyin    = False,   # 狀態未知 → 保守走 Vision,不直接 key-in
-        ))
-
-    return queue
-
 
 def build_vision_queue(csv_path: Path) -> tuple[list[VisionQueueItem], list[dict], list[VisionQueueItem]]:
     """
-    讀取 matches.csv，分成三類回傳：
-      vision_items  : 需送 Google Vision 的 VisionQueueItem
-      manual_review : 人工審查清單，每筆為 {"source_docx": ..., "reason": ...}
-      keyin_items   : 直接 key-in 的 VisionQueueItem（direct_keyin=True）
+    讀取 matches.csv,每份 docx 做一個送審決策(submission_decision.decide),分成三類回傳:
+      vision_items  : 送 Google Vision 的 VisionQueueItem;反查救援的「單一判讀低信心」也在這
+                      (no_vote_rescue=True,主流程略過 ROI Vision、改走次頁反查)
+      manual_review : 全無命中(要走反查救援),每筆為 {"source_docx": ..., "reason": ...}
+      keyin_items   : 直接 key-in 的 VisionQueueItem(direct_keyin=True)
 
-    CSV 讀回後立刻反序列化成 ScanResult,讓下游函數有強型別保證。
+    一份 docx 只有一個決定(一份契約只有一個許可證,Sheets 上只有一列)。
     """
     groups: dict[str, list[ScanResult]] = defaultdict(list)
     with open(csv_path, encoding="utf-8-sig") as f:
@@ -1276,30 +1030,22 @@ def build_vision_queue(csv_path: Path) -> tuple[list[VisionQueueItem], list[dict
     manual_review: list[dict]           = []
 
     for docx_name, rows in sorted(groups.items()):
-        docx_class = rows[0].docx_class
-        if docx_class == "large":
-            # large 全無命中 → 人工審查，不送 Vision
-            if all(r.status == ResultStatus.LARGE_NO_HIT for r in rows):
-                manual_review.append({
-                    "source_docx": docx_name,
-                    "reason": f"large docx：全 {len(rows)} 張圖掃描無許可證命中",
-                })
-                continue
-            queue = process_large_vs(rows)
-        else:
-            queue = process_small_vs(rows)
-            if not queue and all(r.status == ResultStatus.SMALL_NO_HIT for r in rows):
-                manual_review.append({
-                    "source_docx": docx_name,
-                    "reason": f"small docx：mol ROI 全 {len(rows)} 張圖無命中",
-                })
-                continue
-
-        for item in queue:
-            if item.direct_keyin:
-                keyin_items.append(item)
-            else:
-                vision_items.append(item)
+        d = decide(rows)
+        if d.destination is Destination.反查救援 and not d.image_name:
+            manual_review.append({"source_docx": docx_name, "reason": d.reason})
+            continue
+        item = VisionQueueItem(
+            source_docx     = d.source_docx,
+            image_name      = d.image_name,
+            img_path        = d.img_path,
+            candidate_value = d.candidate_value,
+            candidate_conf  = d.candidate_conf,
+            reason          = d.reason,
+            direct_keyin    = d.destination is Destination.直接KEYIN,
+            no_vote_rescue  = d.destination is Destination.反查救援,
+            hit_roi         = d.hit_roi,
+        )
+        (keyin_items if item.direct_keyin else vision_items).append(item)
 
     return vision_items, manual_review, keyin_items
 

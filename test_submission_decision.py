@@ -1,0 +1,185 @@
+# -*- coding: utf-8 -*-
+"""送審決策:一份 docx 的許可證掃描結果 → 一個決定(#40)。
+
+CONTEXT.md「送審決策」:去向(直接 key-in／送 Vision／反查救援)、候選值、被選的那張
+截圖、理由。以 docx 為單位 —— 一份 docx 在 Sheets 上只有一列。舊做法逐圖決定,規則 B
+每張「部分命中無多數」各送一筆、規則 C 再各一筆,同一份 docx 會寫出多列。
+
+多張圖都需送 Vision → 送信心最高的那張,同分取圖序最前;其他圖讀到的值寫進理由
+(grill Q2:Vision 與被送那張一致就已是兩個獨立證據,其他圖的不同讀值不推翻它)。
+資料全部捏造。
+"""
+import pytest
+
+from pipeline import ResultStatus, ScanResult
+from submission_decision import (CONF_KEY_IN, CONF_MOL_VOTE_MIN, CONF_NOVOTE_RESCUE_MAX,
+                                 CONF_VOTE_MIN, Destination, decide, is_permit_vote)
+
+
+def _row(image="image5.jpeg", cls="large", **kw):
+    kw.setdefault("permit_crop", f"crops/{image}.png")
+    return ScanResult(source_docx="a.docx", image_name=image, docx_class=cls, **kw)
+
+
+def _permit(image, value, conf, *, vote=False, partial=False, review=None, roi="permit_lower"):
+    return _row(image, id=value, id_conf=conf, id_from_vote=vote, final_value=value,
+                final_conf=conf, hit_roi=roi,
+                status=ResultStatus.PERMIT_PARTIAL if partial else ResultStatus.OK,
+                vision_review=(conf <= CONF_KEY_IN or partial) if review is None else review)
+
+
+def _mol(image, value, conf, *, vote=False, review=None):
+    return _row(image, mol=value, mol_conf=conf, mol_from_vote=vote, final_value=value,
+                final_conf=conf, hit_roi="mol", mol_crop=f"crops/{image}_mol.png",
+                permit_crop="",
+                vision_review=(conf <= CONF_KEY_IN) if review is None else review)
+
+
+class TestLarge:
+
+    def test_all_no_hit_is_rescue_without_candidate(self):
+        d = decide([_row("image5.jpeg", status=ResultStatus.LARGE_NO_HIT),
+                    _row("image6.jpeg", status=ResultStatus.LARGE_NO_HIT)])
+        assert d.destination is Destination.反查救援
+        assert d.candidate_value == "" and "全 2 張圖" in d.reason
+
+    def test_rule_a_cross_match_high_conf_is_keyin(self):
+        d = decide([_mol("image2.jpeg", "1234", 70), _permit("image5.jpeg", "1234", 80)])
+        assert d.destination is Destination.直接KEYIN
+        assert (d.candidate_value, d.image_name) == ("1234", "image5.jpeg")
+
+    def test_rule_a_cross_match_low_conf_is_vision(self):
+        d = decide([_mol("image2.jpeg", "1234", 50), _permit("image5.jpeg", "1234", 52)])
+        assert d.destination is Destination.送VISION and d.candidate_value == "1234"
+
+    def test_rule_a_keyin_threshold_is_exclusive(self):
+        d = decide([_mol("image2.jpeg", "1234", 50), _permit("image5.jpeg", "1234", CONF_KEY_IN)])
+        assert d.destination is Destination.送VISION
+
+    def test_crop_is_the_permit_crop_when_both_exist(self):
+        r = _permit("image5.jpeg", "1234", 52)
+        r.mol_crop = "crops/image5_mol.png"
+        assert decide([r]).img_path == "crops/image5.jpeg.png"
+
+    def test_rule_a_conflict_prefers_earliest_permit(self):
+        d = decide([_mol("image2.jpeg", "9999", 90), _permit("image6.jpeg", "1234", 60),
+                    _permit("image5.jpeg", "1235", 40)])
+        assert d.destination is Destination.送VISION
+        assert (d.candidate_value, d.image_name) == ("1235", "image5.jpeg")
+
+    def test_rule_a2_vote_is_keyin_earliest_image(self):
+        d = decide([_permit("image8.jpeg", "1234", 60, vote=True),
+                    _permit("image5.jpeg", "1234", 50, vote=True),
+                    _permit("image6.jpeg", "5678", 30, partial=True)])
+        assert d.destination is Destination.直接KEYIN
+        assert d.image_name == "image5.jpeg"
+
+    def test_rule_a2_earliest_regardless_of_row_order(self):
+        d = decide([_permit("image5.jpeg", "1234", 50, vote=True),
+                    _permit("image8.jpeg", "1234", 60, vote=True)])
+        assert d.image_name == "image5.jpeg"
+
+    def test_low_conf_review_row_that_is_not_partial_goes_to_vision(self):
+        """反查救援只給「部分命中無多數」的低信心單一判讀;一般需覆核的讀值照樣送 Vision。"""
+        d = decide([_permit("image5.jpeg", "1234", CONF_NOVOTE_RESCUE_MAX - 5)])
+        assert d.destination is Destination.送VISION
+
+    def test_single_partial_high_conf_is_vision(self):
+        d = decide([_permit("image5.jpeg", "1234", 60, partial=True)])
+        assert d.destination is Destination.送VISION
+        assert d.img_path == "crops/image5.jpeg.png" and d.hit_roi == "permit_lower"
+
+    def test_single_partial_low_conf_is_rescue_with_seed(self):
+        d = decide([_permit("image5.jpeg", "1234", CONF_NOVOTE_RESCUE_MAX - 1, partial=True)])
+        assert d.destination is Destination.反查救援 and d.candidate_value == "1234"
+
+    def test_high_conf_without_review_is_keyin(self):
+        d = decide([_permit("image5.jpeg", "1234", 90, review=False)])
+        assert d.destination is Destination.直接KEYIN
+
+
+class TestOneDecisionPerDocx:
+    """舊做法:兩張部分命中 + 一張 C 規則 → 三筆。現在一筆,選信心最高、同分取圖序前。"""
+
+    def test_highest_conf_wins_others_in_reason(self):
+        d = decide([_permit("image5.jpeg", "1234", 52, partial=True),
+                    _permit("image6.jpeg", "1284", 60, partial=True),
+                    _permit("image8.jpeg", "7777", 45)])
+        assert (d.destination, d.candidate_value, d.image_name) == (
+            Destination.送VISION, "1284", "image6.jpeg")
+        assert "image5.jpeg=1234" in d.reason and "image8.jpeg=7777" in d.reason
+
+    def test_tie_takes_earliest_image(self):
+        d = decide([_permit("image6.jpeg", "1284", 60, partial=True),
+                    _permit("image5.jpeg", "1234", 60, partial=True)])
+        assert d.image_name == "image5.jpeg"
+
+    def test_low_conf_partial_loses_to_vision_candidate(self):
+        """最高信心那張決定去向:它夠高就送 Vision,不因另一張低信心而改走反查。"""
+        d = decide([_permit("image5.jpeg", "1234", 40, partial=True),
+                    _permit("image6.jpeg", "1284", 60, partial=True)])
+        assert d.destination is Destination.送VISION and d.image_name == "image6.jpeg"
+
+
+class TestSmall:
+
+    def _small(self, image, value, conf, *, vote=False):
+        return _row(image, cls="small", mol=value, mol_conf=conf, mol_from_vote=vote,
+                    final_value=value, final_conf=conf, hit_roi="mol",
+                    mol_crop=f"crops/{image}_mol.png", permit_crop="")
+
+    def test_all_no_hit_is_rescue(self):
+        d = decide([_row("image1.png", cls="small", status=ResultStatus.SMALL_NO_HIT)])
+        assert d.destination is Destination.反查救援 and d.candidate_value == ""
+
+    def test_mol_vote_threshold_is_exclusive(self):
+        d = decide([self._small("image1.png", "1234", CONF_MOL_VOTE_MIN, vote=True)])
+        assert d.destination is Destination.送VISION
+
+    def test_mol_vote_high_conf_is_keyin(self):
+        d = decide([self._small("image1.png", "1234", 70, vote=True)])
+        assert d.destination is Destination.直接KEYIN
+
+    def test_single_read_low_conf_is_rescue(self):
+        d = decide([self._small("image1.png", "1234", 40)])
+        assert d.destination is Destination.反查救援 and d.candidate_value == "1234"
+
+    def test_otherwise_vision_on_the_best_read_without_needing_flags(self):
+        """不靠 vision_review 旗標(舊的防禦性退路就是為了旗標漏設而存在)。"""
+        d = decide([self._small("image1.png", "1234", 50),
+                    self._small("image2.png", "1234", 52)])
+        assert d.destination is Destination.送VISION and d.image_name == "image2.png"
+        assert d.img_path == "crops/image2.png_mol.png"
+
+
+class TestVotePredicate:
+    """停止擴掃(ADR-0005)與規則 A2 用同一個多數票判斷。"""
+
+    def test_threshold(self):
+        assert is_permit_vote(_permit("image5.jpeg", "1234", CONF_VOTE_MIN + 1, vote=True))
+        assert not is_permit_vote(_permit("image5.jpeg", "1234", CONF_VOTE_MIN, vote=True))
+        assert not is_permit_vote(_permit("image5.jpeg", "1234", 90, partial=True))
+        assert not is_permit_vote(_mol("image2.jpeg", "1234", 90, vote=True))
+
+    def test_stop_expanding_uses_the_same_predicate(self):
+        import pipeline
+        rows = [_permit("image5.jpeg", "1234", CONF_VOTE_MIN + 1, vote=True)]
+        assert pipeline.has_permit_vote(rows) is True
+        assert decide(rows).destination is Destination.直接KEYIN
+        rows = [_permit("image5.jpeg", "1234", CONF_VOTE_MIN, vote=True, review=True)]
+        assert pipeline.has_permit_vote(rows) is False
+        assert decide(rows).destination is not Destination.直接KEYIN
+
+
+def test_queue_items_carry_the_crop_roi(tmp_path):
+    """送 Vision 的項目帶著截圖屬於哪個 ROI(#41 依此選取號 pattern)。"""
+    import csv
+
+    import pipeline
+    p = tmp_path / "matches.csv"
+    with open(p, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=pipeline.CSV_FIELDS)
+        w.writeheader()
+        w.writerow(_permit("image5.jpeg", "1234", 60, partial=True).to_csv_row())
+    vision, manual, keyin = pipeline.build_vision_queue(p)
+    assert [i.hit_roi for i in vision] == ["permit_lower"]
