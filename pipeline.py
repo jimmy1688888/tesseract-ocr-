@@ -1346,6 +1346,64 @@ def run_google_vision(img_path: str) -> str:
     return ""
 
 
+def run_vision_items(items: list[VisionQueueItem], known_permits: set[str],
+                     read: Callable[[str], str] | None = None
+                     ) -> tuple[list[dict], list[dict], list[dict]]:
+    """送 Vision 那一步:每一筆都分到 (自動寫入, 人工審查, 反查救援) 其中一處,絕不丟掉。
+
+    read 是「截圖路徑 → Vision 讀到的許可證號」,預設打真的 Vision;測試換假的。
+    雙引擎(Tesseract + Vision)完全一致才自動寫入;其餘進人工審查(三層交叉比對見
+    verify_vision_result)。
+    """
+    read = read or run_google_vision
+    auto: list[dict] = []        # 雙引擎一致(CONFIRMED) → 自動寫
+    review: list[dict] = []      # 任何不一致 → 人工審查
+    rescue: list[dict] = []      # 單一判讀低信心:略過 ROI Vision,改走次頁電話反查
+    for item in items:
+        # 單一判讀且 conf 過低(ROI 位置品質差)→ 不再掃同一位置,直接改走契約次頁
+        # 台仲電話反查救援(比照全無命中);那格 ROI Vision 額度省下來。
+        if item.no_vote_rescue:
+            rescue.append({
+                "source_docx":     item.source_docx,
+                "candidate_value": item.candidate_value,   # 種子:電話查無時保留原候選值
+                "reason": (
+                    f"[單一判讀低信心 conf={item.candidate_conf:.1f}<{CONF_NOVOTE_RESCUE_MAX},"
+                    f"略過 ROI Vision 改走次頁電話反查] {item.reason}"
+                ),
+            })
+            continue
+        # 截圖不在:舊做法 continue,整份 docx 從 Sheets 消失(#39)。改進人工審查,
+        # 比照 Vision 沒讀到值:B 欄留 Tesseract 候選值、理由只講事實。
+        if not item.img_path or not Path(item.img_path).exists():
+            logger.warning(f"  ⚠ 找不到圖檔：{item.img_path}（{item.source_docx}）→ 人工審查")
+            review.append({
+                "source_docx":     item.source_docx,
+                "candidate_value": item.candidate_value,
+                "reason":          f"[送Vision原因] {item.reason} ／ 截圖檔不在,未送 Vision",
+            })
+            continue
+        vision_value = read(item.img_path)
+        verified = verify_vision_result(
+            vision_value=vision_value,
+            tesseract_candidate=item.candidate_value,
+            known_permits=known_permits,
+            tesseract_conf=item.candidate_conf,
+        )
+        logger.info(
+            f"  Vision → {item.source_docx} / {item.image_name}"
+            f"  candidate={item.candidate_value!r}(conf={item.candidate_conf:.1f})"
+            f"  vision={vision_value!r}"
+            f"  → {verified.level.value}(keyin={verified.should_keyin})"
+        )
+        row = {
+            "source_docx":     item.source_docx,
+            "candidate_value": verified.final_value,
+            "reason":          f"[送Vision原因] {item.reason} ／ [Vision結果] {verified.rationale}",
+        }
+        (auto if verified.should_keyin else review).append(row)
+    return auto, review, rescue
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # ⑧b Vision 結果交叉比對
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2405,47 +2463,8 @@ def main(opts: argparse.Namespace) -> None:
     known_permits = load_known_permits_from_log(batch.upload_log)
     logger.info(f"  載入已知清單(來自 upload_log.csv):{len(known_permits)} 筆")
 
-    vision_auto_keyin: list[dict] = []     # 雙引擎一致(CONFIRMED) → 自動寫
-    vision_review_rows: list[dict] = []    # 任何不一致 → 人工審查
-    novote_rescue: list[dict] = []         # 單一判讀低信心:略過 ROI Vision,改走次頁電話反查
-    for item in vision_items:
-        # 單一判讀且 conf 過低(ROI 位置品質差)→ 不再掃同一位置,直接改走契約次頁
-        # 台仲電話反查救援(比照全無命中);那格 ROI Vision 額度省下來。
-        if item.no_vote_rescue:
-            novote_rescue.append({
-                "source_docx":     item.source_docx,
-                "candidate_value": item.candidate_value,   # 種子:電話查無時保留原候選值
-                "reason": (
-                    f"[單一判讀低信心 conf={item.candidate_conf:.1f}<{CONF_NOVOTE_RESCUE_MAX},"
-                    f"略過 ROI Vision 改走次頁電話反查] {item.reason}"
-                ),
-            })
-            continue
-        if not item.img_path or not Path(item.img_path).exists():
-            logger.warning(f"  ⚠ 找不到圖檔：{item.img_path}（{item.source_docx}）")
-            continue
-        vision_value = run_google_vision(item.img_path)
-        verified = verify_vision_result(
-            vision_value=vision_value,
-            tesseract_candidate=item.candidate_value,
-            known_permits=known_permits,
-            tesseract_conf=item.candidate_conf,
-        )
-        logger.info(
-            f"  Vision → {item.source_docx} / {item.image_name}"
-            f"  candidate={item.candidate_value!r}(conf={item.candidate_conf:.1f})"
-            f"  vision={vision_value!r}"
-            f"  → {verified.level.value}(keyin={verified.should_keyin})"
-        )
-        row = {
-            "source_docx":     item.source_docx,
-            "candidate_value": verified.final_value,
-            "reason":          f"[送Vision原因] {item.reason} ／ [Vision結果] {verified.rationale}",
-        }
-        if verified.should_keyin:
-            vision_auto_keyin.append(row)
-        else:
-            vision_review_rows.append(row)
+    vision_auto_keyin, vision_review_rows, novote_rescue = run_vision_items(
+        vision_items, known_permits)
 
     # ── 步驟 4b：統一寫入 Google Sheets ────────────────────────────────────
     # 簡化為兩個 status,理由欄(reason)負責歸因:
