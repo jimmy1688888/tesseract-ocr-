@@ -21,7 +21,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 # docx 內嵌圖與圖序只有一份,與 pipeline 共用(#5);兩側不互相 import。
-from contract_template import Template, contract_template
+from contract_template import COMPANY_WORDS, Template, contract_template
 from docx_images import image_sort_key, read_images
 
 logger = logging.getLogger(__name__)
@@ -528,6 +528,11 @@ def extract_employer_fields(text: str) -> dict:
                 if cand and _has_cjk(cand) and _is_name_like(cand):
                     name_cn = cand + _name_continuation(cand, nxt)
 
+    # 工廠類:Nama Perusahaan 被拆成好幾行,「第一個像英文名的行」可能先中別的字串
+    # (30770 抓成一個編號)。含公司字樣的行優先,找不到才用上面的現行規則(#37)。
+    if template is Template.工廠類:
+        name_en = _company_name_line(seg) or name_en
+
     fields = {
         "契約樣板": template,
         "樣板_疑慮": ("H:契約樣板未辨識,以家庭類規則擷取"
@@ -563,6 +568,17 @@ CN_BOILERPLATE = re.compile(
 
 
 # 只認行首的「地址」:標籤一定在行首,內文提到地址(「通訊地址…」)的不是標籤。
+def _company_name_line(seg: list[str]) -> str:
+    """區塊內第一個含公司字樣、不含數字的英文行(去掉同行的 Perusahaan 標籤);沒有就空。
+
+    不含數字:地址與編號一定有數字,公司名沒有(同 _is_org_name_line 的理由)。
+    """
+    for l in seg:
+        if not _has_cjk(l) and not re.search(r"\d", l) and COMPANY_WORDS.search(l):
+            return re.sub(r"^.*?(Nama\s*)?Perusahaan\s*[:：]?", "", l, flags=re.I).strip()
+    return ""
+
+
 _CN_ADDR_LABEL = re.compile(r"^地址")
 # 標籤之後看幾行:逐欄序列化會在標籤與值之間夾進別欄的一兩行(印尼文標籤、職類)。
 _LABEL_LOOKAHEAD = 3

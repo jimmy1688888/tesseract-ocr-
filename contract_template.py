@@ -46,6 +46,10 @@ LABELS = (
 
 SEKTOR_INFORMAL = re.compile(r"\bINFORMAL\b", re.I)
 
+# 工廠類的雇主英文名是公司名:含這些字樣之一(30766~30770 實測)。
+COMPANY_WORDS = re.compile(
+    r"\b(?:CO|LTD|CORP|CORPORATION|INC|COMPANY|LIMITED|ENTERPRISE|INDUSTR\w*)\b", re.I)
+
 
 def contract_template(text: str) -> Template:
     """這份契約的樣板;文件上讀不到任何樣板字就是「認不出」。"""
