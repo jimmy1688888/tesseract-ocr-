@@ -172,6 +172,37 @@ def _balance_brackets(s: str) -> str:
     return s
 
 
+def _strip_label_residue(s: str) -> str:
+    """剝掉標籤留下的殘骸:空括號、頭尾的標點、不成對的那一邊括號。
+
+    成對的括號屬於名字,不剝:工廠類、機構類的雇主名稱是「名稱(負責人)」,
+    舊做法 strip 掉結尾的「)」,括號補齊再補回來,就成了「補出來的」假疑慮(#35)。
+    整個值被一對括號包住(「(王小明)」)仍當殘骸剝掉,與舊做法一致。
+    """
+    s = re.sub(r"[(（]\s*[)）]", "", s)
+    while True:
+        before = s
+        s = s.strip(" :：;；")
+        for op, cl in (("(", ")"), ("（", "）")):
+            if s.startswith(cl) or (s.startswith(op) and s.count(op) > s.count(cl)):
+                s = s[1:]
+            if s.endswith(op) or (s.endswith(cl) and s.count(cl) > s.count(op)):
+                s = s[:-1]
+            if s.startswith(op) and s.endswith(cl) and _balanced(s[1:-1], op, cl):
+                s = s[1:-1]
+        if s == before:
+            return s
+
+
+def _balanced(s: str, op: str, cl: str) -> bool:
+    depth = 0
+    for ch in s:
+        depth += (ch == op) - (ch == cl)
+        if depth < 0:
+            return False
+    return depth == 0
+
+
 def crop_fraction(image_bytes: bytes, roi: tuple = EMPLOYER_ROI) -> bytes:
     """依相對比例 roi=(x1,y1,x2,y2) 裁切影像,回傳 PNG bytes。先做 EXIF 方向校正。"""
     img = ImageOps.exif_transpose(Image.open(BytesIO(image_bytes)).convert("RGB"))
@@ -493,7 +524,7 @@ def extract_employer_fields(text: str) -> dict:
             core = re.sub(r".*[:：;；]", "", l).strip()
             if _has_cjk(core) and not CN_ADDR.search(core) and not EN_ADDR_KW.search(core):
                 cand = LABEL_WORDS.sub("", core)
-                cand = re.sub(r"Nama.*", "", cand, flags=re.I).strip(" ()（）:：;；")
+                cand = _strip_label_residue(re.sub(r"Nama.*", "", cand, flags=re.I))
                 if cand and _has_cjk(cand) and _is_name_like(cand):
                     name_cn = cand + _name_continuation(cand, nxt)
 
