@@ -55,16 +55,23 @@ def find_permits(text: str, permit_id_list=None,
     )
 
 
-def permit_in_text(text: str, hit_roi: str) -> str:
+def permit_id_patterns(roi: str) -> list[re.Pattern]:
+    """permit ROI → 取號 pattern。Tesseract 掃描與 Vision 取號都經由這裡選,不各寫一份。
+
+    "permit"(知道是 permit 截圖、不知道哪一半)用 LOWER:它是一般那套的超集
+    (只多了「冒號可省略」),寬一點也不會造成錯值 —— 自動寫入還要兩引擎一致。
+    """
+    return RE_PERMIT_ID_LIST if roi == "permit_upper" else RE_PERMIT_ID_LIST_LOWER
+
+
+def permit_in_text(text: str, roi: str) -> str:
     """一段 OCR 全文 → 許可證號,依截圖所屬的 ROI 選 pattern(與 Tesseract 掃該 ROI 時相同)。
 
-    ROI 不明時先試 permit、再試 mol(舊的 Vision 取號就是這樣做)。
+    roi:permit_upper / permit_lower / permit(哪一半不明)/ mol;不明時先試 permit、再試 mol。
     """
-    if hit_roi == "permit_lower":
-        return find_permits(text, RE_PERMIT_ID_LIST_LOWER, find_mol=False)[0]
-    if hit_roi == "permit_upper":
-        return find_permits(text, RE_PERMIT_ID_LIST, find_mol=False)[0]
-    if hit_roi == "mol":
+    if roi.startswith("permit"):
+        return find_permits(text, permit_id_patterns(roi), find_mol=False)[0]
+    if roi == "mol":
         return find_permits(text, find_id=False)[2]
     id_, _, mol, _ = find_permits(text)
     return id_ or mol

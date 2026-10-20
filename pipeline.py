@@ -494,7 +494,7 @@ def classify_by_count(image_count: int) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 from permit_patterns import (  # noqa: E402
-    RE_MOL_LIST, RE_PERMIT_ID_LIST, RE_PERMIT_ID_LIST_LOWER, find_permits)
+    RE_MOL_LIST, RE_PERMIT_ID_LIST, RE_PERMIT_ID_LIST_LOWER, find_permits, permit_id_patterns)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -759,7 +759,7 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
                     f"  text={text[:400]!r}"
                 )
                 is_permit_roi = roi_name.startswith("permit")
-                permit_id_list = RE_PERMIT_ID_LIST_LOWER if roi_name == "permit_lower" else None
+                permit_id_list = permit_id_patterns(roi_name) if roi_name.startswith("permit") else None
                 id_, id_layer, mol, mol_layer = find_permits(
                     text, permit_id_list,
                     find_mol=not is_permit_roi,
@@ -1011,8 +1011,7 @@ def build_vision_queue(csv_path: Path) -> tuple[list[VisionQueueItem], list[dict
 # ═══════════════════════════════════════════════════════════════════════════
 
 from vision_verification import (  # noqa: E402
-    VerificationLevel, VerifiedResult, _edit_distance, _is_valid_permit_format,
-    run_vision_items, verify_vision_result)
+    VerificationLevel, VerifiedResult, run_vision_items, verify_vision_result)
 
 
 @with_retry(

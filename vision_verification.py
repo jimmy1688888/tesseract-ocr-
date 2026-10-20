@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["VerificationLevel", "VerifiedResult", "permit_in_text", "run_vision_items",
+__all__ = ["VerificationLevel", "VerifiedResult", "run_vision_items",
            "verify_vision_result"]
 
 
@@ -117,9 +117,6 @@ class VerifiedResult:
     in_known_list: bool = False
 
 
-# 4 位數格式檢查:Vision 回傳的值必須是純 4 位數字才接受。
-# 這是「最低門檻」:Vision 偶爾會把日期、頁碼、其他不相關文字解析為候選值,
-# 此 regex 把這類雜訊濾掉。
 # 4 位數格式檢查:Vision 回傳的值必須是純 4 位數字才接受,或 4 位數+破折號+1 位數(xxxx-x)。
 # 這是「最低門檻」:Vision 偶爾會把日期、頁碼、其他不相關文字解析為候選值,
 # 此 regex 把這類雜訊濾掉。接受格式:
@@ -169,22 +166,20 @@ def verify_vision_result(
       Level                   | Action                | final_value 來源
       ─────────────────────── | ───────────────────── | ─────────────────
       CONFIRMED               | should_keyin=True     | vision_value(等於 tesseract)
-      LIKELY_OCR_CONFUSION    | should_keyin=False    | 視 tesseract_conf 而定 ↓
+      LIKELY_OCR_CONFUSION    | should_keyin=False    | 空(不自動填,由人工輸入)
       VISION_ONLY             | should_keyin=False    | vision_value
       DISAGREEMENT            | should_keyin=False    | vision_value
       FORMAT_INVALID          | should_keyin=False    | tesseract_candidate(若有)或空
 
-    LIKELY_OCR_CONFUSION 的 final_value 選擇:
-      tesseract_conf >  50:採用 Tesseract 值(Tesseract 信心夠,Vision 可能誤判)
-      tesseract_conf <= 50:採用 Vision 值(Tesseract 信心不足,以 Vision 為主)
-      不論哪邊勝出,should_keyin 都是 False — 兩引擎不一致仍需人工確認。
+    LIKELY_OCR_CONFUSION(差 1 字元):不自動挑值,final_value 為空;兩個候選與各自
+      的信心寫進 rationale 供人工參考。
 
     參數:
       vision_value         : Vision OCR 萃取的值。空字串代表 Vision 沒有正則命中。
       tesseract_candidate  : 該圖在 Tesseract 階段讀到的最佳候選(可為空字串)。
       known_permits        : 已知合法 permit 集合;僅影響 rationale,不影響 should_keyin。
       tesseract_conf       : 該 tesseract_candidate 對應的 Tesseract 信心(0-100);
-                             僅在 LIKELY_OCR_CONFUSION 分支用到。預設 0.0 → 採 Vision 值。
+                             只寫進 LIKELY_OCR_CONFUSION 的 rationale,不影響取值。
 
     回傳:VerifiedResult,呼叫端據此決定該列進 key-in 批次或人工審查批次。
     """

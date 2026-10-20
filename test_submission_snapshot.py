@@ -19,13 +19,13 @@ import snapshots as snap
 
 # ─── 真實素材 ─────────────────────────────────────────────────────────────
 
-def test_permit_routing_matches_snapshot():
+def test_submission_decisions_matches_snapshot():
     if not rs.permit_scans():
         pytest.skip("沒有任何許可證掃描結果(samples/legacy、samples/permit_scan)")
-    saved = snap.load_routing()
+    saved = snap.load_decisions()
     if saved is None:
         pytest.skip("沒有送審快照:執行 python snapshots.py record 錄製(會先印出內容給你看)")
-    msg = snap.routing_mismatch_message(saved, snap.current_routing())
+    msg = snap.decisions_mismatch_message(saved, snap.current_decisions())
     assert msg is None, msg
 
 
@@ -40,51 +40,51 @@ def corpus(tmp_path, monkeypatch):
     return tmp_path / "samples"
 
 
-def _route(**override):
+def _decide(**override):
     """假送審:每份 docx 一個決定;override 可換掉某份的決定。"""
     base = {
-        "32503.docx": [{"去向": "直接key-in", "候選值": "1234", "圖": "image5.jpeg"}],
-        "32512.docx": [{"去向": "反查救援", "候選值": "", "圖": ""}],
+        "甲.docx": [{"去向": "直接key-in", "候選值": "1234", "圖": "image5.jpeg"}],
+        "乙.docx": [{"去向": "反查救援", "候選值": "", "圖": ""}],
     }
     base.update(override)
     return lambda csv_path: base
 
 
 def _record(lines, **kw):
-    kw.setdefault("route", _route())
+    kw.setdefault("decide", _decide())
     kw.setdefault("today", "2026-10-20")
-    return snap.record_routing(out=lines.append, **kw)
+    return snap.record_decisions(out=lines.append, **kw)
 
 
-class TestRecordRouting:
+class TestRecordDecisions:
 
     def test_first_record_prints_every_docx(self, corpus):
         lines = []
         _record(lines)
         text = "\n".join(lines)
-        assert "32503.docx" in text and "32512.docx" in text
-        assert snap.load_routing()["routing"]["32503.docx"][0]["候選值"] == "1234"
+        assert "甲.docx" in text and "乙.docx" in text
+        assert snap.load_decisions()["decisions"]["甲.docx"][0]["候選值"] == "1234"
 
     def test_rerecord_prints_only_changed_docx(self, corpus):
         _record([])
         lines = []
-        _record(lines, route=_route(**{"32503.docx": [
+        _record(lines, decide=_decide(**{"甲.docx": [
             {"去向": "送Vision", "候選值": "1234", "圖": "image5.jpeg"}]}))
         changed = [l for l in lines if "→" in l]
-        assert len(changed) == 1 and "32503.docx" in changed[0] and "送Vision" in changed[0]
+        assert len(changed) == 1 and "甲.docx" in changed[0] and "送Vision" in changed[0]
 
     def test_old_snapshot_is_kept_with_a_date(self, corpus):
         _record([])
-        before = snap.routing_path().read_text(encoding="utf-8")
-        _record([], route=_route(**{"32512.docx": []}))
-        kept = snap.routing_path().with_name("permit_routing.2026-10-20.json")
+        before = snap.decisions_snapshot_path().read_text(encoding="utf-8")
+        _record([], decide=_decide(**{"乙.docx": []}))
+        kept = snap.decisions_snapshot_path().with_name("submission_decisions.2026-10-20.json")
         assert kept.read_text(encoding="utf-8") == before
 
     def test_nothing_changed_writes_nothing(self, corpus):
         _record([])
         lines = []
         _record(lines)
-        assert list(snap.routing_path().parent.glob("permit_routing.*.json")) == []
+        assert list(snap.decisions_snapshot_path().parent.glob("submission_decisions.*.json")) == []
         assert any("沒有變化" in l for l in lines)
 
     def test_no_scan_results_refuses_to_record(self, corpus):
@@ -92,31 +92,31 @@ class TestRecordRouting:
             p.unlink()
         lines = []
         assert _record(lines) is None
-        assert not snap.routing_path().exists()
+        assert not snap.decisions_snapshot_path().exists()
         assert any("沒有任何許可證掃描結果" in l for l in lines)
 
 
-class TestRoutingMismatch:
+class TestDecisionsMismatch:
 
     def test_match_is_none(self, corpus):
         _record([])
-        now = snap.current_routing(route=_route())
-        assert snap.routing_mismatch_message(snap.load_routing(), now) is None
+        now = snap.current_decisions(decide=_decide())
+        assert snap.decisions_mismatch_message(snap.load_decisions(), now) is None
 
     def test_names_the_docx_and_both_decisions(self, corpus):
         _record([])
-        now = snap.current_routing(route=_route(**{"32503.docx": [
+        now = snap.current_decisions(decide=_decide(**{"甲.docx": [
             {"去向": "送Vision", "候選值": "1234", "圖": "image5.jpeg"}]}))
-        msg = snap.routing_mismatch_message(snap.load_routing(), now)
-        assert "32503.docx" in msg and "直接key-in" in msg and "送Vision" in msg
-        assert "32512.docx" not in msg
+        msg = snap.decisions_mismatch_message(snap.load_decisions(), now)
+        assert "甲.docx" in msg and "直接key-in" in msg and "送Vision" in msg
+        assert "乙.docx" not in msg
 
     def test_comparing_never_writes(self, corpus):
         _record([])
-        before = snap.routing_path().read_bytes()
-        now = snap.current_routing(route=_route(**{"32512.docx": []}))
-        snap.routing_mismatch_message(snap.load_routing(), now)
-        assert snap.routing_path().read_bytes() == before
+        before = snap.decisions_snapshot_path().read_bytes()
+        now = snap.current_decisions(decide=_decide(**{"乙.docx": []}))
+        snap.decisions_mismatch_message(snap.load_decisions(), now)
+        assert snap.decisions_snapshot_path().read_bytes() == before
 
 
 from pipeline import ResultStatus  # noqa: E402
@@ -125,7 +125,7 @@ LARGE_NO_HIT = ResultStatus.LARGE_NO_HIT
 PERMIT_PARTIAL = ResultStatus.PERMIT_PARTIAL
 
 
-class TestDefaultRouteAdapter:
+class TestDefaultDecisionsAdapter:
     """現行送審程式 → 快照的形狀(去向／候選值／圖)。#40 重構時只換這一層。"""
 
     def _csv(self, tmp_path, rows):
@@ -153,7 +153,7 @@ class TestDefaultRouteAdapter:
              "mol": "5678", "mol_conf": 53.0, "final_value": "5678", "final_conf": 53.0,
              "vision_review": True},
         ])
-        got = snap._default_route(p)
+        got = snap._default_decisions(p)
         assert got["a.docx"] == [{"去向": "直接key-in", "候選值": "1234", "圖": "image5.jpeg"}]
         assert got["b.docx"] == [{"去向": "反查救援", "候選值": "", "圖": ""}]
         assert got["c.docx"] == [{"去向": "送Vision", "候選值": "5678", "圖": "image2.jpeg"}]
@@ -164,5 +164,5 @@ class TestDefaultRouteAdapter:
              "id": "1234", "id_conf": 40.0, "final_value": "1234", "final_conf": 40.0,
              "vision_review": True, "status": PERMIT_PARTIAL},
         ])
-        assert snap._default_route(p)["d.docx"] == [
+        assert snap._default_decisions(p)["d.docx"] == [
             {"去向": "反查救援", "候選值": "1234", "圖": "image5.jpeg"}]

@@ -61,6 +61,24 @@ class TestLarge:
         r.mol_crop = "crops/image5_mol.png"
         assert decide([r]).img_path == "crops/image5.jpeg.png"
 
+    def test_crop_roi_follows_the_crop_actually_sent(self):
+        """hit_roi 記的是「第一個」命中的 ROI:mol 先中、permit 後中時它停在 mol,
+        但送出去的是 permit 的截圖 —— 取號 ROI 必須跟著截圖走,不能照抄 hit_roi。"""
+        r = _permit("image5.jpeg", "1234", 60, partial=True, roi="mol")
+        r.mol, r.mol_conf, r.mol_crop = "9999", 30.0, "crops/image5_mol.png"
+        d = decide([r])
+        assert d.img_path == "crops/image5.jpeg.png"
+        assert d.hit_roi == "permit"                    # 哪一半不知道,至少知道是 permit
+
+    def test_crop_roi_keeps_the_permit_half_when_known(self):
+        assert decide([_permit("image5.jpeg", "1234", 60, partial=True,
+                               roi="permit_upper")]).hit_roi == "permit_upper"
+
+    def test_mol_crop_roi_is_mol(self):
+        r = _mol("image2.jpeg", "1234", 50)
+        r.hit_roi = ""                                  # 截圖是 mol 的,就是 mol
+        assert decide([r]).hit_roi == "mol"
+
     def test_rule_a_conflict_prefers_earliest_permit(self):
         d = decide([_mol("image2.jpeg", "9999", 90), _permit("image6.jpeg", "1234", 60),
                     _permit("image5.jpeg", "1235", 40)])
@@ -96,6 +114,19 @@ class TestLarge:
     def test_high_conf_without_review_is_keyin(self):
         d = decide([_permit("image5.jpeg", "1234", 90, review=False)])
         assert d.destination is Destination.直接KEYIN
+
+
+class TestNoUsableReading:
+    """舊做法這兩種回空佇列 —— docx 安靜消失;現在走反查救援(全無命中同一條路)。"""
+
+    def test_large_rows_without_any_value(self):
+        d = decide([_row("image5.jpeg"), _row("image6.jpeg", status=ResultStatus.LARGE_NO_HIT)])
+        assert d.destination is Destination.反查救援 and d.image_name == ""
+        assert "皆無可用讀值" in d.reason
+
+    def test_small_rows_without_hits_even_if_status_is_ok(self):
+        d = decide([_row("image1.png", cls="small")])
+        assert d.destination is Destination.反查救援 and d.candidate_value == ""
 
 
 class TestOneDecisionPerDocx:
@@ -169,6 +200,22 @@ class TestVotePredicate:
         rows = [_permit("image5.jpeg", "1234", CONF_VOTE_MIN, vote=True, review=True)]
         assert pipeline.has_permit_vote(rows) is False
         assert decide(rows).destination is not Destination.直接KEYIN
+
+
+def test_queue_has_one_item_per_docx(tmp_path):
+    """matches.csv 一份 docx 兩列(兩張圖都需送 Vision)→ 佇列只有一筆。"""
+    import csv
+
+    import pipeline
+    p = tmp_path / "matches.csv"
+    with open(p, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=pipeline.CSV_FIELDS)
+        w.writeheader()
+        w.writerow(_permit("image5.jpeg", "1234", 52, partial=True).to_csv_row())
+        w.writerow(_permit("image6.jpeg", "1284", 60, partial=True).to_csv_row())
+    vision, manual, keyin = pipeline.build_vision_queue(p)
+    assert [(i.source_docx, i.image_name) for i in vision + keyin] == [("a.docx", "image6.jpeg")]
+    assert manual == []
 
 
 def test_queue_items_carry_the_crop_roi(tmp_path):

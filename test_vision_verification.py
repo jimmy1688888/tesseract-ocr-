@@ -10,7 +10,8 @@ import pytest
 
 import permit_patterns
 from pipeline import VisionQueueItem
-from vision_verification import permit_in_text, run_vision_items
+from permit_patterns import permit_in_text
+from vision_verification import run_vision_items
 
 
 class TestPermitInText:
@@ -21,6 +22,20 @@ class TestPermitInText:
     def test_upper_roi_keeps_the_strict_pattern(self):
         assert permit_in_text("No. Izin 1234", "permit_upper") == ""
         assert permit_in_text("No. Izin: 1234", "permit_upper") == "1234"
+
+    def test_permit_of_unknown_half_uses_the_wider_lower_patterns(self):
+        assert permit_in_text("No. Izin 1234", "permit") == "1234"
+
+    def test_tesseract_and_vision_choose_patterns_in_one_place(self):
+        """ROI → pattern 的選擇只一處:掃描迴圈與 Vision 取號都呼叫 permit_id_patterns。"""
+        import inspect
+
+        import pipeline
+        assert "permit_id_patterns(roi_name)" in inspect.getsource(pipeline.scan_image_large)
+        assert permit_patterns.permit_id_patterns("permit_lower") is \
+            permit_patterns.RE_PERMIT_ID_LIST_LOWER
+        assert permit_patterns.permit_id_patterns("permit_upper") is \
+            permit_patterns.RE_PERMIT_ID_LIST
 
     def test_mol_roi_reads_the_license_number(self):
         assert permit_in_text("Agency's MOL License Number: 5678-2", "mol") == "5678-2"

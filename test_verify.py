@@ -25,14 +25,14 @@ from pathlib import Path
 
 import pytest
 
-from pipeline import (
+from permit_patterns import find_permits
+from pipeline import load_known_permits_from_log
+from vision_verification import (
     verify_vision_result,
     VerifiedResult,
     VerificationLevel,
     _edit_distance,
     _is_valid_permit_format,
-    load_known_permits_from_log,
-    find_permits,
 )
 
 
