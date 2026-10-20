@@ -19,6 +19,7 @@ import zipfile
 import pytest
 
 import employer_extract as ee
+from contract_template import Template
 from employer_extract import _pledge_name
 
 # 32572 實況:中英分行
@@ -182,6 +183,16 @@ class TestApplyRescue:
         ee._apply_pledge_rescue(f, "x.docx")
         assert "取自切結書頁" in f["疑慮標示"]
         assert "2 字與英譯 3 音節不符" in f["疑慮標示"]
+
+    def test_rescued_company_name_skips_count_check_on_factory_template(self, monkeypatch):
+        """工廠類樣板救回的是公司名:跟契約頁一樣看樣板跳過檢查(ADR-0010)。"""
+        monkeypatch.setattr(ee, "rescue_name_from_pledge",
+                            lambda p, client=None: ("大明金屬股份有限公司", "image5.jpeg"))
+        f = self._fields(en="DA MING METAL CORPORATION (WANG, DA-MING)")
+        f["契約樣板"] = Template.工廠類
+        ee._apply_pledge_rescue(f, "x.docx")
+        assert "取自切結書頁" in f["疑慮標示"]
+        assert "音節" not in f["疑慮標示"]
 
     def test_failed_rescue_changes_nothing(self, monkeypatch):
         """救不回來時 H 欄維持空、L 欄維持「未擷取到」。

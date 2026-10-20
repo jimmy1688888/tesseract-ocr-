@@ -49,9 +49,16 @@ class TestCheckedValues:
                     {"33703": {"雇主欄位": {"電話": "06-0000000"}}})
         assert rs.checked_employer_fields("33703") == {"電話": "06-0000000"}
 
+    def test_template(self, corpus):
+        _write_json(corpus / "checked_values.json",
+                    {"30766": {"契約樣板": "工廠類"}, "33701": {"契約頁": "image2.png"}})
+        assert rs.checked_template("30766") == "工廠類"
+        assert rs.checked_template("33701") is None
+
     def test_no_file_means_no_checked_values(self, corpus):
         assert rs.checked_contract_page("33701.docx") is None
         assert rs.checked_employer_fields("33701") == {}
+        assert rs.checked_template("33701") is None
 
     def test_record_contract_page_keeps_other_values(self, corpus):
         _write_json(corpus / "checked_values.json",

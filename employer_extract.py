@@ -21,6 +21,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 # docx 內嵌圖與圖序只有一份,與 pipeline 共用(#5);兩側不互相 import。
+from contract_template import Template, contract_template
 from docx_images import image_sort_key, read_images
 
 logger = logging.getLogger(__name__)
@@ -80,19 +81,15 @@ ADDR_LABEL  = re.compile(r"(地址|Alamat)")
 PHONE_LABEL = re.compile(r"(電話|Nomor\s*Telepon|傳真)", re.I)
 LABEL_WORDS = re.compile(
     rf"(甲方名稱|雇主名[稱称]|{_INSTITUTION_NAME_LABEL}|以下簡稱為?甲方|地址|電話|傳真)")
-# 機構英文名的字樣。機構英文名常含縣市(「XX County Private…Long-term Care」),
-# 不認得它就會被 EN_ADDR_KW 當成地址行:英文名落空、英文地址反而拿到機構名(33703)。
-# 認得的行是名稱不是地址,也不做中文字數 vs 英譯音節數的比對(機構不是人)。
-# 判定一律走 _is_institution_en:字樣之外還要求**不含數字** —— 地址一定有門牌號,
-# 機構名沒有;否則家庭類「No. 5, Welfare Rd.」這種地址行會被當成機構英文名。
-_EN_INSTITUTION = re.compile(
-    r"Long[-\s]*term\s*Care|\b(?:Nursing|Hospital|Foundation|Association|Welfare)\b",
-    re.I)
+def _is_org_name_line(line: str, template: Template) -> bool:
+    """機構類／工廠類樣板裡,這行英文是不是雇主名稱(而不是地址)。
 
-
-def _is_institution_en(line: str) -> bool:
-    """這行英文是不是機構名(而不是地址)。"""
-    return bool(_EN_INSTITUTION.search(line)) and not re.search(r"\d", line)
+    樣板由文件判一次(ADR-0010),不再從英文名的字樣逐行猜。名稱與地址靠
+    「不含數字」分:地址一定有門牌號,機構名、公司名沒有。機構英文名常含縣市
+    (「XX County Private…Long-term Care」),公司名常含 Taiwan —— 不認得的話
+    會被 EN_ADDR_KW 當成地址行(33703)。家庭類的英文行一律不是機構名。
+    """
+    return template.is_organisation and not re.search(r"\d", line)
 
 
 # 機構類樣板的標題「(NURSING HOME)」:含 Nursing 但不是任何機構的名字。
@@ -399,6 +396,7 @@ _EMPTY_FIELDS = {
     "雇主名稱_中": "", "雇主名稱_英": "", "地址_中": "", "地址_英": "", "電話": "",
     "地址_中_標準": "", "郵遞區號": "", "地址_比對": False,
     "地址_疑慮": "", "縣市_疑慮": "", "名稱_疑慮": "", "門牌_疑慮": "", "疑慮標示": "",
+    "契約樣板": Template.認不出, "樣板_疑慮": "",
 }
 
 
@@ -436,6 +434,8 @@ def extract_employer_fields(text: str) -> dict:
     end = next((i for i in range(start + 1, len(lines))
                 if PARTY_END.search(lines[i])), len(lines))
     seg = lines[start:end]
+    # 契約樣板整份判一次(ADR-0010),下面的英文地址、英文名、字數音節數檢查都看它。
+    template = contract_template(text)
 
     # ── 電話:只統計雇主區塊內。仲介框在區塊上方,其電話絕不能混入——
     #    雇主電話被格式/紅章毀掉時,全文統計的 fallback 會把仲介電話
@@ -474,7 +474,7 @@ def extract_employer_fields(text: str) -> dict:
         if not addr_cn and _is_cn_address(l):
             addr_cn = _clean_cn_address(l)
         if (not addr_en and not _has_cjk(l) and EN_ADDR_KW.search(l) and len(l) > 12
-                and not _is_institution_en(l)):
+                and not _is_org_name_line(l, template)):
             en = l
             # 併入下一行的 R.O.C. 之類接續
             if idx + 1 < len(seg) and re.fullmatch(r"[A-Za-z.()\s]{2,8}", seg[idx + 1]):
@@ -499,7 +499,7 @@ def extract_employer_fields(text: str) -> dict:
         # 機構英文名不去冒號前綴:名字裡就有冒號(33703 的機構英文名括號裡就有一個),
         # 也不因含縣市字被當地址;下一行若是整行括號的拼音(負責人)就接上。
         if not name_en and not _EN_INSTITUTION_TITLE.fullmatch(l):
-            is_inst = _is_institution_en(l)
+            is_inst = _is_org_name_line(l, template)
             cand_en = re.sub(
                 r"^.*Nama\s*(Majikan|Perusahaan|Panti\s*Jompo(\s*/\s*Rumah\s*Sakit)?)\s*[:：]?",
                 "", l, flags=re.I)
@@ -529,6 +529,9 @@ def extract_employer_fields(text: str) -> dict:
                     name_cn = cand + _name_continuation(cand, nxt)
 
     fields = {
+        "契約樣板": template,
+        "樣板_疑慮": ("H:契約樣板未辨識,以家庭類規則擷取"
+                     if template is Template.認不出 else ""),
         # 補齊不成對括號:擷取時 strip 或 OCR 可能只留單邊,寫進 Sheets 會缺一邊。
         "雇主名稱_中": _balance_brackets(name_cn),
         "雇主名稱_英": _balance_brackets(name_en),
@@ -543,7 +546,7 @@ def extract_employer_fields(text: str) -> dict:
     # 而機構名又不做字數檢查 —— 不標的話就是看不見的錯值。
     fields["名稱_疑慮"] = "；".join(p for p in (
         "H:中文名括號不成對,已補齊" if fields["雇主名稱_中"] != name_cn else "",
-        _name_doubt(fields["雇主名稱_中"], fields["雇主名稱_英"])) if p)
+        _name_doubt(fields["雇主名稱_中"], fields["雇主名稱_英"], template)) if p)
     fields["門牌_疑慮"] = _house_number_doubt(fields["地址_中"], fields["地址_英"])
     fields["疑慮標示"] = _compose_doubt(fields)
     return fields
@@ -612,18 +615,13 @@ def _is_name_like(s: str) -> bool:
     return not CN_BOILERPLATE.search(s) and not re.search(r"\d", s)
 
 
-# 公司型雇主的英文名(XX Co., Ltd.)音節數與中文字數無對應關係,不做數量檢查。
-# 機構型(_is_institution_en)同理。
-_EN_COMPANY = re.compile(
-    r"\b(Co|Ltd|Inc|Corp|Company|Limited|Enterprise|Industr|Tech)\b\.?", re.I)
-
-
 def _en_syllables(name_en: str) -> int:
     """英文姓名的音節段數:以空白/逗號/連字號切,SONG, MING-FANG → 3。"""
     return len([p for p in re.split(r"[\s,\-]+", name_en.strip()) if p])
 
 
-def _name_doubt(name_cn: str, name_en: str) -> str:
+def _name_doubt(name_cn: str, name_en: str,
+                template: Template = Template.家庭類) -> str:
     """中文名的疑慮。措辭只陳述事實,不推斷成因(同 _address_doubt 的規矩)。
 
     中文名的可靠度遠低於英文名:紅章蓋的是中文那一欄,羅馬拼音在另一欄反而倖存。
@@ -641,7 +639,9 @@ def _name_doubt(name_cn: str, name_en: str) -> str:
     """
     if not name_cn:
         return "H:未擷取到中文名"
-    if not name_en or _EN_COMPANY.search(name_en) or _is_institution_en(name_en):
+    # 機構類、工廠類的雇主名是「名稱(負責人)」,字數與音節數沒有對應關係(ADR-0004;
+    # 判定方式見 ADR-0010:看文件的契約樣板,不看英文名有沒有 Co/Ltd)。
+    if not name_en or template.is_organisation:
         return ""
     n_cn = len(CJK.findall(name_cn))
     n_en = _en_syllables(name_en)
@@ -762,7 +762,8 @@ def _compose_doubt(fields: dict) -> str:
     與 D 欄分開的理由不變(D 欄專講許可證判讀,不同主題);但名稱與地址同屬
     雇主資料,是同一個主題下的多個欄位,合在一格不算一詞多義。
     """
-    parts = [fields.get("名稱_疑慮", ""), fields.get("地址_疑慮", ""),
+    parts = [fields.get("樣板_疑慮", ""), fields.get("名稱_疑慮", ""),
+             fields.get("地址_疑慮", ""),
              fields.get("縣市_疑慮", ""), fields.get("門牌_疑慮", "")]
     return "；".join(p for p in parts if p)
 
@@ -1142,7 +1143,8 @@ def _apply_pledge_rescue(fields: dict, docx_path: str, client=None) -> None:
         logger.info(f"  切結書頁未取得中文名:{Path(docx_path).name}")
         return
     fields["雇主名稱_中"] = got
-    count = _name_doubt(got, fields.get("雇主名稱_英", ""))
+    count = _name_doubt(got, fields.get("雇主名稱_英", ""),
+                        fields.get("契約樣板", Template.家庭類))
     fields["名稱_疑慮"] = "；".join(
         p for p in (f"H:中文名取自切結書頁({page})", count) if p)
     fields["疑慮標示"] = _compose_doubt(fields)

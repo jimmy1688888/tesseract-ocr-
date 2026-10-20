@@ -12,6 +12,7 @@
 """
 import re
 
+from contract_template import Template
 from employer_extract import (extract_employer_fields, _name_doubt,
                               _house_number_doubt)
 
@@ -135,8 +136,19 @@ class TestNameDoubt:
         assert _name_doubt("洪清廷", "HUNG YAN TING") == ""     # 中間字不同
 
     def test_company_names_skip_the_count_check(self):
-        """公司英文名(XX Co., Ltd.)音節數與中文字數無對應關係,不能拿來比。"""
-        assert _name_doubt("台灣某某科技股份有限公司", "TAIWAN XX TECH CO., LTD.") == ""
+        """公司英文名(XX Co., Ltd.)音節數與中文字數無對應關係,不能拿來比。
+
+        是不是公司看文件的契約樣板(ADR-0010),不看英文名有沒有 Co/Ltd。
+        """
+        assert _name_doubt("台灣某某科技股份有限公司", "TAIWAN XX TECH CO., LTD.",
+                           Template.工廠類) == ""
+        assert _name_doubt("某某長照機構(王大明)", "XX LONG-TERM CARE (WANG DA MING)",
+                           Template.機構類) == ""
+
+    def test_company_looking_name_on_family_template_is_counted(self):
+        """家庭類樣板就照人名數:英文名長得像公司,不再自動放行。"""
+        assert "不符" in _name_doubt("台灣某某科技股份有限公司", "TAIWAN XX TECH CO., LTD.",
+                                    Template.家庭類)
 
     def test_missing_english_name_skips_the_check(self):
         assert _name_doubt("王小明", "") == ""

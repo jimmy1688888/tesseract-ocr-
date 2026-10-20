@@ -8,7 +8,7 @@
   samples/vision/{stem}.json     打過一次 Vision 存下的全文,離線重放、不再花錢
                                  {image, roi, texts: {roi: 全文}}
   samples/checked_values.json    核對值(人看過原圖確認的值),依 stem 分:
-                                 {stem: {"契約頁": 圖檔名, "雇主欄位": {欄: 值}}}
+                                 {stem: {"契約頁": 圖檔名, "契約樣板": 類別, "雇主欄位": {欄: 值}}}
                                  允許只填部分;沒填的不驗
   samples/snapshots/             快照(機器輸出,不是真值),見 snapshots.py
   samples/legacy/                舊格式檔(如 #15 之前寫出的 matches.csv)
@@ -108,6 +108,11 @@ def _checked_all() -> dict:
 def checked_contract_page(docx_name: str) -> str | None:
     """人確認過的契約頁圖檔名;沒有核對值就是 None(不拿機器的選擇頂替)。"""
     return _checked_all().get(Path(docx_name).stem, {}).get("契約頁")
+
+
+def checked_template(stem: str) -> str | None:
+    """人看圖確認過的契約樣板(家庭類／機構類／工廠類);沒有核對值就是 None。"""
+    return _checked_all().get(stem, {}).get("契約樣板")
 
 
 def checked_employer_fields(stem: str) -> dict[str, str]:
