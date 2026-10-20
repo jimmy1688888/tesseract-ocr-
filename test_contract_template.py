@@ -138,10 +138,14 @@ class TestExtractionFollowsTemplate:
             "Nama Majikan: WANG XIAO MING", "SELANJUTNYA DISEBUT PIHAK PERTAMA"]))
         assert family["樣板_疑慮"] == "" and "契約樣板" not in family["疑慮標示"]
 
-    def test_failed_anchor_carries_unrecognised_template_key(self):
-        """區塊錨定失敗的早退路徑,鍵與成功路徑一致。"""
+    def test_failed_anchor_still_carries_the_judged_template(self):
+        """區塊錨定失敗也判得出樣板:之後切結書救回的公司名才不會被當人名數音節。
+
+        樣板疑慮不掛:錨定失敗的原因已寫在 _note,欄位全空。
+        """
         f = extract_employer_fields("勞動契約 工廠類")
-        assert f["_note"] and f["契約樣板"] == Template.認不出 and f["樣板_疑慮"] == ""
+        assert f["_note"] and f["契約樣板"] == Template.工廠類 and f["樣板_疑慮"] == ""
+        assert extract_employer_fields("無樣板字")["契約樣板"] == Template.認不出
 
 
 @pytest.mark.parametrize("stem", rs.vision_stems())

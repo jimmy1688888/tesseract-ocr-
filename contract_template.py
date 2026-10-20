@@ -53,12 +53,13 @@ COMPANY_WORDS = re.compile(
 
 def contract_template(text: str) -> Template:
     """這份契約的樣板;文件上讀不到任何樣板字就是「認不出」。"""
-    m = TITLE.search(text or "")
+    text = text or ""
+    m = TITLE.search(text)
     if m:
         return _TITLE_TEMPLATE[m.group(1)]
     for pat, template in LABELS:
-        if pat.search(text or ""):
+        if pat.search(text):
             return template
-    if SEKTOR_INFORMAL.search(text or ""):
+    if SEKTOR_INFORMAL.search(text):
         return Template.家庭類
     return Template.認不出

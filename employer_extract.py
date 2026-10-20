@@ -406,6 +406,9 @@ def extract_employer_fields(text: str) -> dict:
     另含 _note:正常為空字串;雇主區塊錨不到時為失敗原因,呼叫端據以標示留空。
     """
     lines = [l.strip() for l in text.splitlines() if l.strip()]
+    # 契約樣板整份判一次(ADR-0010),下面的英文地址、英文名、字數音節數檢查都看它。
+    # 錨定失敗的早退也帶著它:之後的切結書救援要依樣板決定做不做音節檢查。
+    template = contract_template(text)
 
     # ── 定位雇主區塊(上界跳過仲介 block,下界切在乙方之前)──
     # 起點① 甲方標籤;② 標籤被 OCR 毀掉時退印尼文標籤 Nama Majikan——
@@ -429,13 +432,11 @@ def extract_employer_fields(text: str) -> dict:
             start = next((i for i, l in enumerate(lines)
                           if ID_LABEL_INSTITUTION.search(l)), None)
         if start is None:
-            return {**_EMPTY_FIELDS,
+            return {**_EMPTY_FIELDS, "契約樣板": template,
                     "_note": "雇主區塊錨定失敗(甲方標籤、Nama Majikan、Nama Panti Jompo 皆未命中)"}
     end = next((i for i in range(start + 1, len(lines))
                 if PARTY_END.search(lines[i])), len(lines))
     seg = lines[start:end]
-    # 契約樣板整份判一次(ADR-0010),下面的英文地址、英文名、字數音節數檢查都看它。
-    template = contract_template(text)
 
     # ── 電話:只統計雇主區塊內。仲介框在區塊上方,其電話絕不能混入——
     #    雇主電話被格式/紅章毀掉時,全文統計的 fallback 會把仲介電話
@@ -531,7 +532,7 @@ def extract_employer_fields(text: str) -> dict:
     # 工廠類:Nama Perusahaan 被拆成好幾行,「第一個像英文名的行」可能先中別的字串
     # (30770 抓成一個編號)。含公司字樣的行優先,找不到才用上面的現行規則(#37)。
     if template is Template.工廠類:
-        name_en = _company_name_line(seg) or name_en
+        name_en = _company_name_in_block(seg) or name_en
 
     fields = {
         "契約樣板": template,
@@ -567,18 +568,16 @@ CN_BOILERPLATE = re.compile(
     r"以下簡稱|以下$|^以下")
 
 
-# 只認行首的「地址」:標籤一定在行首,內文提到地址(「通訊地址…」)的不是標籤。
-def _company_name_line(seg: list[str]) -> str:
-    """區塊內第一個含公司字樣、不含數字的英文行(去掉同行的 Perusahaan 標籤);沒有就空。
-
-    不含數字:地址與編號一定有數字,公司名沒有(同 _is_org_name_line 的理由)。
-    """
+def _company_name_in_block(seg: list[str]) -> str:
+    """區塊內第一個含公司字樣的公司名稱行,去掉同行的 Perusahaan 標籤;沒有就空。"""
     for l in seg:
-        if not _has_cjk(l) and not re.search(r"\d", l) and COMPANY_WORDS.search(l):
+        if (not _has_cjk(l) and _is_org_name_line(l, Template.工廠類)
+                and COMPANY_WORDS.search(l)):
             return re.sub(r"^.*?(Nama\s*)?Perusahaan\s*[:：]?", "", l, flags=re.I).strip()
     return ""
 
 
+# 只認行首的「地址」:標籤一定在行首,內文提到地址(「通訊地址…」)的不是標籤。
 _CN_ADDR_LABEL = re.compile(r"^地址")
 # 標籤之後看幾行:逐欄序列化會在標籤與值之間夾進別欄的一兩行(印尼文標籤、職類)。
 _LABEL_LOOKAHEAD = 3
