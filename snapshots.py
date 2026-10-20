@@ -91,9 +91,9 @@ def mismatch_message(stem: str, saved: dict, now: dict[str, str], data_hash: str
     return "\n".join([head, *cells])
 
 
-def _keep_path(today: str) -> Path:
+def _keep_path(today: str, p: Path | None = None) -> Path:
     """舊快照的留存檔名;同一天錄多次就加序號,絕不蓋掉已留存的。"""
-    p = snapshot_path()
+    p = p or snapshot_path()
     keep = p.with_name(f"{p.stem}.{today}.json")
     n = 2
     while keep.exists():
@@ -138,6 +138,100 @@ def record(out: Callable[[str], None] = print,
         out(f"舊快照留存為 {keep.name}")
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({"alldata_sha256": data_hash, "recorded": today, "fields": new},
+                            ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
+    out(f"已寫入 {p}({len(new)} 份)")
+    return p
+
+
+# ─── 送審快照(#38):許可證掃描結果 → 每份 docx 的送審決策 ─────────────────
+#
+# 送審決策(CONTEXT.md)要收成一個 module(#40),這張網守住重構前後每份 docx 的
+# 去向、候選值、被選的那張圖。與 H~O 快照同一套規矩:pytest 只比對,重錄先印 diff、
+# 舊檔加日期留存。記成 {docx: [決定, …]} 的清單:現行程式一份 docx 可能產生多筆,
+# 快照要能如實記下(#40 之後應只剩一筆)。
+
+def routing_path() -> Path:
+    return rs.ROOT / "snapshots" / "permit_routing.json"
+
+
+def _default_route(csv_path: Path) -> dict[str, list[dict[str, str]]]:
+    """現行送審程式 → 快照的形狀。#40 重構時只換這一層。"""
+    import pipeline
+    vision, manual, keyin = pipeline.build_vision_queue(csv_path)
+    out: dict[str, list[dict[str, str]]] = {}
+
+    def add(docx, dest, value, image):
+        out.setdefault(docx, []).append({"去向": dest, "候選值": value, "圖": image})
+
+    for i in keyin:
+        add(i.source_docx, "直接key-in", i.candidate_value, i.image_name)
+    for i in vision:
+        add(i.source_docx, "反查救援" if i.no_vote_rescue else "送Vision",
+            i.candidate_value, i.image_name)
+    for d in manual:                      # 全無命中:主流程一律交反查救援
+        add(d["source_docx"], "反查救援", "", "")
+    return out
+
+
+def current_routing(route: Callable[[Path], dict] | None = None) -> dict[str, list[dict[str, str]]]:
+    """{docx: [決定…]} —— 每份許可證掃描結果現在的送審決策。"""
+    route = route or _default_route
+    out: dict[str, list[dict[str, str]]] = {}
+    for csv_path in rs.permit_scans():
+        out.update(route(csv_path))
+    return out
+
+
+def load_routing() -> dict | None:
+    p = routing_path()
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+
+
+def _routing_changes(old: dict, new: dict) -> list[str]:
+    lines = []
+    for docx in sorted(set(old) | set(new)):
+        if docx not in new:
+            lines.append(f"{docx}: 素材已不在,從快照移除")
+        elif docx not in old:
+            lines.append(f"{docx}: {new[docx]}")
+        elif old[docx] != new[docx]:
+            lines.append(f"{docx}: {old[docx]} → {new[docx]}")
+    return lines
+
+
+def routing_mismatch_message(saved: dict, now: dict) -> str | None:
+    """現在的送審決策與快照不同時的說明;相同則 None。只讀,絕不寫。"""
+    lines = _routing_changes(saved["routing"], now)
+    if not lines:
+        return None
+    head = ("送審快照對不上(行為變了,不一定是錯;是刻意的改動就用 python snapshots.py record"
+            " 重錄並逐份看過):")
+    return "\n".join([head, *lines])
+
+
+def record_routing(out: Callable[[str], None] = print,
+                   route: Callable[[Path], dict] | None = None,
+                   today: str | None = None) -> Path | None:
+    """重錄送審快照:印 diff → 舊快照加日期留存 → 寫入。沒有變化就什麼都不寫。"""
+    today = today or date.today().isoformat()
+    if not rs.permit_scans():
+        out("沒有任何許可證掃描結果,不錄送審快照。")
+        return None
+    new = current_routing(route)
+    saved = load_routing()
+    lines = _routing_changes(saved["routing"] if saved else {}, new)
+    if not lines:
+        out("送審快照沒有變化,不寫入。")
+        return None
+    for line in lines:
+        out(line)
+    p = routing_path()
+    if p.exists():
+        keep = _keep_path(today, p)
+        p.rename(keep)
+        out(f"舊送審快照留存為 {keep.name}")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"recorded": today, "routing": new},
                             ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
     out(f"已寫入 {p}({len(new)} 份)")
     return p
@@ -261,6 +355,7 @@ def main(argv: list[str]) -> int:
         return 2
     fill_missing_vision()
     record()
+    record_routing()
     return 0
 
 

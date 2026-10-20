@@ -12,6 +12,8 @@
                                  允許只填部分;沒填的不驗
   samples/snapshots/             快照(機器輸出,不是真值),見 snapshots.py
   samples/legacy/                舊格式檔(如 #15 之前寫出的 matches.csv)
+  samples/permit_scan/           新素材在本機跑許可證掃描的輸出(matches.csv 等),
+                                 送審快照的素材之一
   samples/review/                錄製新素材時匯出的各頁圖,供人確認契約頁
 
 核對值跟著素材放、不放測試程式裡:沒有素材,核對值毫無用處。
@@ -138,6 +140,13 @@ def old_matches_csv() -> Path:
     if not p.exists():
         pytest.skip(f"沒有 samples/legacy/{p.name}")
     return p
+
+
+def permit_scans() -> list[Path]:
+    """真實素材的許可證掃描結果(matches.csv):舊 21 份 + 新素材本機掃出的;沒有就空清單。"""
+    candidates = (ROOT / "legacy" / "matches.21份.backup.csv",
+                  ROOT / "permit_scan" / "matches.csv")
+    return [p for p in candidates if p.exists()]
 
 
 def needs_tesseract() -> None:
