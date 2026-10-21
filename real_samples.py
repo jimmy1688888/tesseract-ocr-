@@ -8,12 +8,14 @@
   samples/vision/{stem}.json     打過一次 Vision 存下的全文,離線重放、不再花錢
                                  {image, roi, texts: {roi: 全文}}
   samples/checked_values.json    核對值(人看過原圖確認的值),依 stem 分:
-                                 {stem: {"契約頁": 圖檔名, "契約樣板": 類別, "雇主欄位": {欄: 值}}}
+                                 {stem: {"契約頁": 圖檔名, "契約樣板": 類別, "許可證": 號碼,
+                                         "雇主欄位": {欄: 值}}}
                                  允許只填部分;沒填的不驗
   samples/snapshots/             快照(機器輸出,不是真值),見 snapshots.py
   samples/legacy/                舊格式檔(如 #15 之前寫出的 matches.csv)
   samples/permit_scan/           新素材在本機跑許可證掃描的輸出(matches.csv 等),
-                                 送審快照的素材之一
+                                 送審快照的素材之一;vision_texts.json 是送 Vision 的
+                                 截圖打過一次 Vision 存下的全文 {stem_image: {crop, roi, text}}
   samples/review/                錄製新素材時匯出的各頁圖,供人確認契約頁
 
 核對值跟著素材放、不放測試程式裡:沒有素材,核對值毫無用處。
