@@ -129,7 +129,7 @@ class TestExtractionFollowsTemplate:
         ]
         f = extract_employer_fields("\n".join(lines))
         assert f.source.template == Template.認不出
-        assert f.疑慮標示.startswith("H:契約樣板未辨識,以家庭類規則擷取")
+        assert f.疑慮標示.startswith("H~O:契約樣板未辨識,以家庭類規則擷取")       # 講的是整份(#46)
         assert "音節" in f.疑慮標示
 
     def test_recognised_template_has_no_template_doubt(self):

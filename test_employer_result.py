@@ -23,6 +23,7 @@ class TestStatusFromDocx:
 
     def test_contract_page_not_found_keeps_the_candidate_page(self, monkeypatch):
         monkeypatch.setattr(ee, "_scored_pages", lambda p: [(0, "image2.jpeg", b"x")])
+        monkeypatch.setattr(ee, "rescue_name_from_pledge", lambda p, client=None: ("", ""))
         r = ee.extract_employer_from_docx("x.docx", roi=None)
         assert r.status is ExtractionStatus.找不到契約頁
         assert r.source.image == "image2.jpeg"
@@ -59,7 +60,8 @@ class TestExtractionFailureIsAResult:
         assert r.status is ExtractionStatus.擷取失敗
         row = pipeline._row_to_sheet_values({"source_docx": "99997.docx"},
                                             pipeline.SheetStatus.MANUAL_REVIEW, got)
-        assert row[7:15] == [""] * 8                      # H~O 照舊留空
+        assert row[7:11] + row[12:15] == [""] * 7         # H~O 照舊留空
+        assert row[11] == "H~O:雇主擷取失敗(例外),未擷取"   # L 寫原因(#46)
 
 
 class TestColumns:

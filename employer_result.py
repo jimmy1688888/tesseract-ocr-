@@ -17,12 +17,24 @@ from contract_template import Template
 
 
 class ExtractionStatus(Enum):
-    """擷取狀況,五選一。除了擷取成功,其餘四種的 H~O 一律未擷取。"""
+    """擷取狀況,五選一。除了擷取成功,其餘四種的 H~O 一律未擷取,L 欄必寫原因。"""
     擷取成功 = "擷取成功"
     雇主區塊未錨定 = "雇主區塊未錨定"
     找不到契約頁 = "找不到契約頁"
     docx無內嵌圖 = "docx 無內嵌圖"
     擷取失敗 = "擷取失敗"          # 擷取時拋例外
+
+
+# 一條疑慮講的是一整份時,「哪一格」寫這個(L 欄冠 H~O)。
+WHOLE = "整份"
+
+# 沒擷取的原因(L 欄)。只陳述確定的事實;例外名稱不寫,看 Sheets 的人用不到,日誌有。
+_NOT_EXTRACTED = {
+    ExtractionStatus.雇主區塊未錨定: "契約頁雇主區塊未錨定,未擷取",
+    ExtractionStatus.找不到契約頁: "找不到契約頁,未擷取",
+    ExtractionStatus.docx無內嵌圖: "docx 無內嵌圖,未擷取",
+    ExtractionStatus.擷取失敗: "雇主擷取失敗(例外),未擷取",
+}
 
 
 @dataclass(frozen=True)
@@ -63,7 +75,7 @@ EMPLOYER_COLUMNS = (
     ("L", DOUBT_KEY), ("M", "地址_英"),
     ("N", "郵遞區號"), ("O", "電話"),
 )
-_COLUMN_OF = {key: col for col, key in EMPLOYER_COLUMNS}
+_COLUMN_OF = {key: col for col, key in EMPLOYER_COLUMNS} | {WHOLE: "H~O"}
 
 
 def compose_doubts(doubts) -> str:
@@ -95,8 +107,10 @@ class EmployerExtraction:
 
     @property
     def 疑慮標示(self) -> str:
-        """L 欄。"""
-        return compose_doubts(self.doubts)
+        """L 欄。沒擷取時原因排第一條(由擷取狀況帶出,不會漏寫),其後是疑慮清單
+        —— 例如切結書頁救回的中文名。"""
+        reason = _NOT_EXTRACTED.get(self.status)
+        return compose_doubts(((Doubt(WHOLE, reason),) if reason else ()) + self.doubts)
 
     def cell(self, key: str) -> str:
         """H~O 某一欄的內容(key 是 EMPLOYER_COLUMNS 的值)。"""

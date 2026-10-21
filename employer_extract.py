@@ -25,7 +25,7 @@ from PIL import Image, ImageOps
 # docx 內嵌圖與圖序只有一份,與 pipeline 共用(#5);兩側不互相 import。
 from contract_template import COMPANY_WORDS, Template, contract_template
 from docx_images import image_sort_key, read_images
-from employer_result import (VALUE_KEYS, Doubt, EmployerExtraction, EmployerValues,
+from employer_result import (VALUE_KEYS, WHOLE, Doubt, EmployerExtraction, EmployerValues,
                              ExtractionStatus, Source)
 
 logger = logging.getLogger(__name__)
@@ -542,7 +542,8 @@ def extract_employer_fields(text: str) -> EmployerExtraction:
     )
     # 順序即 L 欄的順序:樣板 → 名稱 → 地址 → 縣市 → 門牌。
     doubts = (
-        *_doubts(_NAME_CN, "契約樣板未辨識,以家庭類規則擷取"
+        # 樣板決定整套擷取規則,講的是一整份,不只名稱。
+        *_doubts(WHOLE, "契約樣板未辨識,以家庭類規則擷取"
                  if template is Template.認不出 else ""),
         # 括號是補出來的就要講:斷行沒接上時(_name_continuation 只接緊鄰的下一行,
         # 而 Vision 逐欄序列化不保證相鄰),補齊後的「…機構(王)」看起來完全正常,
@@ -1110,10 +1111,11 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
         (d / crop_name).write_bytes(content)
 
     if not found:
-        # 特徵不足不送 Vision(頁面身分不明,抽出的欄位不可信),只留截圖
-        return EmployerExtraction(
+        # 特徵不足不送 Vision(頁面身分不明,抽出的欄位不可信),只留截圖。切結書頁
+        # 備援照跑:它讀另一頁、靠自己的標籤,契約頁找不到碰不到它。
+        return _apply_pledge_rescue(EmployerExtraction(
             ExtractionStatus.找不到契約頁, source=Source(image=name, crop=crop_name),
-            detail=f"特徵字命中不足,最高分 {best_s};已存候選頁截圖")
+            detail=f"特徵字命中不足,最高分 {best_s};已存候選頁截圖"), docx_path, client)
 
     if deink:
         content = deink_red_stamp(content)

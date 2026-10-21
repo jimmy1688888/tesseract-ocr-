@@ -1195,7 +1195,9 @@ def collect_employer_fields(batch: Batch) -> dict[str, EmployerExtraction]:
             texts[name] = {"image": src.image, "text": src.text}
         employer_by_docx[name] = replace(result, source=replace(src, text=""))
         if result.status is not ExtractionStatus.擷取成功:
-            logger.info(f"  {name}: {result.status.value}({result.detail}) → H~O 留空"
+            got = result.values.雇主名稱_中
+            filled = f"H 取自切結書頁={got!r},其餘留空" if got else "H~O 留空"
+            logger.info(f"  {name}: {result.status.value}({result.detail}) → {filled}"
                         f"（截圖 {src.crop or '無'}）")
         else:
             doubt = result.疑慮標示
