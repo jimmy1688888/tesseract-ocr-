@@ -147,7 +147,7 @@ class TestAnchorFailureReturnsEmpty:
         for k in ("雇主名稱_中", "雇主名稱_英", "地址_中", "地址_英", "電話"):
             assert getattr(f.values, k) == "", k
 
-    def test_note_explains_why(self):
+    def test_status_says_block_not_anchored(self):
         assert _fields(self.NO_ANCHOR).status is ExtractionStatus.雇主區塊未錨定
 
     def test_agency_data_not_leaked(self):
@@ -156,7 +156,7 @@ class TestAnchorFailureReturnsEmpty:
         assert "仲介" not in f.values.雇主名稱_中
         assert f.values.電話 not in ("03-5310852", "03-5277128")
 
-    def test_normal_path_has_blank_note(self):
+    def test_normal_path_status_is_success(self):
         assert _fields(_LINES_NORMAL).status is ExtractionStatus.擷取成功
 
 

@@ -1151,7 +1151,7 @@ def _agency_cols(permit_value: str) -> list[str]:
 # H~O 欄：雇主資料（employer_extract 產出）。寫入 Sheets 前先對每份 docx 跑一次
 # collect_employer_fields()（契約頁偵測 → ROI → 去紅章 → Vision），回傳
 # {檔名: 雇主擷取結果}，由 main 交給組列（依 source_docx 查表填入）與疑慮報表。
-# 哪一欄放哪個值見 employer_result.EMPLOYER_COLUMNS。擷取失敗該 docx 的 H~O 留空。
+# 哪一欄放哪個值見 employer_result.EMPLOYER_COLUMNS。沒擷取時(擷取狀況不是擷取成功)該 docx 的 H~O 留空、L 寫原因。
 # 結果走回傳值，不寄放在模組層或 Batch 上（見 ADR-0009、#25）。
 #
 # L 欄原為「英文標準地址」,已取消輸出:契約英譯沒有單一正確寫法,官方譯名並不比

@@ -66,6 +66,11 @@ class Doubt:
     field: str
     fact: str
 
+    def __post_init__(self):
+        # 欄位名打錯要在建構時就炸,不要等到組 L 欄才 KeyError。
+        if self.field not in (*VALUE_KEYS, WHOLE):
+            raise ValueError(f"疑慮指向不存在的欄位:{self.field!r}")
+
 
 # Sheets 的 H~O:哪一欄放哪個值。寫 Sheets 與疑慮冠的欄位字母都看這一張。
 DOUBT_KEY = "疑慮標示"
@@ -78,7 +83,7 @@ EMPLOYER_COLUMNS = (
 _COLUMN_OF = {key: col for col, key in EMPLOYER_COLUMNS} | {WHOLE: "H~O"}
 
 
-def compose_doubts(doubts) -> str:
+def compose_doubts(doubts: tuple[Doubt, ...]) -> str:
     """把疑慮清單組成 L 欄一格,每條冠上欄位字母指明是哪一格。L 欄只在這裡組。
 
     與 D 欄分開的理由不變(D 欄專講許可證判讀,不同主題);但名稱與地址同屬

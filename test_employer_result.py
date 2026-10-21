@@ -5,8 +5,8 @@
 擷取拋例外的那份 docx 甚至不在結果裡。資料全部捏造。
 """
 import employer_extract as ee
-from employer_result import (EMPLOYER_COLUMNS, Doubt, EmployerExtraction, EmployerValues,
-                             ExtractionStatus)
+from employer_result import (DOUBT_KEY, EMPLOYER_COLUMNS, VALUE_KEYS, Doubt, EmployerExtraction,
+                             EmployerValues, ExtractionStatus)
 
 _TEXT = "\n".join(["甲方名稱: 王小明", "Nama Majikan: WANG XIAO MING",
                    "SELANJUTNYA DISEBUT PIHAK PERTAMA"])
@@ -68,6 +68,15 @@ class TestColumns:
 
     def test_h_to_o_in_order(self):
         assert [c for c, _k in EMPLOYER_COLUMNS] == list("HIJKLMNO")
+
+    def test_columns_cover_exactly_the_values_plus_l(self):
+        """欄位值改名時,欄位對照表一定要跟著改 —— 兩份清單在這裡交叉檢查。"""
+        assert {k for _c, k in EMPLOYER_COLUMNS} == {*VALUE_KEYS, DOUBT_KEY}
+
+    def test_doubt_on_unknown_field_fails_at_construction(self):
+        import pytest
+        with pytest.raises(ValueError):
+            Doubt("地址_中標準", "打錯字的欄位")
 
     def test_cell_gives_values_and_the_composed_l_column(self):
         r = EmployerExtraction(ExtractionStatus.擷取成功, EmployerValues(電話="02-1234"),
