@@ -57,6 +57,11 @@ def _replace(lines, old, new):
     return [new if l == old else l for l in lines]
 
 
+
+def _name_facts(f):
+    """中文名那一格的疑慮事實,串成一句方便比對。"""
+    return "；".join(d.fact for d in f["疑慮"] if d.field == "雇主名稱_中")
+
 class TestInstitutionContract:
 
     def test_wrapped_chinese_name_joined(self):
@@ -77,7 +82,7 @@ class TestInstitutionContract:
 
     def test_no_syllable_count_doubt_for_institution(self):
         """機構名的中文字數與英譯音節數本來就對不上,不是疑慮。"""
-        assert _fields(_INSTITUTION)["名稱_疑慮"] == ""
+        assert _name_facts(_fields(_INSTITUTION)) == ""
 
     def test_title_line_is_not_english_name(self):
         """標題「(NURSING HOME)」落進區塊時不能頂上來當英文名。"""
@@ -126,7 +131,7 @@ class TestDamagedInstitutionLabel:
     def test_chinese_name_left_blank_not_guessed(self):
         f = _fields(self.LINES)
         assert f["雇主名稱_中"] == ""
-        assert "未擷取到中文名" in f["名稱_疑慮"]
+        assert "未擷取到中文名" in _name_facts(f)
 
 
 class TestUnjoinedWrapIsFlagged:
@@ -143,11 +148,11 @@ class TestUnjoinedWrapIsFlagged:
     def test_doubt_says_bracket_was_added(self):
         f = _fields(self.LINES)
         assert f["雇主名稱_中"].endswith("(王)")
-        assert "括號不成對" in f["名稱_疑慮"]
+        assert "括號不成對" in _name_facts(f)
         assert "括號不成對" in f["疑慮標示"]
 
     def test_joined_wrap_is_not_flagged(self):
-        assert "括號" not in _fields(_INSTITUTION)["名稱_疑慮"]
+        assert "括號" not in _name_facts(_fields(_INSTITUTION))
 
 
 class TestFamilyAddressWithInstitutionWord:

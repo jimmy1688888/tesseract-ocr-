@@ -52,7 +52,7 @@ def _parser(**override):
     def extract(text):
         f = {k: f"{k}@{text}" for k in snap.KEYS}
         f["_note"] = ""
-        f["名稱_疑慮"] = "內部"
+        f["疑慮"] = ("內部",)
         f.update(override)
         return f
     return extract
@@ -80,7 +80,7 @@ class TestRecord:
         saved = snap.load()
         assert saved["alldata_sha256"] == "hash-A"
         assert set(saved["fields"]["33701"]) == set(snap.KEYS)
-        assert "名稱_疑慮" not in saved["fields"]["33701"]
+        assert "疑慮" not in saved["fields"]["33701"]
         assert "_note" in snap.KEYS
 
     def test_rerecord_prints_only_changed_cells(self, corpus):

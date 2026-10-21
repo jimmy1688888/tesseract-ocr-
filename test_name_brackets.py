@@ -18,7 +18,7 @@ _TAIL = ["Nama", "Perusahaan :", "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
 
 def _name(first_line):
     f = extract_employer_fields("\n".join(["勞動契約 工廠類", first_line] + _TAIL))
-    return f["雇主名稱_中"], f["名稱_疑慮"]
+    return f["雇主名稱_中"], "；".join(d.fact for d in f["疑慮"] if d.field == "雇主名稱_中")
 
 
 @pytest.mark.parametrize("line, name", [

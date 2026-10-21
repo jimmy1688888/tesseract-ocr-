@@ -16,19 +16,18 @@ from address_db import normalize_address
 from employer_extract import _standardize_address
 
 
-def _std(cn, en=""):
-    f = {"地址_英": en}
-    _standardize_address(f, cn)
-    return f
+def _facts(r):
+    """一次標準化的疑慮事實(地址留空的成因、縣市中英不符),串成一句方便比對。"""
+    return "；".join(d.fact for d in r.doubts)
 
 
 class TestDoubtReasons:
     """五種成因各自要講對——人看到不同的話,要做的事完全不同。"""
 
     def test_city_not_matched(self):
-        f = _std("XX@@市北區磐石路29號7樓")
-        assert f["地址_中_標準"] == ""
-        assert "縣市未比對到" in f["地址_疑慮"]
+        f = _standardize_address("XX@@市北區磐石路29號7樓")
+        assert f.standard == ""
+        assert "縣市未比對到" in _facts(f)
 
     def test_district_not_matched(self):
         """區配不到、路名又跨多個區(反推不啟動)→ 區留空並說明為何無從判定。
@@ -36,10 +35,10 @@ class TestDoubtReasons:
         素材刻意用中正路:新竹市的北區與東區都有,所以路名反推不了區。
         用單一區才有的路(磐石路)會被反推救回來,那是另一組測的行為。
         """
-        f = _std("新竹市OOO中正路29號7樓")
-        assert f["地址_中_標準"] == ""
-        assert "行政區未判定" in f["地址_疑慮"]
-        assert "多個行政區" in f["地址_疑慮"]
+        f = _standardize_address("新竹市OOO中正路29號7樓")
+        assert f.standard == ""
+        assert "行政區未判定" in _facts(f)
+        assert "多個行政區" in _facts(f)
 
     def test_road_not_in_db_states_fact_only(self):
         """只說「沒在清單中」這個事實,不推斷原因、不叫人去補資料庫。
@@ -48,31 +47,31 @@ class TestDoubtReasons:
         區被誤配時,一條好端端存在於別區的路也會被說成不在資料庫,照著補會
         重複加入並掛錯區。沒配到是確定的,為什麼沒配到不是。
         """
-        f = _std("新竹市北區天馬行空路29號7樓")
-        assert f["地址_中_標準"] == ""
-        assert "路名未在" in f["地址_疑慮"]
-        assert "custom_roads" not in f["地址_疑慮"]
+        f = _standardize_address("新竹市北區天馬行空路29號7樓")
+        assert f.standard == ""
+        assert "路名未在" in _facts(f)
+        assert "custom_roads" not in _facts(f)
 
     def test_no_reason_offers_an_action(self):
         """整組理由都不得夾帶行動建議——它自己可能是錯的。"""
         for cn in ("XX@@市北區磐石路29號7樓", "新竹市OOO中正路29號7樓",
                    "新竹市北區天馬行空路29號7樓", ""):
-            d = _std(cn)["地址_疑慮"]
+            d = _facts(_standardize_address(cn))
             assert "可補" not in d and ".json" not in d, cn
 
     def test_rural_address_flagged_as_normal(self):
         """鄉村型無路名地址也標,但要寫明是正常的,否則人會白跑一趟查證。"""
-        f = _std("宜蘭縣三星鄉大隱村12鄰5號")
-        assert f["地址_中_標準"] == ""
-        assert "鄉村型" in f["地址_疑慮"]
+        f = _standardize_address("宜蘭縣三星鄉大隱村12鄰5號")
+        assert f.standard == ""
+        assert "鄉村型" in _facts(f)
 
     def test_no_chinese_address_at_all(self):
-        assert "未擷取到" in _std("")["地址_疑慮"]
+        assert "未擷取到" in _facts(_standardize_address(""))
 
     def test_clean_address_has_no_doubt(self):
-        f = _std("新竹市北區磐石路29號7樓")
-        assert f["地址_中_標準"] == "新竹市北區磐石路29號7樓"
-        assert f["地址_疑慮"] == ""
+        f = _standardize_address("新竹市北區磐石路29號7樓")
+        assert f.standard == "新竹市北區磐石路29號7樓"
+        assert _facts(f) == ""
 
 
 class TestFuzzyCityWithholdsZip:
@@ -93,16 +92,15 @@ class TestFuzzyCityWithholdsZip:
         assert r["city"] != "桃園市" and r["road"] == ""
 
     def test_zip_withheld(self):
-        assert _std(self.WRONG)["郵遞區號"] == ""
+        assert _standardize_address(self.WRONG).zip == ""
 
     def test_english_ocr_never_backfilled(self):
         """英文 OCR 空就是空——官方英譯不得從任何路徑補進 M 欄。"""
-        f = _std(self.WRONG, en="")
-        assert f["地址_英"] == ""
-        assert "地址_英_標準" not in f
+        r = _standardize_address(self.WRONG, en_text="")
+        assert r._fields == ("standard", "zip", "doubts")      # 沒有任何英文輸出
 
     def test_reason_names_the_withheld_columns(self):
-        d = _std(self.WRONG)["地址_疑慮"]
+        d = _facts(_standardize_address(self.WRONG))
         assert "模糊" in d and "郵遞區號" in d
 
 
@@ -119,13 +117,13 @@ class TestFuzzyCityRescueSurvives:
         assert normalize_address(self.RESCUED)["city_tier"] == 3
 
     def test_standard_address_still_filled(self):
-        assert _std(self.RESCUED)["地址_中_標準"] == "宜蘭縣羅東鎮中正路3號"
+        assert _standardize_address(self.RESCUED).standard == "宜蘭縣羅東鎮中正路3號"
 
     def test_zip_still_filled(self):
-        assert _std(self.RESCUED)["郵遞區號"] == "265"
+        assert _standardize_address(self.RESCUED).zip == "265"
 
     def test_no_doubt_raised(self):
-        assert _std(self.RESCUED)["地址_疑慮"] == ""
+        assert _facts(_standardize_address(self.RESCUED)) == ""
 
 
 class TestCityNameDoesNotFeedDistrictMatch:
@@ -153,7 +151,7 @@ class TestCityNameDoesNotFeedDistrictMatch:
         assert normalize_address(self.NO_DISTRICT)["zip"] != "330"
 
     def test_no_doubt_raised(self):
-        assert _std(self.NO_DISTRICT)["地址_疑慮"] == ""
+        assert _facts(_standardize_address(self.NO_DISTRICT)) == ""
 
     def test_same_named_county_seat_unaffected(self):
         """縣治與縣同名的合法碰撞不能被誤傷——那正是去尾字階段存在的理由。"""
@@ -214,25 +212,25 @@ class TestEnglishAnchorCountsAsPrecise:
 
     def test_zip_survives_without_road_evidence(self):
         """路名配不到時,郵遞區號全靠這個層級判斷撐著。"""
-        f = _std(self.CN_DEAD, en=self.EN_ALIVE)
-        assert f["郵遞區號"] == "813"
+        f = _standardize_address(self.CN_DEAD, en_text=self.EN_ALIVE)
+        assert f.zip == "813"
 
     def test_doubt_blames_the_road_not_the_city(self):
-        f = _std(self.CN_DEAD, en=self.EN_ALIVE)
-        assert "路名" in f["地址_疑慮"]
-        assert "縣市" not in f["地址_疑慮"]
+        f = _standardize_address(self.CN_DEAD, en_text=self.EN_ALIVE)
+        assert "路名" in _facts(f)
+        assert "縣市" not in _facts(f)
 
     def test_without_english_line_it_really_does_fail(self):
         """前提檢查:沒有英文行時這個地址確實救不回來,否則上面幾條沒有意義。"""
-        f = _std(self.CN_DEAD, en="")
-        assert f["郵遞區號"] == "" and "縣市未比對到" in f["地址_疑慮"]
+        f = _standardize_address(self.CN_DEAD, en_text="")
+        assert f.zip == "" and "縣市未比對到" in _facts(f)
 
     def test_stamped_city_also_recovered(self):
         """印章壓字型(「中共雄巿」)也走同一條路徑。"""
-        f = _std("中共雄巿左營區華夏路1728號13樓",
-                 en="13F., No.1728, Huaxia Rd., Zuoying Dist., Kaohsiung City")
-        assert f["地址_中_標準"] == "高雄市左營區華夏路1728號13樓"
-        assert f["郵遞區號"] == "813" and f["地址_疑慮"] == ""
+        f = _standardize_address("中共雄巿左營區華夏路1728號13樓",
+                 en_text="13F., No.1728, Huaxia Rd., Zuoying Dist., Kaohsiung City")
+        assert f.standard == "高雄市左營區華夏路1728號13樓"
+        assert f.zip == "813" and _facts(f) == ""
 
 
 class TestCityTierExposed:
@@ -440,10 +438,10 @@ class TestRealDocsUnaffected:
 
     def test_all_seven_keep_zip_and_standard_address(self):
         for cn, zipcode in self.REAL:
-            f = _std(cn)
-            assert f["郵遞區號"] == zipcode, cn
-            assert f["地址_中_標準"], cn
-            assert f["地址_疑慮"] == "", cn
+            f = _standardize_address(cn)
+            assert f.zip == zipcode, cn
+            assert f.standard, cn
+            assert _facts(f) == "", cn
 
 
 class TestEnglishRoadFallback:

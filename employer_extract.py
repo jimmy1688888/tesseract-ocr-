@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from io import BytesIO
+from typing import NamedTuple
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -394,9 +396,8 @@ def deink_red_stamp(image_bytes: bytes, *, whiten_thresh: int = 45,
 # 讓呼叫端不必分辨走的是哪條路。
 _EMPTY_FIELDS = {
     "雇主名稱_中": "", "雇主名稱_英": "", "地址_中": "", "地址_英": "", "電話": "",
-    "地址_中_標準": "", "郵遞區號": "", "地址_比對": False,
-    "地址_疑慮": "", "縣市_疑慮": "", "名稱_疑慮": "", "門牌_疑慮": "", "疑慮標示": "",
-    "契約樣板": Template.認不出, "樣板_疑慮": "",
+    "地址_中_標準": "", "郵遞區號": "", "疑慮": (), "疑慮標示": "",
+    "契約樣板": Template.認不出,
 }
 
 
@@ -536,8 +537,6 @@ def extract_employer_fields(text: str) -> dict:
 
     fields = {
         "契約樣板": template,
-        "樣板_疑慮": ("H:契約樣板未辨識,以家庭類規則擷取"
-                     if template is Template.認不出 else ""),
         # 補齊不成對括號:擷取時 strip 或 OCR 可能只留單邊,寫進 Sheets 會缺一邊。
         "雇主名稱_中": _balance_brackets(name_cn),
         "雇主名稱_英": _balance_brackets(name_en),
@@ -546,15 +545,23 @@ def extract_employer_fields(text: str) -> dict:
         "電話": phone,
         "_note": "",
     }
-    _standardize_address(fields, addr_cn or "", en_hint=en_hint)
-    # 括號是補出來的就要講:斷行沒接上時(_name_continuation 只接緊鄰的下一行,
-    # 而 Vision 逐欄序列化不保證相鄰),補齊後的「…機構(王)」看起來完全正常,
-    # 而機構名又不做字數檢查 —— 不標的話就是看不見的錯值。
-    fields["名稱_疑慮"] = "；".join(p for p in (
-        "H:中文名括號不成對,已補齊" if fields["雇主名稱_中"] != name_cn else "",
-        _name_doubt(fields["雇主名稱_中"], fields["雇主名稱_英"], template)) if p)
-    fields["門牌_疑慮"] = _house_number_doubt(fields["地址_中"], fields["地址_英"])
-    fields["疑慮標示"] = _compose_doubt(fields)
+    addr = _standardize_address(addr_cn or "", addr_en or en_hint)
+    fields["地址_中_標準"], fields["郵遞區號"] = addr.standard, addr.zip
+    # 順序即 L 欄的順序:樣板 → 名稱 → 地址 → 縣市 → 門牌。
+    doubts = (
+        *_doubts(_NAME_CN, "契約樣板未辨識,以家庭類規則擷取"
+                 if template is Template.認不出 else ""),
+        # 括號是補出來的就要講:斷行沒接上時(_name_continuation 只接緊鄰的下一行,
+        # 而 Vision 逐欄序列化不保證相鄰),補齊後的「…機構(王)」看起來完全正常,
+        # 而機構名又不做字數檢查 —— 不標的話就是看不見的錯值。
+        *_doubts(_NAME_CN, "中文名括號不成對,已補齊"
+                 if fields["雇主名稱_中"] != name_cn else ""),
+        *_doubts(_NAME_CN, _name_doubt(fields["雇主名稱_中"], fields["雇主名稱_英"], template)),
+        *addr.doubts,
+        *_doubts(_ADDR_STD, _house_number_doubt(fields["地址_中"], fields["地址_英"])),
+    )
+    fields["疑慮"] = doubts
+    fields["疑慮標示"] = compose_doubts(doubts)
     return fields
 
 
@@ -653,7 +660,7 @@ def _name_doubt(name_cn: str, name_en: str,
     寫成「契約未載中文名」會誤導人「不必去翻契約」,而那正好是錯的那一半。
     """
     if not name_cn:
-        return "H:未擷取到中文名"
+        return "未擷取到中文名"
     # 機構類、工廠類的雇主名是「名稱(負責人)」,字數與音節數沒有對應關係(ADR-0004;
     # 判定方式見 ADR-0010:看文件的契約樣板,不看英文名有沒有 Co/Ltd)。
     if not name_en or template.is_organisation:
@@ -661,7 +668,7 @@ def _name_doubt(name_cn: str, name_en: str,
     n_cn = len(CJK.findall(name_cn))
     n_en = _en_syllables(name_en)
     if n_cn != n_en:
-        return f"H:中文 {n_cn} 字與英譯 {n_en} 音節不符"
+        return f"中文 {n_cn} 字與英譯 {n_en} 音節不符"
     return ""
 
 
@@ -747,7 +754,7 @@ def _house_number_doubt(addr_cn: str, addr_en: str) -> str:
         return ""
     norm = lambda s: re.sub(r"\s", "", s).replace("之", "-")   # noqa: E731
     cn, en = norm(a.group(1)), norm(b.group(1))
-    return "" if cn == en else f"J:門牌號中英不符({cn}／{en})"
+    return "" if cn == en else f"門牌號中英不符({cn}／{en})"
 
 
 def _city_mismatch_doubt(city_cn: str, en_text: str) -> str:
@@ -768,56 +775,77 @@ def _city_mismatch_doubt(city_cn: str, en_text: str) -> str:
     if not hit:
         return ""
     (city_raw, city_eng, _areas), _area = hit
-    return "" if city_raw == city_cn else f"J:縣市中英不符({city_cn}／{city_eng})"
+    return "" if city_raw == city_cn else f"縣市中英不符({city_cn}／{city_eng})"
 
 
-def _compose_doubt(fields: dict) -> str:
-    """把各欄的疑慮併成 L 欄一格,每條冠上欄名指明是哪一格。
+@dataclass(frozen=True)
+class Doubt:
+    """一條疑慮:哪一格(雇主欄位值的名稱)、什麼事實。
+
+    事實只陳述確定的事,不推斷成因(CONTEXT.md「疑慮標示」)。欄位字母不寫在事實裡,
+    由 compose_doubts 依欄位加 —— L 欄的寫法只在那一處。
+    """
+    field: str
+    fact: str
+
+
+_NAME_CN = "雇主名稱_中"
+_ADDR_STD = "地址_中_標準"
+_NAME_MISSING = Doubt(_NAME_CN, "未擷取到中文名")
+
+# 疑慮冠的欄位字母(Sheets 的欄)。
+_DOUBT_COLUMN = {
+    "雇主名稱_中": "H", "雇主名稱_英": "I", "地址_中_標準": "J", "地址_中": "K",
+    "地址_英": "M", "郵遞區號": "N", "電話": "O",
+}
+
+
+def _doubts(field: str, fact: str) -> tuple[Doubt, ...]:
+    """有事實才成一條疑慮;空字串代表沒有。"""
+    return (Doubt(field, fact),) if fact else ()
+
+
+def compose_doubts(doubts) -> str:
+    """把疑慮清單組成 L 欄一格,每條冠上欄位字母指明是哪一格。L 欄只在這裡組。
 
     與 D 欄分開的理由不變(D 欄專講許可證判讀,不同主題);但名稱與地址同屬
     雇主資料,是同一個主題下的多個欄位,合在一格不算一詞多義。
     """
-    parts = [fields.get("樣板_疑慮", ""), fields.get("名稱_疑慮", ""),
-             fields.get("地址_疑慮", ""),
-             fields.get("縣市_疑慮", ""), fields.get("門牌_疑慮", "")]
-    return "；".join(p for p in parts if p)
+    return "；".join(f"{_DOUBT_COLUMN[d.field]}:{d.fact}" for d in doubts)
 
 
-def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
-    """用官方地址庫(address_db)校正地址,非破壞式補上標準欄位。
+class StandardAddress(NamedTuple):
+    """中文地址標準化的結果。doubts 依序:地址留空的成因、縣市中英不符。"""
+    standard: str                  # 地址_中_標準
+    zip: str                       # 郵遞區號
+    doubts: tuple[Doubt, ...] = ()
 
-    - 新增:地址_中_標準、郵遞區號、地址_比對(是否命中)、地址_疑慮、縣市_疑慮。
+
+def _standardize_address(raw_cn: str, en_text: str = "") -> StandardAddress:
+    """用官方地址庫(address_db)校正地址,回傳標準地址、郵遞區號與疑慮。
+
+    - en_text:OCR 英文地址(讀不到時用英文行錨定的 hint),當錨用的**輸入**。
     - **不動 地址_英**:英文欄純粹是 OCR 讀到什麼就是什麼,讀不到就空。官方英譯
       既不輸出也不回填——契約英譯沒有單一正確寫法,官方譯名並不比契約上的更權威,
       混進來只會讓「M 欄是 OCR 原文」這件事出現例外。
     - 保守:縣市+行政區+路名都命中才回填標準中文;郵遞區號另需
-      **縣市精確命中**(city_tier 1/2)。留空一律在 地址_疑慮 寫明成因,
+      **縣市精確命中**(city_tier 1/2)。留空一律在疑慮寫明成因,
       因為留空的格子人看得見、填錯的格子人看不見(見 ADR-0003)。
     - 英文錨定:OCR 英文地址行一併傳入 normalize_address(en_text=…);
       印章蓋掉中文行首縣市時,以行尾倖存的英文縣市/區反查糾錯。
     庫或資料缺失時安靜跳過(try/except),絕不影響既有流程。
     """
-    fields.setdefault("地址_中_標準", "")
-    fields.setdefault("郵遞區號", "")
-    fields.setdefault("地址_比對", False)
-    fields.setdefault("地址_疑慮", "")
-    fields.setdefault("縣市_疑慮", "")
     if not raw_cn.strip():
-        fields["地址_疑慮"] = "J:中文地址未擷取到"
-        return
-    en_text = fields.get("地址_英", "") or en_hint
+        return StandardAddress("", "", _doubts(_ADDR_STD, "中文地址未擷取到"))
     try:
         from address_db import normalize_address
         r = normalize_address(raw_cn, en_text=en_text)
     except Exception:
-        fields["地址_疑慮"] = "J:地址庫無法使用"
-        return
+        return StandardAddress("", "", _doubts(_ADDR_STD, "地址庫無法使用"))
     if not r.get("matched"):
-        fields["地址_疑慮"] = "J:縣市未比對到官方資料庫"
-        return
+        return StandardAddress("", "", _doubts(_ADDR_STD, "縣市未比對到官方資料庫"))
 
-    fields["地址_比對"] = True
-    fields["縣市_疑慮"] = _city_mismatch_doubt(r["city"], en_text)
+    city_doubt = _doubts(_ADDR_STD, _city_mismatch_doubt(r["city"], en_text))
     # 縣市只靠模糊比對湊上、且路名也沒配到時,郵遞區號不採用:模糊配錯縣市時,
     # 「中山區」「中山路」這類全台通用的名字在錯誤縣市底下照樣配得到,會產出
     # 確信的錯值(實測「台桃市中壢區」→ 臺北市中山區、郵遞 104)。
@@ -826,13 +854,12 @@ def _standardize_address(fields: dict, raw_cn: str, en_hint: str = "") -> None:
     # 注意這裡不碰 地址_英:英文行是**餵進** normalize_address 當錨的輸入
     # (見上面的 en_text),不是輸出。錨定與輸出是兩件事,別讓後者汙染前者。
     trust_city = r.get("city_tier", 1) <= 2 or bool(r["road"])
-    if trust_city:
-        fields["郵遞區號"] = r["zip"]
+    zipcode = r["zip"] if trust_city else ""
 
     if r["district"] and r["road"]:        # 縣市+區+路都命中才給標準中文地址
-        fields["地址_中_標準"] = r["address_cn"]
-    else:
-        fields["地址_疑慮"] = _address_doubt(raw_cn, r, trust_city)
+        return StandardAddress(r["address_cn"], zipcode, city_doubt)
+    return StandardAddress("", zipcode,
+                           _doubts(_ADDR_STD, _address_doubt(raw_cn, r, trust_city)) + city_doubt)
 
 
 # 判定「地址文字裡是否有路名樣式」用的兩支 regex 就是 address_db 配路名時用的同兩支,
@@ -854,15 +881,15 @@ def _address_doubt(raw_cn: str, r: dict, trust_city: bool) -> str:
     if not trust_city:
         # 這條同時代表郵遞區號也被扣住,比下游的區/路更該先講。
         # 只提郵遞區號:官方英譯已不輸出,對看 Sheets 的人來說不存在那一欄。
-        return "J:縣市僅模糊比對命中,郵遞區號一併未採用"
+        return "縣市僅模糊比對命中,郵遞區號一併未採用"
     if not r["district"]:
         # 路名配得到卻仍無區 → 該路名跨多個區,無從判定(反推只在唯一時啟動)
         if r["road"]:
-            return "J:行政區未判定(該路名在多個行政區皆有)"
-        return "J:行政區未判定"
+            return "行政區未判定(該路名在多個行政區皆有)"
+        return "行政區未判定"
     if _has_road_pattern(raw_cn):
-        return "J:路名未在該行政區的路名清單中"
-    return "J:地址無路名樣式(鄉村型),以 OCR 原文為準"
+        return "路名未在該行政區的路名清單中"
+    return "地址無路名樣式(鄉村型),以 OCR 原文為準"
 
 
 def vision_full_text(image_bytes: bytes, client=None) -> str:
@@ -1160,9 +1187,16 @@ def _apply_pledge_rescue(fields: dict, docx_path: str, client=None) -> None:
     fields["雇主名稱_中"] = got
     count = _name_doubt(got, fields.get("雇主名稱_英", ""),
                         fields.get("契約樣板", Template.家庭類))
-    fields["名稱_疑慮"] = "；".join(
-        p for p in (f"H:中文名取自切結書頁({page})", count) if p)
-    fields["疑慮標示"] = _compose_doubt(fields)
+    rescued = (*_doubts(_NAME_CN, f"中文名取自切結書頁({page})"), *_doubts(_NAME_CN, count))
+    # 「未擷取到中文名」已經變成假的:原位換成救援這兩條,其他疑慮不動。
+    old = tuple(fields.get("疑慮", ()))
+    if _NAME_MISSING in old:
+        i = old.index(_NAME_MISSING)
+        doubts = old[:i] + rescued + old[i + 1:]
+    else:
+        doubts = old + rescued
+    fields["疑慮"] = doubts
+    fields["疑慮標示"] = compose_doubts(doubts)
     logger.info(f"  ★ 切結書頁救回中文名:{got}({Path(docx_path).name}/{page})")
 
 
@@ -1211,7 +1245,7 @@ if __name__ == "__main__":
         res = extract_employer_from_docx(args.path, deink=True, roi=roi)
         print(f"採用契約頁:{res.get('_image') or '(無)'}  {res.get('_note','')}")
         for k in ("雇主名稱_中", "雇主名稱_英", "地址_中", "地址_英", "電話",
-                  "地址_中_標準", "郵遞區號", "地址_疑慮"):
+                  "地址_中_標準", "郵遞區號", "疑慮標示"):
             print(f"  {k}: {res.get(k)!r}")
     elif args.no_ab:
         print(extract_employer(args.path, deink=True, roi=roi))

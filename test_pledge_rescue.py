@@ -161,8 +161,8 @@ class TestApplyRescue:
     def _fields(self, cn="", en="JIANG SIN AN"):
         f = dict(ee._EMPTY_FIELDS)
         f["雇主名稱_中"], f["雇主名稱_英"] = cn, en
-        f["名稱_疑慮"] = ee._name_doubt(cn, en)
-        f["疑慮標示"] = ee._compose_doubt(f)
+        f["疑慮"] = ee._doubts("雇主名稱_中", ee._name_doubt(cn, en))
+        f["疑慮標示"] = ee.compose_doubts(f["疑慮"])
         return f
 
     def test_rescued_name_is_written_and_flagged(self, monkeypatch):
