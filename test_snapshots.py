@@ -29,8 +29,19 @@ def test_every_sheets_employer_column_is_in_the_snapshot():
     """快照記的是解析輸出,不是 Sheets 欄:Sheets 拿掉欄(#30)時值照算,快照的鍵不跟著少;
     但 Sheets 寫出的每一欄都必須被快照守著。"""
     import pipeline
-    assert set(pipeline._EMPLOYER_COL_KEYS) <= set(snap.KEYS)
-    assert "_note" in snap.KEYS
+    from employer_result import EMPLOYER_COLUMNS
+    assert {k for _col, k in EMPLOYER_COLUMNS} <= set(snap.KEYS)
+    assert "擷取狀況" in snap.KEYS
+
+
+def test_snapshot_row_records_status_values_and_composed_doubts():
+    from employer_extract import extract_employer_fields
+    row = snap.snapshot_row(extract_employer_fields(
+        "\n".join(["甲方:", "Nama Majikan: WANG XIAO MING", "PIHAK KEDUA"])))
+    assert set(row) == set(snap.KEYS)
+    assert row["擷取狀況"] == "擷取成功"
+    assert row["雇主名稱_英"] == "WANG XIAO MING"
+    assert row["疑慮標示"] == "H:未擷取到中文名；J:中文地址未擷取到"
 
 
 # ─── 錄製與比對本身(tmp 底下的假 corpus、假解析器) ─────────────────────
@@ -51,7 +62,6 @@ def _parser(**override):
     """假解析器:每欄回「欄名@全文」,另帶一個內部鍵(不該進快照)。"""
     def extract(text):
         f = {k: f"{k}@{text}" for k in snap.KEYS}
-        f["_note"] = ""
         f["疑慮"] = ("內部",)
         f.update(override)
         return f
@@ -81,7 +91,7 @@ class TestRecord:
         assert saved["alldata_sha256"] == "hash-A"
         assert set(saved["fields"]["33701"]) == set(snap.KEYS)
         assert "疑慮" not in saved["fields"]["33701"]
-        assert "_note" in snap.KEYS
+        assert "擷取狀況" in snap.KEYS
 
     def test_rerecord_prints_only_changed_cells(self, corpus):
         _record([])

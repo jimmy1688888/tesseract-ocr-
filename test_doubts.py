@@ -6,7 +6,9 @@
 手寫一次 join。資料全部捏造。
 """
 import employer_extract as ee
-from employer_extract import Doubt, compose_doubts, extract_employer_fields
+from employer_extract import extract_employer_fields
+from employer_result import (VALUE_KEYS, Doubt, EmployerExtraction, EmployerValues,
+                             ExtractionStatus, compose_doubts)
 
 
 class TestComposeDoubts:
@@ -40,13 +42,14 @@ class TestExtractedFieldsCarryTheList:
 
     def test_l_column_is_composed_from_the_list(self):
         f = extract_employer_fields("甲方:\nNama Majikan: WANG XIAO MING\nPIHAK KEDUA")
-        assert f["疑慮標示"] == compose_doubts(f["疑慮"])
-        assert Doubt("雇主名稱_中", "未擷取到中文名") in f["疑慮"]
+        assert f.疑慮標示 == compose_doubts(f.doubts)
+        assert Doubt("雇主名稱_中", "未擷取到中文名") in f.doubts
 
-    def test_no_per_kind_doubt_keys(self):
+    def test_values_and_doubts_are_separate(self):
         f = extract_employer_fields("甲方: 王小明\nNama Majikan: WANG XIAO MING\nPIHAK KEDUA")
-        for k in ("名稱_疑慮", "地址_疑慮", "縣市_疑慮", "門牌_疑慮", "樣板_疑慮", "地址_比對"):
-            assert k not in f
+        assert set(VALUE_KEYS) == {"雇主名稱_中", "雇主名稱_英", "地址_中", "地址_中_標準",
+                                   "地址_英", "郵遞區號", "電話"}
+        assert all(isinstance(d, Doubt) for d in f.doubts)
 
 
 class TestOrderOfTheLColumn:
@@ -58,7 +61,7 @@ class TestOrderOfTheLColumn:
             "新竹市北區天馬行空路29號7樓",
             "Alamat: No. 30, Tianma Rd., North Dist., Taichung City",
             "SELANJUTNYA DISEBUT PIHAK PERTAMA"]))
-        assert f["疑慮標示"] == ("H:中文 2 字與英譯 3 音節不符；"
+        assert f.疑慮標示 == ("H:中文 2 字與英譯 3 音節不符；"
                              "J:路名未在該行政區的路名清單中；"
                              "J:縣市中英不符(新竹市／Taichung City)；"
                              "J:門牌號中英不符(29／30)")
@@ -74,8 +77,8 @@ class TestEnglishHintAnchorsTheAddress:
             "地址:台桃市中壢區中山路8號",
             "司賜No. 8, Zhongshan Rd., Zhongli Dist., Taoyuan City",
             "SELANJUTNYA DISEBUT PIHAK PERTAMA"]))
-        assert f["地址_英"] == ""
-        assert (f["地址_中_標準"], f["郵遞區號"]) == ("桃園市中壢區中山路8號", "320")
+        assert f.values.地址_英 == ""
+        assert (f.values.地址_中_標準, f.values.郵遞區號) == ("桃園市中壢區中山路8號", "320")
 
 
 class TestPledgeRescueAddsToTheList:
@@ -85,9 +88,9 @@ class TestPledgeRescueAddsToTheList:
                             lambda p, client=None: ("姜信安", "image5.jpeg"))
         doubts = (Doubt("雇主名稱_中", "未擷取到中文名"),
                   Doubt("地址_中_標準", "中文地址未擷取到"))
-        f = {**ee._EMPTY_FIELDS, "雇主名稱_英": "JIANG SIN AN",
-             "疑慮": doubts, "疑慮標示": compose_doubts(doubts)}
-        ee._apply_pledge_rescue(f, "x.docx")
-        assert f["疑慮"] == (Doubt("雇主名稱_中", "中文名取自切結書頁(image5.jpeg)"),
+        f = EmployerExtraction(ExtractionStatus.擷取成功,
+                               EmployerValues(雇主名稱_英="JIANG SIN AN"), doubts)
+        f = ee._apply_pledge_rescue(f, "x.docx")
+        assert f.doubts == (Doubt("雇主名稱_中", "中文名取自切結書頁(image5.jpeg)"),
                             Doubt("地址_中_標準", "中文地址未擷取到"))
-        assert f["疑慮標示"] == "H:中文名取自切結書頁(image5.jpeg)；J:中文地址未擷取到"
+        assert f.疑慮標示 == "H:中文名取自切結書頁(image5.jpeg)；J:中文地址未擷取到"

@@ -1,0 +1,103 @@
+# -*- coding: utf-8 -*-
+"""雇主擷取結果(CONTEXT.md):一份 docx 的雇主資料擷取產出,一個有形狀的值(#45)。
+
+四塊:擷取狀況、H~O 的欄位值、疑慮(一條條「哪一格,什麼事實」)、來源。舊做法是一個
+扁平 dict,混著輸出欄、內部疑慮、流程中介(`_image`、`_note`…),「哪些鍵算輸出」
+在至少三處各列一份。
+
+這裡沒有任何重的相依(不碰 Vision、地址庫),pipeline 可以直接 import —— 雇主擷取
+本身載入失敗時,寫 Sheets 那一側照樣拿得到欄位對照表。
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field, fields
+from enum import Enum
+
+from contract_template import Template
+
+
+class ExtractionStatus(Enum):
+    """擷取狀況,五選一。除了擷取成功,其餘四種的 H~O 一律未擷取。"""
+    擷取成功 = "擷取成功"
+    雇主區塊未錨定 = "雇主區塊未錨定"
+    找不到契約頁 = "找不到契約頁"
+    docx無內嵌圖 = "docx 無內嵌圖"
+    擷取失敗 = "擷取失敗"          # 擷取時拋例外
+
+
+@dataclass(frozen=True)
+class EmployerValues:
+    """H~O 的欄位值:解析出來的 7 個值。疑慮標示(L)不是欄位值,由疑慮組成。
+
+    這是「哪些值算輸出」唯一的一份清單;Sheets 寫哪幾欄由 EMPLOYER_COLUMNS 決定
+    (#30 拿掉 I、J 兩欄時值照算)。
+    """
+    雇主名稱_中: str = ""
+    雇主名稱_英: str = ""
+    地址_中: str = ""
+    地址_中_標準: str = ""
+    地址_英: str = ""
+    郵遞區號: str = ""
+    電話: str = ""
+
+
+VALUE_KEYS = tuple(f.name for f in fields(EmployerValues))
+
+
+@dataclass(frozen=True)
+class Doubt:
+    """一條疑慮:哪一格(欄位值的名稱)、什麼事實。
+
+    事實只陳述確定的事,不推斷成因(CONTEXT.md「疑慮標示」)。欄位字母不寫在事實裡,
+    由 compose_doubts 依 EMPLOYER_COLUMNS 加 —— L 欄的寫法只在那一處。
+    """
+    field: str
+    fact: str
+
+
+# Sheets 的 H~O:哪一欄放哪個值。寫 Sheets 與疑慮冠的欄位字母都看這一張。
+DOUBT_KEY = "疑慮標示"
+EMPLOYER_COLUMNS = (
+    ("H", "雇主名稱_中"), ("I", "雇主名稱_英"),
+    ("J", "地址_中_標準"), ("K", "地址_中"),
+    ("L", DOUBT_KEY), ("M", "地址_英"),
+    ("N", "郵遞區號"), ("O", "電話"),
+)
+_COLUMN_OF = {key: col for col, key in EMPLOYER_COLUMNS}
+
+
+def compose_doubts(doubts) -> str:
+    """把疑慮清單組成 L 欄一格,每條冠上欄位字母指明是哪一格。L 欄只在這裡組。
+
+    與 D 欄分開的理由不變(D 欄專講許可證判讀,不同主題);但名稱與地址同屬
+    雇主資料,是同一個主題下的多個欄位,合在一格不算一詞多義。
+    """
+    return "；".join(f"{_COLUMN_OF[d.field]}:{d.fact}" for d in doubts)
+
+
+@dataclass(frozen=True)
+class Source:
+    """擷取的來源:契約樣板、契約頁(或候選頁)圖檔名、ROI 截圖檔名、Vision 全文。"""
+    template: Template = Template.認不出
+    image: str = ""
+    crop: str = ""
+    text: str = ""
+
+
+@dataclass(frozen=True)
+class EmployerExtraction:
+    """雇主擷取結果。detail 是擷取狀況的補充(例如找不到契約頁時的最高分),只進日誌。"""
+    status: ExtractionStatus
+    values: EmployerValues = field(default_factory=EmployerValues)
+    doubts: tuple[Doubt, ...] = ()
+    source: Source = field(default_factory=Source)
+    detail: str = ""
+
+    @property
+    def 疑慮標示(self) -> str:
+        """L 欄。"""
+        return compose_doubts(self.doubts)
+
+    def cell(self, key: str) -> str:
+        """H~O 某一欄的內容(key 是 EMPLOYER_COLUMNS 的值)。"""
+        return self.疑慮標示 if key == DOUBT_KEY else getattr(self.values, key)

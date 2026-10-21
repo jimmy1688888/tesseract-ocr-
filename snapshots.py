@@ -2,8 +2,8 @@
 """H~O 快照:真實素材的雇主欄位解析結果,守住「純重構逐格不變」(#32)。
 
 快照是**機器輸出、不是真值**(CONTEXT.md「快照」)。它記的是 Vision 全文經
-extract_employer_fields 解析出的 8 個輸出欄位(與 Sheets 的 H~O 同一組鍵)加
-_note(錨定失敗原因);內部鍵不記 —— 疑慮怎麼組裝是內部的事,重組了不該變紅。
+extract_employer_fields 解析出的雇主擷取結果:擷取狀況、7 個欄位值、組好的疑慮標示;
+疑慮清單本身不記 —— 疑慮怎麼組裝是內部的事,重組了不該變紅。
 地址標準化與郵遞區號會查門牌庫,所以一併記下門牌庫的雜湊:對不上時分得出是
 「資料檔變了」還是「程式變了」。
 
@@ -23,16 +23,12 @@ from pathlib import Path
 from typing import Callable
 
 import real_samples as rs
+from employer_result import DOUBT_KEY, VALUE_KEYS
 
-# 解析輸出的 8 欄(寫 Sheets 的 H~O 一律取自這裡)加錨定失敗原因。快照記解析輸出、
+# 擷取狀況、7 個欄位值、疑慮標示(寫 Sheets 的 H~O 一律取自這裡)。快照記解析輸出、
 # 不是 Sheets 欄:Sheets 少寫幾欄(#30)時值照算,這裡不跟著少。
-KEYS = (
-    "雇主名稱_中", "雇主名稱_英",
-    "地址_中_標準", "地址_中",
-    "疑慮標示", "地址_英",
-    "郵遞區號", "電話",
-    "_note",
-)
+STATUS_KEY = "擷取狀況"
+KEYS = (STATUS_KEY, *VALUE_KEYS, DOUBT_KEY)
 
 
 def snapshot_path() -> Path:
@@ -46,14 +42,21 @@ def alldata_sha256() -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else ""
 
 
-def _default_extract(text: str) -> dict:
+def snapshot_row(result) -> dict[str, str]:
+    """雇主擷取結果 → 快照的一列(KEYS 的每一格)。"""
+    return {STATUS_KEY: result.status.value,
+            **{k: getattr(result.values, k) for k in VALUE_KEYS},
+            DOUBT_KEY: result.疑慮標示}
+
+
+def _default_extract(text: str) -> dict[str, str]:
     from employer_extract import extract_employer_fields
-    return extract_employer_fields(text)
+    return snapshot_row(extract_employer_fields(text))
 
 
 def current_fields(stems: list[str] | None = None,
                    extract: Callable[[str], dict] | None = None) -> dict[str, dict[str, str]]:
-    """{stem: 8 欄 + _note} —— 對每份 Vision 全文現在解析出來的樣子。"""
+    """{stem: KEYS 的每一格} —— 對每份 Vision 全文現在解析出來的樣子。"""
     extract = extract or _default_extract
     out = {}
     for stem in (rs.vision_stems() if stems is None else stems):

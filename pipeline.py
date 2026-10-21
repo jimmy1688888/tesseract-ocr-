@@ -56,7 +56,7 @@ import logging
 import argparse
 import functools
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from enum import Enum
 from io import BytesIO
 from pathlib import Path
@@ -84,6 +84,7 @@ from permit_lookup import PermitLookup
 
 # 一批:這次要處理哪些 docx(完整路徑)。只是設定,結果不放進去(ADR-0009)。
 from batch import Batch
+from employer_result import EMPLOYER_COLUMNS, EmployerExtraction, ExtractionStatus
 
 # docx 內嵌圖與圖序只有一份,與 employer_extract 共用(#5)。
 import docx_images
@@ -1149,24 +1150,17 @@ def _agency_cols(permit_value: str) -> list[str]:
 
 # H~O 欄：雇主資料（employer_extract 產出）。寫入 Sheets 前先對每份 docx 跑一次
 # collect_employer_fields()（契約頁偵測 → ROI → 去紅章 → Vision），回傳
-# {檔名: 欄位}，由 main 交給組列（依 source_docx 查表填入）與疑慮報表。
-# 順序對齊標題列註解 H=雇主名稱_中 … O=雇主電話。擷取失敗該 docx 的 H~O 留空。
+# {檔名: 雇主擷取結果}，由 main 交給組列（依 source_docx 查表填入）與疑慮報表。
+# 哪一欄放哪個值見 employer_result.EMPLOYER_COLUMNS。擷取失敗該 docx 的 H~O 留空。
 # 結果走回傳值，不寄放在模組層或 Batch 上（見 ADR-0009、#25）。
-_EMPLOYER_COL_KEYS = (
-    "雇主名稱_中", "雇主名稱_英",
-    "地址_中_標準", "地址_中",        # J=標準, K=OCR原文
-    "疑慮標示", "地址_英",             # L=疑慮標示, M=英文OCR原文
-    "郵遞區號", "電話",
-)
-
+#
 # L 欄原為「英文標準地址」,已取消輸出:契約英譯沒有單一正確寫法,官方譯名並不比
 # 契約上的更權威,兩欄並列只是讓人多比對一次卻分不出對錯。英文一律以 OCR 原文
 # (M 欄)為準,騰出的 L 欄改放疑慮標示。
 # 與 D 欄 reason 仍刻意分開:D 欄專講許可證判讀,一個欄位不承載兩種語意(ADR-0003)。
-_DOUBT_COL_KEY = "疑慮標示"
 
-def collect_employer_fields(batch: Batch) -> dict[str, dict]:
-    """對這一批每份 docx 擷取雇主欄位，回傳 {檔名: 欄位}（每份一次 Vision 呼叫）。
+def collect_employer_fields(batch: Batch) -> dict[str, EmployerExtraction]:
+    """對這一批每份 docx 擷取雇主欄位，回傳 {檔名: 雇主擷取結果}（每份一次 Vision 呼叫）。
 
     契約頁偵測用本機 Tesseract 特徵字計分,只有選中的那一頁送 Vision。
     送 Vision 的 ROI 裁切圖(去紅章前原貌)同步存到 batch.employer_crop_dir,
@@ -1184,31 +1178,33 @@ def collect_employer_fields(batch: Batch) -> dict[str, dict]:
         logger.warning(f"  ⚠ employer_extract 載入失敗,雇主欄(H~O)本次全部留空:{e!r}")
         return {}
     client = google_clients.vision_client()
-    employer_by_docx: dict[str, dict] = {}
+    employer_by_docx: dict[str, EmployerExtraction] = {}
     texts: dict[str, dict] = {}
     for dp in batch.docx_files:
         name = dp.name
         try:
-            fields = extract_employer_from_docx(
+            result = extract_employer_from_docx(
                 str(dp), client=client, crop_dir=str(batch.employer_crop_dir))
         except Exception as e:
             logger.warning(f"  ⚠ {name}: 雇主擷取失敗({e!r}),該列 H~O 留空")
+            employer_by_docx[name] = EmployerExtraction(ExtractionStatus.擷取失敗, detail=repr(e))
             continue
         # 全文另存,不留在快取裡:快取每列都會查,夾一大塊文字只是負擔。
-        text = fields.pop("_text", "")
-        if text:
-            texts[name] = {"image": fields.get("_image", ""), "text": text}
-        employer_by_docx[name] = fields
-        if fields.get("_note"):
-            logger.info(f"  {name}: {fields['_note']} → H~O 留空"
-                        f"（截圖 {fields.get('_crop', '') or '無'}）")
+        src = result.source
+        if src.text:
+            texts[name] = {"image": src.image, "text": src.text}
+        employer_by_docx[name] = replace(result, source=replace(src, text=""))
+        if result.status is not ExtractionStatus.擷取成功:
+            logger.info(f"  {name}: {result.status.value}({result.detail}) → H~O 留空"
+                        f"（截圖 {src.crop or '無'}）")
         else:
-            doubt = fields.get(_DOUBT_COL_KEY, "")
+            doubt = result.疑慮標示
+            v = result.values
             logger.info(
-                f"  {name}: 雇主={fields.get('雇主名稱_中', '')!r}"
-                f" 電話={fields.get('電話', '')!r}"
-                f" 郵遞={fields.get('郵遞區號', '')!r}"
-                f"（契約頁 {fields.get('_image', '')} → 截圖 {fields.get('_crop', '')}）"
+                f"  {name}: 雇主={v.雇主名稱_中!r}"
+                f" 電話={v.電話!r}"
+                f" 郵遞={v.郵遞區號!r}"
+                f"（契約頁 {src.image} → 截圖 {src.crop}）"
                 + (f" ⚠ {doubt}" if doubt else "")
             )
     write_employer_texts(batch, texts)
@@ -1234,16 +1230,16 @@ def write_employer_texts(batch: Batch, texts: dict[str, dict]) -> int:
     return len(texts)
 
 
-def write_doubt_report(batch: Batch, employer_by_docx: dict[str, dict]) -> int:
+def write_doubt_report(batch: Batch, employer_by_docx: dict[str, EmployerExtraction]) -> int:
     """把本次所有帶疑慮標示的 docx 寫成 CSV,回傳筆數(無疑慮則不產檔)。
 
     欄位刻意帶上 OCR 原文與標準值,讓人不必開 Sheets 就能判斷是不是誤報。
     """
-    rows = [(name, f.get(_DOUBT_COL_KEY, ""),
-             f.get("雇主名稱_中", ""), f.get("雇主名稱_英", ""), f.get("地址_中", ""),
-             f.get("地址_中_標準", ""), f.get("郵遞區號", ""))
-            for name, f in sorted(employer_by_docx.items())
-            if f.get(_DOUBT_COL_KEY)]
+    rows = [(name, r.疑慮標示,
+             r.values.雇主名稱_中, r.values.雇主名稱_英, r.values.地址_中,
+             r.values.地址_中_標準, r.values.郵遞區號)
+            for name, r in sorted(employer_by_docx.items())
+            if r.疑慮標示]
     if not rows:
         return 0
     try:
@@ -1380,22 +1376,22 @@ def rescue_manual_review_via_agency_phone(
     return rescued
 
 
-def _employer_cols(r, employer_by_docx: dict[str, dict]) -> list[str]:
-    """依 _EMPLOYER_COL_KEYS 取雇主 8 欄:row 自帶的 key 優先,否則查 employer。"""
+def _employer_cols(r, employer_by_docx: dict[str, EmployerExtraction]) -> list[str]:
+    """依 EMPLOYER_COLUMNS 取雇主 8 欄:row 自帶的 key 優先,否則查雇主擷取結果。"""
     if isinstance(r, dict):
         docx = r.get("source_docx", "")
     else:
         docx = getattr(r, "source_docx", "")
-    fields = employer_by_docx.get(docx, {})
+    result = employer_by_docx.get(docx)
     out = []
-    for k in _EMPLOYER_COL_KEYS:
+    for _col, k in EMPLOYER_COLUMNS:
         own = r.get(k, "") if isinstance(r, dict) else ""
-        out.append(str(own or fields.get(k, "") or ""))
+        out.append(str(own or (result.cell(k) if result else "") or ""))
     return out
 
 
 def _row_to_sheet_values(r, status: SheetStatus,
-                         employer_by_docx: dict[str, dict]) -> list[str]:
+                         employer_by_docx: dict[str, EmployerExtraction]) -> list[str]:
     """把一筆紀錄轉成 Sheets 的一列（15 欄：A~D 識別/決策、E~G 機構、H~O 雇主）。
 
     支援 dict（manual 用）與 VisionQueueItem。E~G 欄由 B 欄的許可證值查名冊補上；
@@ -1419,7 +1415,7 @@ def _row_to_sheet_values(r, status: SheetStatus,
 
 
 def write_sheets_batched(row_groups: list[tuple[list, SheetStatus]],
-                         employer_by_docx: dict[str, dict]) -> int:
+                         employer_by_docx: dict[str, EmployerExtraction]) -> int:
     """
     一次性把多組列 atomic 寫入 Google Sheets。
 

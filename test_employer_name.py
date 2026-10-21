@@ -46,19 +46,19 @@ class TestChineseBoilerplateRejected:
     """
 
     def test_title_not_taken_as_name(self):
-        assert _f(_LINES_TITLE_INTERFERES)["雇主名稱_中"] == "呂偉"
+        assert _f(_LINES_TITLE_INTERFERES).values.雇主名稱_中 == "呂偉"
 
     def test_title_alone_yields_empty_not_title(self):
         """整個區塊只有標題沒有名字時,要留空——不是拿標題充數(32510 實況)。"""
         lines = ["平方名稱 {以下間稱為甲方):", "Nama Majikan", "JIANG SIN AN",
                  "勞動契約 監護工", "SEKTOR", "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
-        assert _f(lines)["雇主名稱_中"] == ""
+        assert _f(lines).values.雇主名稱_中 == ""
 
     def test_care_worker_titles_covered(self):
         for title in ("勞動契約 監護工", "勞動契約 家庭幫傭", "家庭看護工"):
             lines = ["甲方名稱 (以下簡稱為甲方):", title,
                      "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
-            assert _f(lines)["雇主名稱_中"] == "", title
+            assert _f(lines).values.雇主名稱_中 == "", title
 
 
 class TestLabelDebrisRejected:
@@ -68,8 +68,8 @@ class TestLabelDebrisRejected:
         lines = ["甲方名稱(以下", "Nama Majikan", "地址:",
                  "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
         f = _f(lines)
-        assert f["雇主名稱_中"] == ""
-        assert "以下" not in f["雇主名稱_中"]
+        assert f.values.雇主名稱_中 == ""
+        assert "以下" not in f.values.雇主名稱_中
 
 
 class TestSeparatorMisread:
@@ -78,7 +78,7 @@ class TestSeparatorMisread:
     def test_semicolon_acts_as_colon(self):
         lines = ["甲方名稱 (以下簡稱為甲方); 林瑞峰",
                  "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
-        assert _f(lines)["雇主名稱_中"] == "林瑞峰"
+        assert _f(lines).values.雇主名稱_中 == "林瑞峰"
 
 
 class TestWindowCoversWholeBlock:
@@ -89,7 +89,7 @@ class TestWindowCoversWholeBlock:
     """
 
     def test_name_far_from_its_label_is_found(self):
-        assert _f(_LINES_TITLE_INTERFERES)["雇主名稱_中"] == "呂偉"
+        assert _f(_LINES_TITLE_INTERFERES).values.雇主名稱_中 == "呂偉"
 
     def test_damaged_address_line_not_taken_as_name(self):
         """窗口放寬的代價:縣市被毀而 CN_ADDR 抓不到的地址殘行會有機會頂上來。
@@ -97,13 +97,13 @@ class TestWindowCoversWholeBlock:
         lines = ["甲方名稱 (以下簡稱為甲方):", "Nama Majikan", "CHEN",
                  "新竹騒麒西鎮大同里8鄰水坑2之8號",
                  "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
-        assert _f(lines)["雇主名稱_中"] == ""
+        assert _f(lines).values.雇主名稱_中 == ""
 
     def test_company_employer_still_accepted(self):
         """雇主可以是公司(CONTEXT.md),不能用「2~4 個純中文字」當條件。"""
         lines = ["甲方名稱 (以下簡稱為甲方): 台灣某某科技股份有限公司",
                  "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
-        assert _f(lines)["雇主名稱_中"] == "台灣某某科技股份有限公司"
+        assert _f(lines).values.雇主名稱_中 == "台灣某某科技股份有限公司"
 
 
 class TestNameDoubt:
@@ -178,7 +178,7 @@ class TestComposedDoubtColumn:
         lines = ["平方名稱 {以下間稱為甲方):", "Nama Majikan", "JIANG SIN AN",
                  "勞動契約 監護工", "地址:", "成園市格梅區梅翠路二段716巷7號",
                  "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
-        d = _f(lines)["疑慮標示"]
+        d = _f(lines).疑慮標示
         assert d.startswith("H:")
         assert "J:" in d
 
@@ -187,12 +187,12 @@ class TestComposedDoubtColumn:
                  "Nama Majikan: LI YI JHEN",
                  "地址:", "新竹市北區磐石路29號7樓",
                  "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
-        assert _f(lines)["疑慮標示"] == ""
+        assert _f(lines).疑慮標示 == ""
 
     def test_every_entry_names_its_column(self):
         lines = ["甲方名稱 (以下簡稱為甲方): 明芳", "Nama Majikan: SONG, MING-FANG",
                  "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
-        for part in _f(lines)["疑慮標示"].split("；"):
+        for part in _f(lines).疑慮標示.split("；"):
             assert re.match(r"^[A-Z]:", part), part
 
 

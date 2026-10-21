@@ -11,6 +11,7 @@ import pytest
 import real_samples as rs
 from contract_template import Template, contract_template
 from employer_extract import extract_employer_fields
+from employer_result import ExtractionStatus
 
 
 def _t(*lines):
@@ -95,18 +96,18 @@ class TestExtractionFollowsTemplate:
     """擷取看樣板,不從英文名逐行猜(ADR-0010)。"""
 
     def test_template_is_recorded_once(self):
-        assert _factory()["契約樣板"] == Template.工廠類
+        assert _factory().source.template == Template.工廠類
 
     def test_factory_skips_count_check_even_without_co_ltd(self):
         """30767:英文名是「…CORPORATION」,舊的 Co/Ltd 字樣認不得 → 假疑慮。"""
         f = _factory()
-        assert "音節" not in f["疑慮標示"]
+        assert "音節" not in f.疑慮標示
 
     def test_company_name_with_taiwan_is_not_the_english_address(self):
         """公司名含 Taiwan(EN_ADDR_KW 認得)也不會被當成英文地址。"""
         f = _factory(name_en="TAIWAN DA MING METAL CO., LTD. (WANG, DA-MING)")
-        assert f["雇主名稱_英"] == "TAIWAN DA MING METAL CO., LTD. (WANG, DA-MING)"
-        assert f["地址_英"].startswith("3F., No.100")
+        assert f.values.雇主名稱_英 == "TAIWAN DA MING METAL CO., LTD. (WANG, DA-MING)"
+        assert f.values.地址_英.startswith("3F., No.100")
 
     def test_family_english_address_without_digits_is_still_an_address(self):
         """家庭類的英文行一律不是機構名:門牌被章蓋掉、沒有數字的地址行照樣是地址。"""
@@ -115,7 +116,7 @@ class TestExtractionFollowsTemplate:
             "Nama Majikan: WANG XIAO MING", "地址:", "高雄市左營區華夏路100號3樓",
             "Alamat : Huaxia Rd., Zuoying Dist., Kaohsiung City, Taiwan",
             "SELANJUTNYA DISEBUT PIHAK PERTAMA"]))
-        assert f["地址_英"] == "Huaxia Rd., Zuoying Dist., Kaohsiung City, Taiwan"
+        assert f.values.地址_英 == "Huaxia Rd., Zuoying Dist., Kaohsiung City, Taiwan"
 
     def test_unrecognised_template_uses_family_rules_and_says_so(self):
         """認不出 → 照家庭類規則(公司名照人名數音節 → 看得見的假疑慮),並講明。"""
@@ -127,25 +128,26 @@ class TestExtractionFollowsTemplate:
             "SELANJUTNYA DISEBUT PIHAK PERTAMA",
         ]
         f = extract_employer_fields("\n".join(lines))
-        assert f["契約樣板"] == Template.認不出
-        assert f["疑慮標示"].startswith("H:契約樣板未辨識,以家庭類規則擷取")
-        assert "音節" in f["疑慮標示"]
+        assert f.source.template == Template.認不出
+        assert f.疑慮標示.startswith("H:契約樣板未辨識,以家庭類規則擷取")
+        assert "音節" in f.疑慮標示
 
     def test_recognised_template_has_no_template_doubt(self):
-        assert "契約樣板" not in _factory()["疑慮標示"]
+        assert "契約樣板" not in _factory().疑慮標示
         family = extract_employer_fields("\n".join([
             "勞動契約 監護工", "甲方名稱 (以下簡稱為甲方): 王小明",
             "Nama Majikan: WANG XIAO MING", "SELANJUTNYA DISEBUT PIHAK PERTAMA"]))
-        assert "契約樣板" not in family["疑慮標示"]
+        assert "契約樣板" not in family.疑慮標示
 
     def test_failed_anchor_still_carries_the_judged_template(self):
         """區塊錨定失敗也判得出樣板:之後切結書救回的公司名才不會被當人名數音節。
 
-        樣板疑慮不掛:錨定失敗的原因已寫在 _note,欄位全空。
+        樣板疑慮不掛:擷取狀況已是雇主區塊未錨定,欄位全空。
         """
         f = extract_employer_fields("勞動契約 工廠類")
-        assert f["_note"] and f["契約樣板"] == Template.工廠類 and f["疑慮"] == ()
-        assert extract_employer_fields("無樣板字")["契約樣板"] == Template.認不出
+        assert f.status is ExtractionStatus.雇主區塊未錨定
+        assert f.source.template == Template.工廠類 and f.doubts == ()
+        assert extract_employer_fields("無樣板字").source.template == Template.認不出
 
 
 @pytest.mark.parametrize("stem", rs.vision_stems())

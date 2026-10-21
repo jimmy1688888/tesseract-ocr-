@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import replace
 from io import BytesIO
 from typing import NamedTuple
 
@@ -25,6 +25,8 @@ from PIL import Image, ImageOps
 # docx 內嵌圖與圖序只有一份,與 pipeline 共用(#5);兩側不互相 import。
 from contract_template import COMPANY_WORDS, Template, contract_template
 from docx_images import image_sort_key, read_images
+from employer_result import (VALUE_KEYS, Doubt, EmployerExtraction, EmployerValues,
+                             ExtractionStatus, Source)
 
 logger = logging.getLogger(__name__)
 
@@ -392,19 +394,10 @@ def deink_red_stamp(image_bytes: bytes, *, whiten_thresh: int = 45,
     return buf.getvalue()
 
 
-# 抽取失敗時回傳的空欄位。鍵與成功路徑一致(含 _standardize_address 補的五個),
-# 讓呼叫端不必分辨走的是哪條路。
-_EMPTY_FIELDS = {
-    "雇主名稱_中": "", "雇主名稱_英": "", "地址_中": "", "地址_英": "", "電話": "",
-    "地址_中_標準": "", "郵遞區號": "", "疑慮": (), "疑慮標示": "",
-    "契約樣板": Template.認不出,
-}
+def extract_employer_fields(text: str) -> EmployerExtraction:
+    """從 Vision 全文擷取雇主欄位(缺項為空字串)。
 
-
-def extract_employer_fields(text: str) -> dict:
-    """從 Vision 全文擷取雇主欄位。回傳 dict(缺項為空字串)。
-
-    另含 _note:正常為空字串;雇主區塊錨不到時為失敗原因,呼叫端據以標示留空。
+    擷取狀況只會是擷取成功或雇主區塊未錨定;來源只填契約樣板(圖檔、全文由呼叫端補)。
     """
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     # 契約樣板整份判一次(ADR-0010),下面的英文地址、英文名、字數音節數檢查都看它。
@@ -433,8 +426,9 @@ def extract_employer_fields(text: str) -> dict:
             start = next((i for i, l in enumerate(lines)
                           if ID_LABEL_INSTITUTION.search(l)), None)
         if start is None:
-            return {**_EMPTY_FIELDS, "契約樣板": template,
-                    "_note": "雇主區塊錨定失敗(甲方標籤、Nama Majikan、Nama Panti Jompo 皆未命中)"}
+            return EmployerExtraction(
+                ExtractionStatus.雇主區塊未錨定, source=Source(template),
+                detail="甲方標籤、Nama Majikan、Nama Panti Jompo 皆未命中")
     end = next((i for i in range(start + 1, len(lines))
                 if PARTY_END.search(lines[i])), len(lines))
     seg = lines[start:end]
@@ -535,18 +529,17 @@ def extract_employer_fields(text: str) -> dict:
     if template is Template.工廠類:
         name_en = _company_name_in_block(seg) or name_en
 
-    fields = {
-        "契約樣板": template,
-        # 補齊不成對括號:擷取時 strip 或 OCR 可能只留單邊,寫進 Sheets 會缺一邊。
-        "雇主名稱_中": _balance_brackets(name_cn),
-        "雇主名稱_英": _balance_brackets(name_en),
-        "地址_中": addr_cn,
-        "地址_英": addr_en,
-        "電話": phone,
-        "_note": "",
-    }
     addr = _standardize_address(addr_cn or "", addr_en or en_hint)
-    fields["地址_中_標準"], fields["郵遞區號"] = addr.standard, addr.zip
+    values = EmployerValues(
+        # 補齊不成對括號:擷取時 strip 或 OCR 可能只留單邊,寫進 Sheets 會缺一邊。
+        雇主名稱_中=_balance_brackets(name_cn),
+        雇主名稱_英=_balance_brackets(name_en),
+        地址_中=addr_cn,
+        地址_中_標準=addr.standard,
+        地址_英=addr_en,
+        郵遞區號=addr.zip,
+        電話=phone,
+    )
     # 順序即 L 欄的順序:樣板 → 名稱 → 地址 → 縣市 → 門牌。
     doubts = (
         *_doubts(_NAME_CN, "契約樣板未辨識,以家庭類規則擷取"
@@ -555,14 +548,12 @@ def extract_employer_fields(text: str) -> dict:
         # 而 Vision 逐欄序列化不保證相鄰),補齊後的「…機構(王)」看起來完全正常,
         # 而機構名又不做字數檢查 —— 不標的話就是看不見的錯值。
         *_doubts(_NAME_CN, "中文名括號不成對,已補齊"
-                 if fields["雇主名稱_中"] != name_cn else ""),
-        *_doubts(_NAME_CN, _name_doubt(fields["雇主名稱_中"], fields["雇主名稱_英"], template)),
+                 if values.雇主名稱_中 != name_cn else ""),
+        *_doubts(_NAME_CN, _name_doubt(values.雇主名稱_中, values.雇主名稱_英, template)),
         *addr.doubts,
-        *_doubts(_ADDR_STD, _house_number_doubt(fields["地址_中"], fields["地址_英"])),
+        *_doubts(_ADDR_STD, _house_number_doubt(values.地址_中, values.地址_英)),
     )
-    fields["疑慮"] = doubts
-    fields["疑慮標示"] = compose_doubts(doubts)
-    return fields
+    return EmployerExtraction(ExtractionStatus.擷取成功, values, doubts, Source(template))
 
 
 # 中文樣板字。BOILERPLATE 從頭到尾只有印尼文與英文,且只用在英文名那條路徑——
@@ -778,40 +769,13 @@ def _city_mismatch_doubt(city_cn: str, en_text: str) -> str:
     return "" if city_raw == city_cn else f"縣市中英不符({city_cn}／{city_eng})"
 
 
-@dataclass(frozen=True)
-class Doubt:
-    """一條疑慮:哪一格(雇主欄位值的名稱)、什麼事實。
-
-    事實只陳述確定的事,不推斷成因(CONTEXT.md「疑慮標示」)。欄位字母不寫在事實裡,
-    由 compose_doubts 依欄位加 —— L 欄的寫法只在那一處。
-    """
-    field: str
-    fact: str
-
-
 _NAME_CN = "雇主名稱_中"
 _ADDR_STD = "地址_中_標準"
 _NAME_MISSING = Doubt(_NAME_CN, "未擷取到中文名")
 
-# 疑慮冠的欄位字母(Sheets 的欄)。
-_DOUBT_COLUMN = {
-    "雇主名稱_中": "H", "雇主名稱_英": "I", "地址_中_標準": "J", "地址_中": "K",
-    "地址_英": "M", "郵遞區號": "N", "電話": "O",
-}
-
-
 def _doubts(field: str, fact: str) -> tuple[Doubt, ...]:
     """有事實才成一條疑慮;空字串代表沒有。"""
     return (Doubt(field, fact),) if fact else ()
-
-
-def compose_doubts(doubts) -> str:
-    """把疑慮清單組成 L 欄一格,每條冠上欄位字母指明是哪一格。L 欄只在這裡組。
-
-    與 D 欄分開的理由不變(D 欄專講許可證判讀,不同主題);但名稱與地址同屬
-    雇主資料,是同一個主題下的多個欄位,合在一格不算一詞多義。
-    """
-    return "；".join(f"{_DOUBT_COLUMN[d.field]}:{d.fact}" for d in doubts)
 
 
 class StandardAddress(NamedTuple):
@@ -906,7 +870,7 @@ def vision_full_text(image_bytes: bytes, client=None) -> str:
 
 
 def extract_employer(img_path: str, client=None, deink: bool = True,
-                     roi: tuple | None = EMPLOYER_ROI) -> dict:
+                     roi: tuple | None = EMPLOYER_ROI) -> EmployerExtraction:
     """對單張圖跑 Vision DOCUMENT_TEXT_DETECTION,再擷取雇主欄位。
 
     處理順序:讀檔 → (可選)ROI 裁切 → (可選)去紅章 → Vision → 解析。
@@ -1115,7 +1079,7 @@ def pick_contract_page(scored: list[tuple[int, str, bytes]]
 
 def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
                                roi: tuple | None = EMPLOYER_ROI,
-                               crop_dir: str = "") -> dict:
+                               crop_dir: str = "") -> EmployerExtraction:
     """端到端:從 docx 找出契約頁 → ROI 裁切 → 去紅章 → Vision → 擷取雇主欄位。
 
     crop_dir:非空時,把「去紅章前」的 ROI 裁切圖存到該資料夾
@@ -1123,19 +1087,15 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
       **每份 docx 都會存**:找不到契約頁時存「最高分候選頁」(全零分則退
       image2 慣例位置),欄位留空但截圖必在,人工審核不會沒圖可看。
 
-    回傳除五個雇主欄位外,另含:
-      _image:實際採用(或候選)的圖檔名
-      _note :流程備註(例如「找不到契約頁」)
-      _crop :已存檔的 ROI 截圖檔名(未存檔則為空)
-      _text :Vision 全文(未送 Vision 時為空字串)
+    來源另含實際採用(或候選)的圖檔名、已存檔的 ROI 截圖檔名(未存檔則為空)、
+    Vision 全文(未送 Vision 時為空字串)。
     """
     from pathlib import Path
 
-    empty = _EMPTY_FIELDS
     # 各圖分數與次頁台仲反查共用(_scored_pages 有快取),同一份 docx 不重評
     scored = _scored_pages(docx_path)
     if not scored:
-        return {**empty, "_image": "", "_note": "docx 無內嵌圖", "_crop": ""}
+        return EmployerExtraction(ExtractionStatus.docx無內嵌圖)
 
     best_s, name, raw, found = pick_contract_page(scored)
 
@@ -1151,24 +1111,24 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
 
     if not found:
         # 特徵不足不送 Vision(頁面身分不明,抽出的欄位不可信),只留截圖
-        return {**empty, "_image": name, "_text": "",
-                "_note": f"找不到契約頁(特徵字命中不足,最高分 {best_s});已存候選頁截圖",
-                "_crop": crop_name}
+        return EmployerExtraction(
+            ExtractionStatus.找不到契約頁, source=Source(image=name, crop=crop_name),
+            detail=f"特徵字命中不足,最高分 {best_s};已存候選頁截圖")
 
     if deink:
         content = deink_red_stamp(content)
     # 全文一併傳出:它是這條流程唯一花錢買來的東西,而每一次解析修正都要拿它
     # 當素材。丟掉的話,改一次名稱/地址的抽取規則就得再跑一輪 Vision 才驗得了。
     text = vision_full_text(content, client=client)
-    fields = extract_employer_fields(text)
-    if not fields.get("雇主名稱_中"):
-        _apply_pledge_rescue(fields, docx_path, client)
-    # 錨定失敗時 fields 已帶 _note(欄位全空),原樣傳出讓 pipeline 標示 H~O 留空
-    return {**fields, "_image": name, "_crop": crop_name, "_text": text}
+    result = extract_employer_fields(text)
+    if not result.values.雇主名稱_中:
+        result = _apply_pledge_rescue(result, docx_path, client)
+    return replace(result, source=replace(result.source, image=name, crop=crop_name, text=text))
 
 
-def _apply_pledge_rescue(fields: dict, docx_path: str, client=None) -> None:
-    """就地把切結書頁救回的中文名寫進 fields,並重算名稱疑慮。
+def _apply_pledge_rescue(result: EmployerExtraction, docx_path: str,
+                         client=None) -> EmployerExtraction:
+    """切結書頁救回中文名 → 回傳填了中文名、名稱疑慮換過的結果;救不回來原樣回傳。
 
     只救中文名,不動英文名:英文名本來就是可靠的那一欄(ADR-0004,紅章蓋的是中文
     那一欄),而切結書頁的英文反而讀壞過 —— 32503 讀成 `FU BIN ANI FU`。拿它去
@@ -1183,21 +1143,18 @@ def _apply_pledge_rescue(fields: dict, docx_path: str, client=None) -> None:
     got, page = rescue_name_from_pledge(docx_path, client=client)
     if not got:
         logger.info(f"  切結書頁未取得中文名:{Path(docx_path).name}")
-        return
-    fields["雇主名稱_中"] = got
-    count = _name_doubt(got, fields.get("雇主名稱_英", ""),
-                        fields.get("契約樣板", Template.家庭類))
+        return result
+    count = _name_doubt(got, result.values.雇主名稱_英, result.source.template)
     rescued = (*_doubts(_NAME_CN, f"中文名取自切結書頁({page})"), *_doubts(_NAME_CN, count))
     # 「未擷取到中文名」已經變成假的:原位換成救援這兩條,其他疑慮不動。
-    old = tuple(fields.get("疑慮", ()))
+    old = result.doubts
     if _NAME_MISSING in old:
         i = old.index(_NAME_MISSING)
         doubts = old[:i] + rescued + old[i + 1:]
     else:
         doubts = old + rescued
-    fields["疑慮"] = doubts
-    fields["疑慮標示"] = compose_doubts(doubts)
     logger.info(f"  ★ 切結書頁救回中文名:{got}({Path(docx_path).name}/{page})")
+    return replace(result, values=replace(result.values, 雇主名稱_中=got), doubts=doubts)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1222,8 +1179,8 @@ def _ab_compare(img_path: str, dump: str = "", roi: tuple | None = EMPLOYER_ROI)
     after  = extract_employer_fields(vision_full_text(deink_red_stamp(base), client))
 
     print(f"\n== {img_path}  (ROI={roi}) ==")
-    for k in before:
-        b, a = before[k], after[k]
+    for k in (*VALUE_KEYS, "疑慮標示"):
+        b, a = before.cell(k), after.cell(k)
         flag = "  ← 變更" if b != a else ""
         print(f"[{k}]\n  去紅章前: {b!r}\n  去紅章後: {a!r}{flag}")
 
@@ -1243,10 +1200,9 @@ if __name__ == "__main__":
     if args.path.lower().endswith(".docx"):
         # docx:自動找契約頁 → ROI → 去紅章 → Vision
         res = extract_employer_from_docx(args.path, deink=True, roi=roi)
-        print(f"採用契約頁:{res.get('_image') or '(無)'}  {res.get('_note','')}")
-        for k in ("雇主名稱_中", "雇主名稱_英", "地址_中", "地址_英", "電話",
-                  "地址_中_標準", "郵遞區號", "疑慮標示"):
-            print(f"  {k}: {res.get(k)!r}")
+        print(f"採用契約頁:{res.source.image or '(無)'}  {res.status.value} {res.detail}")
+        for k in (*VALUE_KEYS, "疑慮標示"):
+            print(f"  {k}: {res.cell(k)!r}")
     elif args.no_ab:
         print(extract_employer(args.path, deink=True, roi=roi))
     else:

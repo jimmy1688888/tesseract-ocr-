@@ -52,20 +52,20 @@ class TestAddressLabelFirst:
 
     def test_label_next_line_wins_over_earlier_agency_address(self):
         f = _block(["地址:", "高雄市左營區華夏路100號3樓", "Alamat:", _EN_KAOHSIUNG])
-        assert f["地址_中"] == "高雄市左營區華夏路100號3樓"
-        assert f["地址_中_標準"] == "高雄市左營區華夏路100號3樓"
-        assert f["郵遞區號"] == "813"
-        assert "縣市中英不符" not in f["疑慮標示"]
+        assert f.values.地址_中 == "高雄市左營區華夏路100號3樓"
+        assert f.values.地址_中_標準 == "高雄市左營區華夏路100號3樓"
+        assert f.values.郵遞區號 == "813"
+        assert "縣市中英不符" not in f.疑慮標示
 
     def test_address_on_the_label_line_itself(self):
         f = _block(["地址:高雄市左營區華夏路100號3樓", "Alamat:", _EN_KAOHSIUNG])
-        assert f["地址_中"] == "高雄市左營區華夏路100號3樓"
+        assert f.values.地址_中 == "高雄市左營區華夏路100號3樓"
 
     def test_address_a_few_lines_after_the_label(self):
         """標籤與地址之間夾了別欄的字(逐欄序列化),幾行內仍算標籤的值。"""
         f = _block(["地址:", "Perawat Orang Sakit (Care Giver)",
                     "高雄市左營區華夏路100號3樓", "Alamat:", _EN_KAOHSIUNG])
-        assert f["地址_中"] == "高雄市左營區華夏路100號3樓"
+        assert f.values.地址_中 == "高雄市左營區華夏路100號3樓"
 
     def test_word_address_mid_line_is_not_a_label(self):
         """行中提到「地址」的不是標籤,不能讓它後面的仲介地址搶先。"""
@@ -74,7 +74,7 @@ class TestAddressLabelFirst:
                      "臺中市西區民權路88號5樓",
                      "地址:", "高雄市左營區華夏路100號3樓", "Alamat:", _EN_KAOHSIUNG,
                      "SELANJUTNYA DISEBUT PIHAK PERTAMA"])
-        assert f["地址_中"] == "高雄市左營區華夏路100號3樓"
+        assert f.values.地址_中 == "高雄市左營區華夏路100號3樓"
 
     def test_label_with_no_address_nearby_falls_back(self):
         """標籤與地址被拆開(32510、32518、33701 的形態)→ 退回「第一個像地址的行」。
@@ -93,7 +93,7 @@ class TestAddressLabelFirst:
             "0912345678",
             "SELANJUTNYA DISEBUT PIHAK PERTAMA",
         ]
-        assert _fields(lines)["地址_中"] == "高雄市左營區華夏路100號3樓"
+        assert _fields(lines).values.地址_中 == "高雄市左營區華夏路100號3樓"
 
     def test_agency_label_outside_the_block_is_ignored(self):
         """仲介框也有地址標籤;只看雇主區塊內的標籤。"""
@@ -107,7 +107,7 @@ class TestAddressLabelFirst:
             _EN_KAOHSIUNG,
             "SELANJUTNYA DISEBUT PIHAK PERTAMA",
         ]
-        assert _fields(lines)["地址_中"] == "高雄市左營區華夏路100號3樓"
+        assert _fields(lines).values.地址_中 == "高雄市左營區華夏路100號3樓"
 
 
 class TestCityMismatchDoubt:
@@ -116,12 +116,12 @@ class TestCityMismatchDoubt:
     def test_label_missing_agency_address_is_flagged(self):
         """挑對沒救到(標籤被毀)、只剩安全網時,33704 型的資料要被標出來。"""
         f = _block(["高雄市左營區華夏路100號3樓", "Alamat:", _EN_KAOHSIUNG])
-        assert f["地址_中"].startswith("臺中市")          # 前提:確實挑到仲介那行
-        assert "J:縣市中英不符(臺中市／Kaohsiung City)" in f["疑慮標示"]
+        assert f.values.地址_中.startswith("臺中市")          # 前提:確實挑到仲介那行
+        assert "J:縣市中英不符(臺中市／Kaohsiung City)" in f.疑慮標示
 
     def test_same_city_not_flagged(self):
         f = _block(["地址:", "高雄市左營區華夏路100號3樓", "Alamat:", _EN_KAOHSIUNG])
-        assert "縣市中英不符" not in f["疑慮標示"]
+        assert "縣市中英不符" not in f.疑慮標示
 
     def test_chinese_city_unmatched_not_flagged_twice(self):
         """中文縣市比不到 → 已有「縣市未比對到官方資料庫」那條,不重複標縣市中英不符。"""
@@ -130,14 +130,14 @@ class TestCityMismatchDoubt:
                  "Alamat:", "7F., No.29, Mouxx Rd., North Dist., Xxyyzz, Taiwan",
                  "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
         f = _fields(lines)
-        assert "縣市未比對到" in f["疑慮標示"]
-        assert "縣市中英不符" not in f["疑慮標示"]
+        assert "縣市未比對到" in f.疑慮標示
+        assert "縣市中英不符" not in f.疑慮標示
 
     def test_english_matches_no_official_city_not_flagged(self):
         """英文行讀壞、比不到任何官方縣市 → 不標(寧可漏報,不用模糊比對製造誤報)。"""
         f = _block(["臺中市西區民權路88號5樓", "Alamat:",
                     "3F., No.100, Huaxia Rd., Zuoying Dist., Kaohslung Clty, Taiwan R.O.C."])
-        assert "縣市中英不符" not in f["疑慮標示"]
+        assert "縣市中英不符" not in f.疑慮標示
 
     @pytest.mark.parametrize("cn, en", [
         ("臺北市大安區復興南路一段10號", "No.10, Sec. 1, Fuxing S. Rd., Da'an Dist., Taipei City"),
@@ -146,23 +146,23 @@ class TestCityMismatchDoubt:
     def test_taipei_and_new_taipei_not_confused(self, cn, en):
         """取最長命中:New Taipei City 不會被當成 Taipei City,反之亦然。"""
         f = _block(["地址:", cn, "Alamat:", en])
-        assert "縣市中英不符" not in f["疑慮標示"]
+        assert "縣市中英不符" not in f.疑慮標示
 
     def test_taipei_vs_new_taipei_is_flagged(self):
         f = _block(["地址:", "臺北市大安區復興南路一段10號", "Alamat:",
                     "No.10, Sec. 1, Wenhua Rd., Banqiao Dist., New Taipei City"])
-        assert "J:縣市中英不符(臺北市／New Taipei City)" in f["疑慮標示"]
+        assert "J:縣市中英不符(臺北市／New Taipei City)" in f.疑慮標示
 
     def test_fuzzy_chinese_city_uses_standardized_name(self):
         """OCR 把縣市讀歪(桃園市 → 成園市)時比的是標準化後的縣市,不誤報。"""
         f = _block(["地址:", "成園市中壢區中正路100號", "Alamat:",
                     "No.100, Zhongzheng Rd., Zhongli Dist., Taoyuan City"])
-        assert f["地址_中"] == "成園市中壢區中正路100號"     # 前提:OCR 原文確實讀歪
-        assert "縣市中英不符" not in f["疑慮標示"]
+        assert f.values.地址_中 == "成園市中壢區中正路100號"     # 前提:OCR 原文確實讀歪
+        assert "縣市中英不符" not in f.疑慮標示
 
     def test_wording_states_facts_only(self):
         f = _block(["高雄市左營區華夏路100號3樓", "Alamat:", _EN_KAOHSIUNG])
-        d = [p for p in f["疑慮標示"].split("；") if "縣市中英不符" in p][0]
+        d = [p for p in f.疑慮標示.split("；") if "縣市中英不符" in p][0]
         assert "可能" not in d and "請" not in d and "應" not in d
 
 
@@ -177,4 +177,4 @@ def test_replayed_vision_text_matches_checked_values(stem):
         pytest.skip(f"{stem} 沒有雇主欄位核對值")
     f = extract_employer_fields(rs.employer_text(stem))
     for k, v in checked.items():
-        assert f[k] == v, k
+        assert getattr(f.values, k) == v, k

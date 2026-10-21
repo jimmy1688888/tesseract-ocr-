@@ -34,7 +34,7 @@ def _fields(title, name_lines):
 
 def test_factory_prefers_the_line_with_company_words():
     f = _fields("勞動契約 工廠類", [_COMPANY_EN])
-    assert f["雇主名稱_英"] == _COMPANY_EN
+    assert f.values.雇主名稱_英 == _COMPANY_EN
 
 
 @pytest.mark.parametrize("en", [               # 每例只含一種字樣
@@ -50,20 +50,20 @@ def test_factory_prefers_the_line_with_company_words():
     "DA MING INDUSTRY (WANG DA MING)",
 ])
 def test_each_company_word_counts(en):
-    assert _fields("勞動契約 工廠類", [en])["雇主名稱_英"] == en
+    assert _fields("勞動契約 工廠類", [en]).values.雇主名稱_英 == en
 
 
 def test_factory_without_company_words_falls_back_to_current_rule():
     f = _fields("勞動契約 工廠類", ["DA MING (WANG DA MING)"])
-    assert f["雇主名稱_英"] == "ABC-1234"
+    assert f.values.雇主名稱_英 == "ABC-1234"
 
 
 def test_company_line_with_digits_is_not_taken():
     """含數字的是地址或編號,不是公司名(地址一定有門牌號)。"""
     f = _fields("勞動契約 工廠類", ["NO.5, INDUSTRIAL RD., CO. (WANG DA MING)"])
-    assert f["雇主名稱_英"] == "ABC-1234"
+    assert f.values.雇主名稱_英 == "ABC-1234"
 
 
 def test_family_template_unaffected():
     f = _fields("勞動契約 監護工", [_COMPANY_EN])
-    assert f["雇主名稱_英"] == "ABC-1234"
+    assert f.values.雇主名稱_英 == "ABC-1234"

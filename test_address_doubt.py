@@ -10,10 +10,18 @@ keyed-in/manual_review 完全由許可證判讀決定——雇主資料只是搭
 這是已知且接受的缺口。
 """
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from address_db import normalize_address
 from employer_extract import _standardize_address
+from employer_result import (Doubt, EmployerExtraction, EmployerValues, ExtractionStatus,
+                             Source)
+
+
+def _result(doubts=(), **values):
+    """一份擷取成功的雇主擷取結果(捏造)。"""
+    return EmployerExtraction(ExtractionStatus.擷取成功, EmployerValues(**values), tuple(doubts))
 
 
 def _facts(r):
@@ -255,38 +263,37 @@ class TestSheetWiring:
 
     L, M = 11, 12       # A=0 … L=11 M=12(H~O 對應 index 7~14)
 
-    def _row(self, docx, fields):
+    def _row(self, docx, result):
         import pipeline
         return pipeline._row_to_sheet_values(
             {"source_docx": docx, "final_value": "2340"},
-            pipeline.SheetStatus.KEYED_IN, {docx: fields})
+            pipeline.SheetStatus.KEYED_IN, {docx: result})
 
     def test_row_is_fifteen_columns(self):
-        assert len(self._row("a.docx", {})) == 15
+        assert len(self._row("a.docx", _result())) == 15
 
     def test_doubt_lands_in_column_l(self):
-        row = self._row("b.docx", {"疑慮標示": "J:路名未在該行政區的路名清單中"})
+        row = self._row("b.docx", _result([Doubt("地址_中_標準", "路名未在該行政區的路名清單中")]))
         assert row[self.L] == "J:路名未在該行政區的路名清單中"
 
     def test_english_column_is_ocr_verbatim(self):
         """M 欄只放 OCR 原文,官方英譯不得從任何路徑出現在列上。"""
-        row = self._row("e.docx", {
-            "地址_英": "7F., No.29, Panshih Rd., North Dist., Hsinchu City 300068",
-        })
+        row = self._row("e.docx", _result(
+            地址_英="7F., No.29, Panshih Rd., North Dist., Hsinchu City 300068"))
         assert row[self.M] == "7F., No.29, Panshih Rd., North Dist., Hsinchu City 300068"
         assert "Panshi Rd." not in row[self.L]
 
     def test_english_ocr_empty_stays_empty(self):
         """讀不到就空——不拿官方譯名充數,否則 M 欄的語意會出現例外。"""
-        assert self._row("f.docx", {"地址_中_標準": "宜蘭縣宜蘭市津梅路142巷2號"})[self.M] == ""
+        assert self._row("f.docx", _result(地址_中_標準="宜蘭縣宜蘭市津梅路142巷2號"))[self.M] == ""
 
     def test_clean_row_has_empty_doubt(self):
-        row = self._row("c.docx", {"地址_中_標準": "新竹市北區磐石路29號7樓"})
+        row = self._row("c.docx", _result(地址_中_標準="新竹市北區磐石路29號7樓"))
         assert row[self.L] == ""
 
     def test_doubt_does_not_leak_into_reason_column(self):
         """D 欄專講許可證判讀,不能被雇主的疑慮汙染(一個欄位不承載兩種語意)。"""
-        row = self._row("d.docx", {"疑慮標示": "J:縣市未比對到官方資料庫"})
+        row = self._row("d.docx", _result([Doubt("地址_中_標準", "縣市未比對到官方資料庫")]))
         assert "縣市" not in row[3]
 
     def test_unknown_docx_gives_empty_doubt_not_crash(self):
@@ -341,14 +348,13 @@ class TestVisionTextIsPersisted:
         from batch import Batch
         monkeypatch.setattr(
             "employer_extract.extract_employer_from_docx",
-            lambda *a, **k: {"雇主名稱_中": "王小明", "疑慮標示": "",
-                             "_note": "", "_image": "image2.jpeg", "_crop": "",
-                             "_text": "甲方名稱: 王小明"})
+            lambda *a, **k: replace(_result(雇主名稱_中="王小明"),
+                                    source=Source(image="image2.jpeg", text="甲方名稱: 王小明")))
         employer = pipeline.collect_employer_fields(
             Batch.from_file(tmp_path / "99999.docx", output_dir=tmp_path))
-        fields = employer["99999.docx"]
-        assert "_text" not in fields
-        assert fields["雇主名稱_中"] == "王小明"
+        result = employer["99999.docx"]
+        assert result.source.text == ""
+        assert result.values.雇主名稱_中 == "王小明"
         saved = json.loads(
             (tmp_path / "employer_texts.json").read_text(encoding="utf-8"))
         assert saved["99999.docx"]["text"] == "甲方名稱: 王小明"
@@ -365,8 +371,7 @@ class TestEmployerOutputFollowsBatch:
 
         def fake_extract(path, client=None, crop_dir=""):
             crop_dirs.append(Path(crop_dir))
-            return {"雇主名稱_中": "王小明", "疑慮標示": "郵遞區號與地址不符",
-                    "_note": "", "_image": "image2.jpeg", "_crop": "", "_text": ""}
+            return _result([Doubt("郵遞區號", "與地址不符")], 雇主名稱_中="王小明")
 
         monkeypatch.setattr("employer_extract.extract_employer_from_docx", fake_extract)
         out = tmp_path / "另一處"
@@ -384,13 +389,26 @@ class TestDoubtReportOrder:
     def test_rows_sorted_by_docx_name(self, tmp_path):
         import pipeline
         from batch import Batch
-        doubt = {"疑慮標示": "郵遞區號與地址不符"}
+        doubt = _result([Doubt("郵遞區號", "與地址不符")])
         employer_by_docx = {"32574.docx": doubt, "32503.docx": doubt, "32538.docx": doubt}
         b = Batch((), source=tmp_path, output_dir=tmp_path)
         assert pipeline.write_doubt_report(b, employer_by_docx) == 3
         lines = (tmp_path / "address_doubts.csv").read_text(encoding="utf-8-sig").splitlines()
         assert [ln.split(",")[0] for ln in lines[1:]] == [
             "32503.docx", "32538.docx", "32574.docx"]
+
+
+class TestDoubtReportOnlyListsDoubts:
+
+    def test_docx_without_doubt_is_not_listed(self, tmp_path):
+        import pipeline
+        from batch import Batch
+        employer_by_docx = {"32574.docx": _result([Doubt("郵遞區號", "與地址不符")]),
+                            "32503.docx": _result(雇主名稱_中="王小明")}
+        b = Batch((), source=tmp_path, output_dir=tmp_path)
+        assert pipeline.write_doubt_report(b, employer_by_docx) == 1
+        report = (tmp_path / "address_doubts.csv").read_text(encoding="utf-8-sig")
+        assert "32574.docx" in report and "32503.docx" not in report
 
 
 class TestTwoBatchesDoNotLeak:
@@ -408,9 +426,7 @@ class TestTwoBatchesDoNotLeak:
         from batch import Batch
         monkeypatch.setattr(
             "employer_extract.extract_employer_from_docx",
-            lambda path, **k: {"雇主名稱_中": "王小明", "疑慮標示": "郵遞區號與地址不符",
-                               "_note": "", "_image": "image2.jpeg", "_crop": "",
-                               "_text": ""})
+            lambda path, **k: _result([Doubt("郵遞區號", "與地址不符")], 雇主名稱_中="王小明"))
 
         def run(name, out):
             b = Batch.from_file(tmp_path / name, output_dir=out)

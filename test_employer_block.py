@@ -16,6 +16,7 @@
 第 15 行,雇主 y=166 反而排在第 10 行),拿它當起點等於賭 Vision 怎麼切欄。
 """
 from employer_extract import extract_employer_fields
+from employer_result import ExtractionStatus
 
 # 32417 次頁 ROI 的實際 OCR(節錄):仲介框在前,甲方標籤已毀,乙方標籤完好
 _LINES_32417 = [
@@ -74,23 +75,23 @@ class TestDamagedPartyALabel:
 
     def test_chinese_name_recovered(self):
         # 往回一行才納得到中文姓名(它排在 Nama Majikan 之前)
-        assert _fields(_LINES_32417)["雇主名稱_中"] == "林志明"
+        assert _fields(_LINES_32417).values.雇主名稱_中 == "林志明"
 
     def test_english_name_recovered(self):
-        assert _fields(_LINES_32417)["雇主名稱_英"] == "LIN ZHI MING"
+        assert _fields(_LINES_32417).values.雇主名稱_英 == "LIN ZHI MING"
 
     def test_address_recovered(self):
         f = _fields(_LINES_32417)
-        assert f["地址_中"] == "高雄市左營區華夏路1728號13樓"
-        assert f["地址_英"].startswith("13F., No.1728, Huaxia Rd.")
+        assert f.values.地址_中 == "高雄市左營區華夏路1728號13樓"
+        assert f.values.地址_英.startswith("13F., No.1728, Huaxia Rd.")
 
     def test_phone_is_employer_not_agency(self):
         """雇主電話,不是仲介框裡的 03/傳真 07-2692232(32098 教訓)。"""
-        assert _fields(_LINES_32417)["電話"] == "0932237611"
+        assert _fields(_LINES_32417).values.電話 == "0932237611"
 
     def test_not_anchored_to_party_b(self):
         """舊邏輯錨到「勞工姓名(以下簡稱乙方)」→ 五欄全空;現在不該再發生。"""
-        assert any(_fields(_LINES_32417)[k] for k in
+        assert any(getattr(_fields(_LINES_32417).values, k) for k in
                    ("雇主名稱_中", "地址_中", "電話"))
 
 
@@ -99,13 +100,13 @@ class TestNormalContractUnaffected:
 
     def test_all_fields(self):
         f = _fields(_LINES_NORMAL)
-        assert f["雇主名稱_中"] == "李宜蓁"
-        assert f["雇主名稱_英"] == "LI, Yi-JHEN"
-        assert f["地址_中"] == "新竹市北區磐石路29號7樓"
-        assert f["電話"] == "0989346899"
+        assert f.values.雇主名稱_中 == "李宜蓁"
+        assert f.values.雇主名稱_英 == "LI, Yi-JHEN"
+        assert f.values.地址_中 == "新竹市北區磐石路29號7樓"
+        assert f.values.電話 == "0989346899"
 
     def test_agency_phone_excluded(self):
-        assert _fields(_LINES_NORMAL)["電話"] != "03-5310852"
+        assert _fields(_LINES_NORMAL).values.電話 != "03-5310852"
 
 
 class TestPartyBBoundary:
@@ -113,13 +114,13 @@ class TestPartyBBoundary:
 
     def test_labor_indonesian_address_not_taken(self):
         f = _fields(_LINES_32417)
-        assert "DUSUN KRAJAN" not in f["地址_英"]
-        assert "NOVITASARI" not in f["雇主名稱_英"]
+        assert "DUSUN KRAJAN" not in f.values.地址_英
+        assert "NOVITASARI" not in f.values.雇主名稱_英
 
     def test_party_b_phone_not_counted(self):
         """乙方區塊的電話出現兩次也不能勝出——它在 end 之後,根本不進統計。"""
         lines = _LINES_NORMAL + ["電話:", "081249756761", "081249756761"]
-        assert _fields(lines)["電話"] == "0989346899"
+        assert _fields(lines).values.電話 == "0989346899"
 
 
 class TestAnchorFailureReturnsEmpty:
@@ -144,19 +145,19 @@ class TestAnchorFailureReturnsEmpty:
     def test_all_fields_empty(self):
         f = _fields(self.NO_ANCHOR)
         for k in ("雇主名稱_中", "雇主名稱_英", "地址_中", "地址_英", "電話"):
-            assert f[k] == "", k
+            assert getattr(f.values, k) == "", k
 
     def test_note_explains_why(self):
-        assert "錨定失敗" in _fields(self.NO_ANCHOR)["_note"]
+        assert _fields(self.NO_ANCHOR).status is ExtractionStatus.雇主區塊未錨定
 
     def test_agency_data_not_leaked(self):
         """關鍵:不能把仲介的名稱/地址/電話當成雇主填出去。"""
         f = _fields(self.NO_ANCHOR)
-        assert "仲介" not in f["雇主名稱_中"]
-        assert f["電話"] not in ("03-5310852", "03-5277128")
+        assert "仲介" not in f.values.雇主名稱_中
+        assert f.values.電話 not in ("03-5310852", "03-5277128")
 
     def test_normal_path_has_blank_note(self):
-        assert _fields(_LINES_NORMAL)["_note"] == ""
+        assert _fields(_LINES_NORMAL).status is ExtractionStatus.擷取成功
 
 
 class TestFaxExcludedFromEmployerPhone:
@@ -174,7 +175,7 @@ class TestFaxExcludedFromEmployerPhone:
             "Nomor Telepon:",
             "SELANJUTNYA DISEBUT PIHAK PERTAMA",
         ]
-        assert _fields(lines)["電話"] == ""
+        assert _fields(lines).values.電話 == ""
 
     def test_phone_before_fax_still_taken(self):
         """同行有完好電話時照抽,不能因為切除而連電話一起丟掉。"""
@@ -183,7 +184,7 @@ class TestFaxExcludedFromEmployerPhone:
             "電話:03-5310852,傳真:03-5277128",
             "SELANJUTNYA DISEBUT PIHAK PERTAMA",
         ]
-        assert _fields(lines)["電話"] == "03-5310852"
+        assert _fields(lines).values.電話 == "03-5310852"
 
     def test_fax_keyword_case_insensitive(self):
         lines = [
@@ -191,4 +192,4 @@ class TestFaxExcludedFromEmployerPhone:
             "TEL: 03-5310852 FAX: 03-5277128",
             "SELANJUTNYA DISEBUT PIHAK PERTAMA",
         ]
-        assert _fields(lines)["電話"] == "03-5310852"
+        assert _fields(lines).values.電話 == "03-5310852"

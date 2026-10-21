@@ -15,6 +15,7 @@
 import pytest
 
 from employer_extract import extract_employer_fields
+from employer_result import ExtractionStatus
 from real_samples import checked_employer_fields, employer_text
 
 # 33703 在現行 ROI 下的 Vision 序列化順序:中文名斷兩行;Nama 標籤之後先插進
@@ -60,25 +61,25 @@ def _replace(lines, old, new):
 
 def _name_facts(f):
     """中文名那一格的疑慮事實,串成一句方便比對。"""
-    return "；".join(d.fact for d in f["疑慮"] if d.field == "雇主名稱_中")
+    return "；".join(d.fact for d in f.doubts if d.field == "雇主名稱_中")
 
 class TestInstitutionContract:
 
     def test_wrapped_chinese_name_joined(self):
         """斷成兩行的機構全名要接回來,不是「…(王)」。"""
-        assert _fields(_INSTITUTION)["雇主名稱_中"] == _CN_NAME
+        assert _fields(_INSTITUTION).values.雇主名稱_中 == _CN_NAME
 
     def test_english_name_with_county_is_a_name(self):
         """含 City 的機構英文名是名稱,連同下一行的負責人拼音;冒號不切。"""
-        assert _fields(_INSTITUTION)["雇主名稱_英"] == _EN_NAME
+        assert _fields(_INSTITUTION).values.雇主名稱_英 == _EN_NAME
 
     def test_english_address_is_the_alamat_line(self):
-        assert _fields(_INSTITUTION)["地址_英"] == _EN_ADDR
+        assert _fields(_INSTITUTION).values.地址_英 == _EN_ADDR
 
     def test_chinese_address_and_phone(self):
         f = _fields(_INSTITUTION)
-        assert f["地址_中"] == "新北市板橋區文化路一段100號(3樓)"
-        assert f["電話"] == "02-29681234"
+        assert f.values.地址_中 == "新北市板橋區文化路一段100號(3樓)"
+        assert f.values.電話 == "02-29681234"
 
     def test_no_syllable_count_doubt_for_institution(self):
         """機構名的中文字數與英譯音節數本來就對不上,不是疑慮。"""
@@ -87,26 +88,26 @@ class TestInstitutionContract:
     def test_title_line_is_not_english_name(self):
         """標題「(NURSING HOME)」落進區塊時不能頂上來當英文名。"""
         lines = _INSTITUTION[:10] + ["(NURSING HOME)"] + _INSTITUTION[10:]
-        assert _fields(lines)["雇主名稱_英"] == _EN_NAME
+        assert _fields(lines).values.雇主名稱_英 == _EN_NAME
 
     def test_institution_label_alone_anchors(self):
         """「以下簡稱甲方」被毀、「醫院名稱」完好時,照樣錨在甲方標籤、中文名照抽。"""
         lines = _replace(_INSTITUTION, "養護機構/醫院名稱 (以下簡稱甲方):",
                          "養護機構/醫院名稱 (以下統為用方):")
-        assert _fields(lines)["雇主名稱_中"] == _CN_NAME
+        assert _fields(lines).values.雇主名稱_中 == _CN_NAME
 
     def test_eaten_bracket_closed_on_its_own_line(self):
         """OCR 吃掉的右括號屬於機構名那一行,補在那行尾,不是整串尾端的「…))」。"""
         lines = _replace(_INSTITUTION, "New Taipei City Private(An Xin: )Long-term Care",
                          "New Taipei City Private(An Xin::JLong-term Care")
-        assert (_fields(lines)["雇主名稱_英"]
+        assert (_fields(lines).values.雇主名稱_英
                 == "New Taipei City Private(An Xin::JLong-term Care) (WANG DA MING)")
 
     def test_label_without_colon_is_not_a_name(self):
         """標籤行沒讀到冒號時,剝掉「以下簡稱甲方」後剩下的標籤字不能當名字。"""
         lines = _replace(_INSTITUTION, "養護機構/醫院名稱 (以下簡稱甲方):",
                          "養護機構/醫院名稱 (以下簡稱甲方)")
-        assert _fields(lines)["雇主名稱_中"] == _CN_NAME
+        assert _fields(lines).values.雇主名稱_中 == _CN_NAME
 
 
 class TestDamagedInstitutionLabel:
@@ -123,14 +124,14 @@ class TestDamagedInstitutionLabel:
 
     def test_other_fields_recovered(self):
         f = _fields(self.LINES)
-        assert f["_note"] == ""
-        assert f["雇主名稱_英"] == _EN_NAME
-        assert f["地址_英"] == _EN_ADDR
-        assert f["電話"] == "02-29681234"
+        assert f.status is ExtractionStatus.擷取成功
+        assert f.values.雇主名稱_英 == _EN_NAME
+        assert f.values.地址_英 == _EN_ADDR
+        assert f.values.電話 == "02-29681234"
 
     def test_chinese_name_left_blank_not_guessed(self):
         f = _fields(self.LINES)
-        assert f["雇主名稱_中"] == ""
+        assert f.values.雇主名稱_中 == ""
         assert "未擷取到中文名" in _name_facts(f)
 
 
@@ -147,9 +148,9 @@ class TestUnjoinedWrapIsFlagged:
 
     def test_doubt_says_bracket_was_added(self):
         f = _fields(self.LINES)
-        assert f["雇主名稱_中"].endswith("(王)")
+        assert f.values.雇主名稱_中.endswith("(王)")
         assert "括號不成對" in _name_facts(f)
-        assert "括號不成對" in f["疑慮標示"]
+        assert "括號不成對" in f.疑慮標示
 
     def test_joined_wrap_is_not_flagged(self):
         assert "括號" not in _name_facts(_fields(_INSTITUTION))
@@ -171,8 +172,8 @@ class TestFamilyAddressWithInstitutionWord:
 
     def test_address_line_stays_address(self):
         f = _fields(self.LINES)
-        assert f["地址_英"] == "No. 5, Welfare Rd., North Dist., Taichung City, Taiwan"
-        assert f["雇主名稱_英"] == "WANG XIAO MING"
+        assert f.values.地址_英 == "No. 5, Welfare Rd., North Dist., Taichung City, Taiwan"
+        assert f.values.雇主名稱_英 == "WANG XIAO MING"
 
 
 class TestFamilyContractNameNotJoined:
@@ -185,7 +186,7 @@ class TestFamilyContractNameNotJoined:
             "Nama Majikan: WANG XIAO MING",
             "SELANJUTNYA DISEBUT PIHAK PERTAMA",
         ]
-        assert _fields(lines)["雇主名稱_中"] == "王小明"
+        assert _fields(lines).values.雇主名稱_中 == "王小明"
 
 
 def test_33703_replayed_from_saved_vision_text():
@@ -198,4 +199,4 @@ def test_33703_replayed_from_saved_vision_text():
     if not checked:
         pytest.skip("33703 沒有雇主欄位核對值")
     for k, v in checked.items():
-        assert f[k] == v, k
+        assert getattr(f.values, k) == v, k

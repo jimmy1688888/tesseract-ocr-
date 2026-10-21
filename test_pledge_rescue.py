@@ -21,6 +21,7 @@ import pytest
 import employer_extract as ee
 from contract_template import Template
 from employer_extract import _pledge_name
+from employer_result import EmployerExtraction, EmployerValues, ExtractionStatus, Source
 
 # 32572 實況:中英分行
 _TWO_LINE = ("perihal No. IV ini. 中華民國雇主:張鈺珠 "
@@ -158,41 +159,39 @@ class TestRescueFromPledge:
 class TestApplyRescue:
     """填值與疑慮措辭。"""
 
-    def _fields(self, cn="", en="JIANG SIN AN"):
-        f = dict(ee._EMPTY_FIELDS)
-        f["雇主名稱_中"], f["雇主名稱_英"] = cn, en
-        f["疑慮"] = ee._doubts("雇主名稱_中", ee._name_doubt(cn, en))
-        f["疑慮標示"] = ee.compose_doubts(f["疑慮"])
-        return f
+    def _fields(self, cn="", en="JIANG SIN AN", template=Template.家庭類):
+        return EmployerExtraction(
+            ExtractionStatus.擷取成功, EmployerValues(雇主名稱_中=cn, 雇主名稱_英=en),
+            ee._doubts("雇主名稱_中", ee._name_doubt(cn, en)), Source(template))
 
     def test_rescued_name_is_written_and_flagged(self, monkeypatch):
         monkeypatch.setattr(ee, "rescue_name_from_pledge",
                             lambda p, client=None: ("姜信安", "image5.jpeg"))
         f = self._fields()
-        assert f["疑慮標示"] == "H:未擷取到中文名"
-        ee._apply_pledge_rescue(f, "x.docx")
-        assert f["雇主名稱_中"] == "姜信安"
-        assert "H:中文名取自切結書頁(image5.jpeg)" in f["疑慮標示"]
-        assert "未擷取到" not in f["疑慮標示"]      # 已經擷取到了,那句話變成假的
+        assert f.疑慮標示 == "H:未擷取到中文名"
+        f = ee._apply_pledge_rescue(f, "x.docx")
+        assert f.values.雇主名稱_中 == "姜信安"
+        assert "H:中文名取自切結書頁(image5.jpeg)" in f.疑慮標示
+        assert "未擷取到" not in f.疑慮標示      # 已經擷取到了,那句話變成假的
 
     def test_count_check_still_runs_on_the_rescued_name(self, monkeypatch):
         """救回來的名字仍要過字數/音節數檢查——換來源不等於免檢。"""
         monkeypatch.setattr(ee, "rescue_name_from_pledge",
                             lambda p, client=None: ("信安", "image5.jpeg"))
         f = self._fields()
-        ee._apply_pledge_rescue(f, "x.docx")
-        assert "取自切結書頁" in f["疑慮標示"]
-        assert "2 字與英譯 3 音節不符" in f["疑慮標示"]
+        f = ee._apply_pledge_rescue(f, "x.docx")
+        assert "取自切結書頁" in f.疑慮標示
+        assert "2 字與英譯 3 音節不符" in f.疑慮標示
 
     def test_rescued_company_name_skips_count_check_on_factory_template(self, monkeypatch):
         """工廠類樣板救回的是公司名:跟契約頁一樣看樣板跳過檢查(ADR-0010)。"""
         monkeypatch.setattr(ee, "rescue_name_from_pledge",
                             lambda p, client=None: ("大明金屬股份有限公司", "image5.jpeg"))
-        f = self._fields(en="DA MING METAL CORPORATION (WANG, DA-MING)")
-        f["契約樣板"] = Template.工廠類
-        ee._apply_pledge_rescue(f, "x.docx")
-        assert "取自切結書頁" in f["疑慮標示"]
-        assert "音節" not in f["疑慮標示"]
+        f = self._fields(en="DA MING METAL CORPORATION (WANG, DA-MING)",
+                         template=Template.工廠類)
+        f = ee._apply_pledge_rescue(f, "x.docx")
+        assert "取自切結書頁" in f.疑慮標示
+        assert "音節" not in f.疑慮標示
 
     def test_failed_rescue_changes_nothing(self, monkeypatch):
         """救不回來時 H 欄維持空、L 欄維持「未擷取到」。
@@ -203,9 +202,9 @@ class TestApplyRescue:
         monkeypatch.setattr(ee, "rescue_name_from_pledge",
                             lambda p, client=None: ("", ""))
         f = self._fields()
-        ee._apply_pledge_rescue(f, "x.docx")
-        assert f["雇主名稱_中"] == ""
-        assert f["疑慮標示"] == "H:未擷取到中文名"
+        f = ee._apply_pledge_rescue(f, "x.docx")
+        assert f.values.雇主名稱_中 == ""
+        assert f.疑慮標示 == "H:未擷取到中文名"
 
     def test_english_name_is_never_overwritten(self, monkeypatch):
         """只救中文名。切結書頁的英文反而讀壞過(32503 讀成 FU BIN ANI FU),
@@ -213,8 +212,8 @@ class TestApplyRescue:
         monkeypatch.setattr(ee, "rescue_name_from_pledge",
                             lambda p, client=None: ("姜信安", "image5.jpeg"))
         f = self._fields(en="JIANG SIN AN")
-        ee._apply_pledge_rescue(f, "x.docx")
-        assert f["雇主名稱_英"] == "JIANG SIN AN"
+        f = ee._apply_pledge_rescue(f, "x.docx")
+        assert f.values.雇主名稱_英 == "JIANG SIN AN"
 
     def test_rescue_only_fires_when_chinese_name_is_missing(self, monkeypatch,
                                                             tmp_path):
