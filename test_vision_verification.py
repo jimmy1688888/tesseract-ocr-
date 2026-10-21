@@ -114,7 +114,7 @@ class TestRealVisionReplay:
         import pipeline
         import real_samples as rs
         texts = rs.permit_vision_texts()
-        vision_items, _, _ = pipeline.build_vision_queue(rs.permit_scan_csv())
+        vision_items, _, _, _ = pipeline.build_vision_queue(rs.permit_scan_csv())
         items = [i for i in vision_items if Path(i.img_path).name in texts]
         # 存過 Vision 全文的截圖,就是當初送 Vision 的那幾張:不在佇列裡是送審決策變了,不是缺素材。
         assert sorted(Path(i.img_path).name for i in items) == sorted(texts)

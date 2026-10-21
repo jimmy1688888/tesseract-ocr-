@@ -213,7 +213,7 @@ def test_queue_has_one_item_per_docx(tmp_path):
         w.writeheader()
         w.writerow(_permit("image5.jpeg", "1234", 52, partial=True).to_csv_row())
         w.writerow(_permit("image6.jpeg", "1284", 60, partial=True).to_csv_row())
-    vision, manual, keyin = pipeline.build_vision_queue(p)
+    vision, manual, keyin, _ = pipeline.build_vision_queue(p)
     assert [(i.source_docx, i.image_name) for i in vision + keyin] == [("a.docx", "image6.jpeg")]
     assert manual == []
 
@@ -228,5 +228,5 @@ def test_queue_items_carry_the_crop_roi(tmp_path):
         w = csv.DictWriter(f, fieldnames=pipeline.CSV_FIELDS)
         w.writeheader()
         w.writerow(_permit("image5.jpeg", "1234", 60, partial=True).to_csv_row())
-    vision, manual, keyin = pipeline.build_vision_queue(p)
+    vision, manual, keyin, _ = pipeline.build_vision_queue(p)
     assert [i.hit_roi for i in vision] == ["permit_lower"]

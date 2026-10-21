@@ -55,6 +55,7 @@ import time
 import logging
 import argparse
 import functools
+import zipfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, asdict, replace
 from enum import Enum
@@ -220,6 +221,9 @@ class ResultStatus(str, Enum):
     LARGE_NO_HIT   = "large_no_hit"     # large docx 全部圖片都沒命中
     SMALL_NO_HIT   = "small_no_hit"     # small docx 全部圖片都沒命中
     PERMIT_PARTIAL = "permit_partial"   # permit 有部分命中但無多數票
+    # docx 本身讀不到圖(#47):沒有可掃的東西,佔位列是它在 matches.csv 的唯一代表
+    NO_IMAGES      = "no_images"        # 0 張可讀內嵌圖(沒有 word/media,或只有 .emf 之類)
+    UNREADABLE     = "unreadable_docx"  # 打不開(不是有效的 zip)
 
 
 class SheetStatus(str, Enum):
@@ -488,6 +492,17 @@ def _is_retryable_google_error(exc: BaseException) -> bool:
 def classify_by_count(image_count: int) -> str:
     """依圖片數量回傳 'small' 或 'large'。"""
     return "small" if image_count <= SMALL_DOCX_THRESHOLD else "large"
+
+
+def read_docx_images(docx_path: Path) -> list[tuple[str, bytes]] | None:
+    """docx 的內嵌圖;打不開(不是有效的 zip)回傳 None,不拋。
+
+    一份壞檔不能讓整批中斷(#47):它照樣要在 matches.csv 與 Sheets 各有一列。
+    """
+    try:
+        return docx_images.read_images(docx_path)
+    except zipfile.BadZipFile:
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -966,13 +981,15 @@ def aggregate_small_docx(results: list[ScanResult]) -> list[ScanResult]:
 # ⑦ 送審決策（每份 docx 一個決定，見 submission_decision）
 # ═══════════════════════════════════════════════════════════════════════════
 
-def build_vision_queue(csv_path: Path) -> tuple[list[VisionQueueItem], list[dict], list[VisionQueueItem]]:
+def build_vision_queue(csv_path: Path) -> tuple[
+        list[VisionQueueItem], list[dict], list[VisionQueueItem], list[dict]]:
     """
-    讀取 matches.csv,每份 docx 做一個送審決策(submission_decision.decide),分成三類回傳:
+    讀取 matches.csv,每份 docx 做一個送審決策(submission_decision.decide),分成四類回傳:
       vision_items  : 送 Google Vision 的 VisionQueueItem;反查救援的「單一判讀低信心」也在這
                       (no_vote_rescue=True,主流程略過 ROI Vision、改走次頁反查)
       manual_review : 全無命中(要走反查救援),每筆為 {"source_docx": ..., "reason": ...}
       keyin_items   : 直接 key-in 的 VisionQueueItem(direct_keyin=True)
+      direct_review : docx 讀不到圖、直接人工審查(不送 Vision、不反查),格式同 manual_review
 
     一份 docx 只有一個決定(一份契約只有一個許可證,Sheets 上只有一列)。
     """
@@ -985,9 +1002,13 @@ def build_vision_queue(csv_path: Path) -> tuple[list[VisionQueueItem], list[dict
     vision_items: list[VisionQueueItem] = []
     keyin_items:  list[VisionQueueItem] = []
     manual_review: list[dict]           = []
+    direct_review: list[dict]           = []
 
     for docx_name, rows in sorted(groups.items()):
         d = decide(rows)
+        if d.destination is Destination.直接人工審查:
+            direct_review.append({"source_docx": docx_name, "reason": d.reason})
+            continue
         if d.destination is Destination.反查救援 and not d.image_name:
             manual_review.append({"source_docx": docx_name, "reason": d.reason})
             continue
@@ -1004,7 +1025,7 @@ def build_vision_queue(csv_path: Path) -> tuple[list[VisionQueueItem], list[dict
         )
         (keyin_items if item.direct_keyin else vision_items).append(item)
 
-    return vision_items, manual_review, keyin_items
+    return vision_items, manual_review, keyin_items, direct_review
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1529,7 +1550,22 @@ def run_scan(batch: Batch, image_filter: str = "",
         writer.writeheader()
 
         for docx_path in batch.docx_files:
-            all_images = docx_images.read_images(docx_path)
+            all_images = read_docx_images(docx_path)
+            # 讀不到圖:沒東西可掃,寫一列佔位列(比照 large 全無命中),送審決策
+            # 直接人工審查。沒有這列,它在 matches.csv 與 Sheets 上都不存在(#47)。
+            if not all_images:
+                placeholder = _empty_result(docx_path.name, "", "")
+                placeholder.manual_review = True
+                if all_images is None:
+                    placeholder.status = ResultStatus.UNREADABLE
+                    placeholder.note   = "docx 無法開啟"
+                else:
+                    placeholder.status = ResultStatus.NO_IMAGES
+                    placeholder.note   = "docx 無可讀的內嵌圖"
+                writer.writerow(placeholder.to_csv_row())
+                logger.warning(f"  ⚠ {docx_path.name} {placeholder.note} → 直接人工審查")
+                continue
+
             # docx_class 一律用「原始張數」判定，必須在任何過濾之前算：把過濾後
             # 的張數丟進 classify_by_count，5 張圖的 docx 剩 3 張就會被判成
             # small，整份改走 mol-only 的另一條路（ADR-0005）。
@@ -1862,6 +1898,18 @@ def run_preflight(batch: Batch) -> bool:
     return passed
 
 
+def _image_filter_miss(docx_files: list[Path], image: str) -> str | None:
+    """--image 在哪份 docx 對不到圖就說,連同那份有哪些圖檔名;全對得到回傳 None。"""
+    for dp in docx_files:
+        imgs = read_docx_images(dp)
+        if imgs is None:
+            return f"找不到圖檔 {image!r}({dp.name} 無法開啟)"
+        names = [n for n, _ in imgs]
+        if image not in names:
+            return f"找不到圖檔 {image!r}({dp.name} 內含:{names})"
+    return None
+
+
 def main(opts: argparse.Namespace) -> None:
     """主流程。接收已解析的 CLI options，不再依賴 module-level 全域變數。"""
     # 一批:這次要掃哪些 docx。指定 --file 時就是那一份,不看 ./docs。
@@ -1889,8 +1937,21 @@ def main(opts: argparse.Namespace) -> None:
     # ── 步驟 1：prefilter（已在 scan 內呼叫 classify_by_count，此處記錄摘要）
     logger.info("── 步驟 1：prefilter 分類 ──")
     for dp in docx_files:
-        imgs = docx_images.read_images(dp)
-        logger.info(f"  {dp.name}: {len(imgs)} 張 → {classify_by_count(len(imgs))}")
+        imgs = read_docx_images(dp)
+        if imgs is None:
+            logger.info(f"  {dp.name}: 無法開啟 → 直接人工審查")
+        elif not imgs:
+            logger.info(f"  {dp.name}: 0 張可讀圖 → 直接人工審查")
+        else:
+            logger.info(f"  {dp.name}: {len(imgs)} 張 → {classify_by_count(len(imgs))}")
+
+    # --image 只在單檔除錯用:對不到就是指令打錯,直接結束 —— 不寫 Sheets、不跑雇主
+    # 擷取(那要花 Vision),不套用上面「每份 docx 一列」的規則。
+    if opts.image:
+        missing = _image_filter_miss(docx_files, opts.image)
+        if missing:
+            logger.error(missing)
+            return
 
     # ── 步驟 2：scan → matches.csv ─────────────────────────────────────────
     logger.info("── 步驟 2：Tesseract 掃描 ──")
@@ -1900,10 +1961,11 @@ def main(opts: argparse.Namespace) -> None:
 
     # ── 步驟 3：vision_submit 分流 ─────────────────────────────────────────
     logger.info("── 步驟 3：vision_submit 分流 ──")
-    vision_items, manual_review, keyin_items = build_vision_queue(csv_path)
+    vision_items, manual_review, keyin_items, direct_review = build_vision_queue(csv_path)
     logger.info(f"  直接 key-in：{len(keyin_items)} 筆")
     logger.info(f"  送 Vision  ：{len(vision_items)} 筆")
     logger.info(f"  人工審查   ：{len(manual_review)} 件")
+    logger.info(f"  直接人工審查(讀不到圖):{len(direct_review)} 件")
 
     # ── 步驟 4a：送 Google Vision + 三層交叉比對 ──────────────────────────
     # 雙引擎(Tesseract + Vision)完全一致才自動 key-in;其餘進人工審查批次。
@@ -1922,7 +1984,7 @@ def main(opts: argparse.Namespace) -> None:
     # ── 步驟 4b：統一寫入 Google Sheets ────────────────────────────────────
     # 簡化為兩個 status,理由欄(reason)負責歸因:
     #   KEYED_IN      = Tesseract 直接 key-in(高信心)  +  Vision-CONFIRMED(雙引擎一致)
-    #   MANUAL_REVIEW = Vision 交叉比對失敗(各種不一致)  +  全無命中
+    #   MANUAL_REVIEW = Vision 交叉比對失敗(各種不一致)  +  全無命中  +  讀不到圖(#47)
     #
     # 設計動機:自動 vs 人工的二分讓使用者只需依 status 篩選即可知道「哪些要看」。
     # 每列來源(Tesseract 直接 / Vision 確認 / 差 1 字元 / 僅 Vision / 無命中)
@@ -1960,7 +2022,7 @@ def main(opts: argparse.Namespace) -> None:
          "candidate_value": d.get("final_value", ""),
          "reason": d["reason"]}
         for d in manual_review
-    ]
+    ] + direct_review      # 讀不到圖:B 空,D 是事實;E~G 跟著空
     written = write_sheets_batched([
         (auto_keyin_rows, SheetStatus.KEYED_IN),
         (review_rows,     SheetStatus.MANUAL_REVIEW),
@@ -1970,7 +2032,8 @@ def main(opts: argparse.Namespace) -> None:
         f"(其中 Tesseract 直接 {len(keyin_items)} 筆 + Vision 確認 {len(vision_auto_keyin)} 筆) "
         f"/ manual_review={len(review_rows)} 筆"
         f"(其中 Vision 交叉比對失敗 {len(vision_review_rows)} 筆 "
-        f"+ 單一判讀電話反查 {len(novote_rescue)} 筆 + 全無命中 {len(manual_review)} 件)"
+        f"+ 單一判讀電話反查 {len(novote_rescue)} 筆 + 全無命中 {len(manual_review)} 件 "
+        f"+ 讀不到圖 {len(direct_review)} 件)"
         f"(實際寫入 Sheets:{written} 筆)"
     )
 

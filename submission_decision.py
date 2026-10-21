@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """送審決策:一份 docx 的許可證掃描結果 → 一個決定(CONTEXT.md「送審決策」,#40)。
 
-去向三選一:直接 key-in／送 Vision／反查救援。人工審查不是去向,是送 Vision 或反查
-救援之後的結果。以 docx 為單位(一份契約只有一個許可證,Sheets 上只有一列);舊做法
+去向四選一:直接 key-in／送 Vision／反查救援／直接人工審查。人工審查通常不是去向,
+是送 Vision 或反查救援之後的結果;只有 docx 本身讀不到圖時直接人工審查(#47)——
+沒有圖,Vision 與反查救援都無從做起。以 docx 為單位(一份契約只有一個許可證,Sheets 上只有一列);舊做法
 逐圖決定,同一份 docx 會進佇列多次。
 
 多數票判斷與各信心門檻只記在這裡:停止擴掃(ADR-0005)與規則 A2 用同一個
@@ -35,11 +36,18 @@ _LARGE_NO_HIT = "large_no_hit"
 _SMALL_NO_HIT = "small_no_hit"
 _PERMIT_PARTIAL = "permit_partial"
 
+# docx 本身讀不到圖(#47)→ Sheets D 欄。只講事實。
+_NO_IMAGE_REASONS = {
+    "no_images":       "docx 無可讀的內嵌圖(word/media 底下沒有 png/jpg/bmp/tif/gif)",
+    "unreadable_docx": "docx 無法開啟(不是有效的 docx 檔)",
+}
+
 
 class Destination(str, Enum):
     直接KEYIN = "直接key-in"
     送VISION  = "送Vision"
     反查救援  = "反查救援"
+    直接人工審查 = "直接人工審查"
 
 
 @dataclass(frozen=True)
@@ -96,6 +104,10 @@ def _earliest(rows):
 
 def decide(rows: list[ScanResult]) -> Decision:
     """一份 docx 的所有掃描結果 → 一個送審決策。"""
+    # 比 ==,不查 dict:str Enum 的 hash 跟著成員名,不是值
+    why = next((w for st, w in _NO_IMAGE_REASONS.items() if rows[0].status == st), None)
+    if why:
+        return Decision(rows[0].source_docx, Destination.直接人工審查, "", 0.0, "", "", "", why)
     if rows[0].docx_class == "large":
         return _decide_large(rows)
     return _decide_small(rows)
