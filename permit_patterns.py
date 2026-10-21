@@ -4,28 +4,38 @@
 兩個引擎讀到同樣的字,就必須取出同樣的號碼 —— 雙引擎交叉比對比的是「讀到的字」,
 不該混進「兩邊取號規則不同」的差異。permit_lower 的 pattern 第一條冒號可省略
 (切結書最後一頁的簽署欄常寫成「No. Izin 1234」),所以取號要看截圖屬於哪個 ROI。
+
+#42:Vision 會把 `No ijin` 讀成 `No jin`,所以第 1 條 `No` 後的 i 可有可無(要有 `No`
+錨點;第 3 條無錨點,不放寬)。第 5 條認中文標籤「許可證號」,排最後、不改既有 id_layer;
+Tesseract 讀不到中文,對它沒有作用。同頁同位置,不算額外的獨立證據。
 """
 import re
 
+# 冒號:半形 `:`、全形 `：`、小型 `﹕`、比例 `∶`。permit 與 mol 全部共用這一份。
+_COLON = "[:：﹕∶]"
+_VALUE = r"(\d{4}(?:-\d)?)(?!\d)"   # 4 位數,可帶分公司後綴(1234-2)
+
+# 第 5 條:中文標籤,冒號可省略。
+_RE_CHINESE_LABEL = re.compile(rf"許可證[號号]\s*{_COLON}?\s*{_VALUE}")
+
 RE_PERMIT_ID_LIST = [
-    re.compile(r"No\.?\s*i[zjl1]in\s*[:::﹕]\s*(?:NO\.)?(\d{4}(?:-\d)?)(?!\d)", re.IGNORECASE),
-    re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]\s*(?:NO\.)?(\d{4}(?:-\d)?)(?!\d)",       re.IGNORECASE),
-    re.compile(r"\bi[zjl1]in\s*[:::﹕]\s*(?:NO\.)?(\d{4}(?:-\d)?)(?!\d)",         re.IGNORECASE),
-    re.compile(r"\bNO\.(\d{4}(?:-\d)?)(?!\d)",                                    re.IGNORECASE),
+    re.compile(rf"No\.?\s*i?[zjl1]in\s*{_COLON}\s*(?:NO\.)?{_VALUE}", re.IGNORECASE),
+    re.compile(rf"[Nn]\w{{0,5}}n\s*{_COLON}\s*(?:NO\.)?{_VALUE}",     re.IGNORECASE),
+    re.compile(rf"\bi[zjl1]in\s*{_COLON}\s*(?:NO\.)?{_VALUE}",        re.IGNORECASE),
+    re.compile(rf"\bNO\.{_VALUE}",                                    re.IGNORECASE),
+    _RE_CHINESE_LABEL,
 ]
 
 RE_PERMIT_ID_LIST_LOWER = [
-    re.compile(r"No\.?\s*i[zjl1]in\s*[:::﹕]?\s*(?:NO\.)?(\d{4}(?:-\d)?)(?!\d)", re.IGNORECASE),
-    re.compile(r"[Nn]\w{0,5}n\s*[:::﹕]\s*(?:NO\.)?(\d{4}(?:-\d)?)(?!\d)",        re.IGNORECASE),
-    re.compile(r"\bi[zjl1]in\s*[:::﹕]\s*(?:NO\.)?(\d{4}(?:-\d)?)(?!\d)",          re.IGNORECASE),
-    re.compile(r"\bNO\.(\d{4}(?:-\d)?)(?!\d)",                                     re.IGNORECASE),
+    re.compile(rf"No\.?\s*i?[zjl1]in\s*{_COLON}?\s*(?:NO\.)?{_VALUE}", re.IGNORECASE),
+    *RE_PERMIT_ID_LIST[1:],
 ]
 
 RE_MOL_LIST = [
-    re.compile(r"Agency'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:::]\s*(\d{4}(?:-\d)?)(?!\d)", re.IGNORECASE),
-    re.compile(r"A\w{3,6}'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*[:::]\s*(\d{4}(?:-\d)?)(?!\d)", re.IGNORECASE),
-    re.compile(r"(?:Num\s*ber|umber|[Nn]amber)\s*[:::]\s*(\d{4}(?:-\d)?)(?!\d)", re.IGNORECASE),
-    re.compile(r"M[O0]L\D{0,30}(\d{4}(?:-\d)?)(?!\d)", re.IGNORECASE),
+    re.compile(rf"Agency'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*{_COLON}\s*{_VALUE}", re.IGNORECASE),
+    re.compile(rf"A\w{{3,6}}'?s?\s+M[O0]L?\s+(?:L[i1I])?[i]?cense\s+Num\s*ber\s*{_COLON}\s*{_VALUE}", re.IGNORECASE),
+    re.compile(rf"(?:Num\s*ber|umber|[Nn]amber)\s*{_COLON}\s*{_VALUE}", re.IGNORECASE),
+    re.compile(rf"M[O0]L\D{{0,30}}{_VALUE}", re.IGNORECASE),
 ]
 
 

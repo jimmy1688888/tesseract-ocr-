@@ -102,3 +102,29 @@ class TestOneRowPerItem:
         upper, _, _ = run_vision_items([_item(tmp_path, roi="permit_upper")], set(),
                                        read_text=lambda p: "No. Izin 1234")
         assert len(lower) == 1 and upper == []
+
+
+class TestRealVisionReplay:
+    """真實 Vision 全文離線重放(#42):30768/30770 的截圖寫 `No ijin`,Vision 讀成 `No jin`;
+    兩個引擎讀到同一個號碼,就該自動 key-in,值等於許可證核對值。素材不在就 skip。"""
+
+    def test_replayed_vision_texts_key_in_the_checked_permit(self):
+        from pathlib import Path
+
+        import pipeline
+        import real_samples as rs
+        texts = rs.permit_vision_texts()
+        vision_items, _, _ = pipeline.build_vision_queue(rs.permit_scan_csv())
+        items = [i for i in vision_items if Path(i.img_path).name in texts]
+        # 存過 Vision 全文的截圖,就是當初送 Vision 的那幾張:不在佇列裡是送審決策變了,不是缺素材。
+        assert sorted(Path(i.img_path).name for i in items) == sorted(texts)
+        if not all(Path(i.img_path).exists() for i in items):
+            pytest.skip("送 Vision 的截圖不在 samples/permit_scan/permit_crops")
+
+        auto, review, rescue = run_vision_items(
+            items, known_permits=set(), read_text=lambda p: texts[Path(p).name])
+
+        assert review == [] and rescue == []
+        got = {Path(r["source_docx"]).stem: r["candidate_value"] for r in auto}
+        assert got == {stem: rs.checked_permit(stem) for stem in got}
+        assert len(got) == len(texts)

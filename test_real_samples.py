@@ -104,6 +104,36 @@ class TestVisionTexts:
             rs.employer_text("33701")
 
 
+class TestPermitVision:
+    """送 Vision 的許可證截圖全文與許可證核對值(#42)。"""
+
+    def test_permit_vision_texts_by_crop(self, corpus):
+        _write_json(corpus / "permit_scan" / "vision_texts.json",
+                    {"30768_image5": {"crop": "30768_image5.png", "roi": "permit_lower",
+                                      "text": "No jin:1234"}})
+        assert _no_skip(rs.permit_vision_texts) == {"30768_image5.png": "No jin:1234"}
+
+    def test_missing_permit_vision_texts_skips(self, corpus):
+        with pytest.raises(pytest.skip.Exception):
+            rs.permit_vision_texts()
+
+    def test_permit_scan_csv(self, corpus):
+        p = corpus / "permit_scan" / "matches.csv"
+        p.parent.mkdir(parents=True)
+        p.write_text("source_docx\n", encoding="utf-8")
+        assert _no_skip(rs.permit_scan_csv) == p
+
+    def test_missing_permit_scan_csv_skips(self, corpus):
+        with pytest.raises(pytest.skip.Exception):
+            rs.permit_scan_csv()
+
+    def test_checked_permit(self, corpus):
+        _write_json(corpus / "checked_values.json",
+                    {"30768": {"許可證": "0567"}, "33701": {"契約頁": "image2.png"}})
+        assert rs.checked_permit("30768") == "0567"
+        assert rs.checked_permit("33701") is None
+
+
 class TestLegacyFiles:
 
     def test_old_matches_csv_lives_in_samples(self, corpus):

@@ -36,6 +36,10 @@ def _vision() -> Path:
     return ROOT / "vision"
 
 
+def _permit_scan() -> Path:
+    return ROOT / "permit_scan"
+
+
 def _checked_file() -> Path:
     return ROOT / "checked_values.json"
 
@@ -119,6 +123,11 @@ def checked_template(stem: str) -> str | None:
     return _checked_all().get(stem, {}).get("契約樣板")
 
 
+def checked_permit(stem: str) -> str | None:
+    """人看圖確認過的許可證號;沒有核對值就是 None。"""
+    return _checked_all().get(stem, {}).get("許可證")
+
+
 def checked_employer_fields(stem: str) -> dict[str, str]:
     """人確認過的雇主欄位(可能只有部分欄);沒有就是空 dict。"""
     return dict(_checked_all().get(stem, {}).get("雇主欄位", {}))
@@ -144,10 +153,27 @@ def old_matches_csv() -> Path:
     return p
 
 
+def permit_vision_texts() -> dict[str, str]:
+    """送 Vision 的許可證截圖打過一次 Vision 的全文 {截圖檔名: 全文};不在就 skip。"""
+    p = _permit_scan() / "vision_texts.json"
+    if not p.exists():
+        pytest.skip("沒有 samples/permit_scan/vision_texts.json")
+    data = json.loads(p.read_text(encoding="utf-8"))
+    return {v["crop"]: v["text"] for v in data.values()}
+
+
+def permit_scan_csv() -> Path:
+    """新素材本機掃出的 matches.csv;不在就 skip。"""
+    p = _permit_scan() / "matches.csv"
+    if not p.exists():
+        pytest.skip("沒有 samples/permit_scan/matches.csv")
+    return p
+
+
 def permit_scans() -> list[Path]:
     """真實素材的許可證掃描結果(matches.csv):舊 21 份 + 新素材本機掃出的;沒有就空清單。"""
     candidates = (ROOT / "legacy" / "matches.21份.backup.csv",
-                  ROOT / "permit_scan" / "matches.csv")
+                  _permit_scan() / "matches.csv")
     return [p for p in candidates if p.exists()]
 
 
