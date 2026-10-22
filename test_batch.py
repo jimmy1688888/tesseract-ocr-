@@ -86,7 +86,6 @@ class TestOutputPaths:
         b = Batch.from_dir(tmp_path)
         assert b.output_dir == Path("scan_results")
         assert b.matches_csv == Path("scan_results/matches.csv")
-        assert b.upload_log == Path("scan_results/upload_log.csv")
         assert b.employer_crop_dir == Path("scan_results/employer_crops")
         assert b.employer_texts_json == Path("scan_results/employer_texts.json")
         assert b.doubt_report_csv == Path("scan_results/address_doubts.csv")
@@ -98,7 +97,7 @@ class TestOutputPaths:
 
     def test_derived_paths_follow_output_dir(self, tmp_path):
         b = Batch.from_dir(tmp_path, output_dir=tmp_path / "out")
-        for p in (b.matches_csv, b.upload_log, b.employer_crop_dir,
+        for p in (b.matches_csv, b.employer_crop_dir,
                   b.employer_texts_json, b.doubt_report_csv, b.no_hit_review_dir):
             assert p.parent == tmp_path / "out"
 

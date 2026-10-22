@@ -1083,74 +1083,9 @@ def vision_text(img_path: str) -> str:
     return response.full_text_annotation.text if response.full_text_annotation else ""
 
 
-def load_known_permits_from_log(log_path: Path) -> set[str]:
-    """從 upload_log.csv 累積歷史成功值,建立「軟版已知清單」。
-
-    用途:作為交叉比對的補充證據。歷史上出現過的 permit id 比從未出現過的可信度高。
-    與決策直接綁定的是 should_keyin 旗標,本清單僅影響 rationale 文字,
-    用來告訴審查者「這個值在歷史紀錄裡出現過,可優先處理」。
-
-    log_path 是這一批的 Batch.upload_log。
-    回傳:已知 permit value 的集合;檔案不存在或為空時回傳空集合。
-    """
-    if not log_path.exists():
-        return set()
-    known: set[str] = set()
-    try:
-        with open(log_path, encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                v = (row.get("final_value") or "").strip()
-                if v:
-                    known.add(v)
-    except Exception as e:
-        logger.warning(f"讀取 upload_log.csv 失敗(將視為空清單):{e!r}")
-    return known
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # ⑨ Google Sheets key-in
 # ═══════════════════════════════════════════════════════════════════════════
-
-def _load_upload_log(log_path: Path) -> set[tuple[str, str]]:
-    """讀取本地上傳日誌，回傳已寫入過的 (source_docx, status) 集合。
-
-    用途：若上一次 pipeline 跑到一半失敗、或意外重跑，可避免相同資料重複寫入 Sheets。
-    這是「Sheets 沒有原生 idempotency」的本地補強；不是百分百可靠
-    （例如 API 已寫入但回應遺失的極端情境仍可能漏記）。
-
-    向後相容:過去版本曾用 SheetStatus.VISION 寫入 Vision-CONFIRMED 列。
-    本版改為把 Vision-CONFIRMED 視為 KEYED_IN(自動寫入的一種)。
-    為了讓舊 log 仍能正確 dedup,讀取時把 "vision" 正規化為 "keyed_in"。
-    """
-    if not log_path.exists():
-        return set()
-    done: set[tuple[str, str]] = set()
-    try:
-        with open(log_path, encoding="utf-8-sig") as f:
-            for r in csv.DictReader(f):
-                docx = r.get("source_docx", "")
-                status = r.get("status", "")
-                # 向後相容:舊版的 "vision" 等同新版的 "keyed_in"
-                if status == SheetStatus.VISION.value:
-                    status = SheetStatus.KEYED_IN.value
-                done.add((docx, status))
-    except Exception as e:
-        logger.warning(f"讀取上傳日誌失敗（將視為空集合）：{e!r}")
-    return done
-
-
-def _append_upload_log(log_path: Path, rows: list[list[str]]) -> None:
-    """成功寫入 Sheets 之後，把已上傳的列追加到本地 upload_log.csv 作為審計與重跑保險。"""
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not log_path.exists()
-    ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    with open(log_path, "a", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        if write_header:
-            w.writerow(["timestamp", "source_docx", "final_value", "status", "reason"])
-        for row in rows:
-            w.writerow([ts, *row])
-
 
 @with_retry(
     max_attempts=5,
@@ -1486,8 +1421,7 @@ def write_sheets_batched(row_groups: list[tuple[list, SheetStatus]],
         _sheets_append_atomic(values)
     except Exception as e:
         # batch atomic 的好處：失敗 = 完全沒寫入，可直接重跑 pipeline，不會有部份污染。
-        # 注意極端例外：API 已寫入但回應遺失 → 重跑會產生重複；可手動以 upload_log.csv 或
-        # Sheets 內容比對排查。
+        # 注意極端例外：API 已寫入但回應遺失 → 重跑會產生重複；可手動比對 Sheets 內容排查。
         logger.error(
             f"❌ Sheets 批次寫入失敗（{len(values)} 筆未寫入）：{e!r}\n"
             f"   由於是單次 atomic append，Sheets 端應未寫入任何資料；"
@@ -1982,19 +1916,15 @@ def main(opts: argparse.Namespace) -> None:
     logger.info(f"  人工審查   ：{len(manual_review)} 件")
     logger.info(f"  直接人工審查(讀不到圖):{len(direct_review)} 件")
 
-    # ── 步驟 4a：送 Google Vision + 三層交叉比對 ──────────────────────────
-    # 雙引擎(Tesseract + Vision)完全一致才自動 key-in;其餘進人工審查批次。
-    # 即便 Vision 值在已知清單內,只要與 Tesseract 不完全一致,仍標為人工審查,
+    # ── 步驟 4a：送 Google Vision + 交叉比對 ──────────────────────────
+    # 雙引擎(Tesseract + Vision)完全一致才自動 key-in;其餘進人工審查批次,
     # 避免任何單一 OCR 引擎的判讀直接決定資料寫入。
     #
     # 額外規則(LIKELY_OCR_CONFUSION):兩引擎差 1 字元時,不自動填任何值,
     # 一律標人工審查、由人工輸入(兩候選與信心寫進 reason 供參考)。
     logger.info("── 步驟 4a：Google Vision 判讀 + 交叉比對 ──")
-    known_permits = load_known_permits_from_log(batch.upload_log)
-    logger.info(f"  載入已知清單(來自 upload_log.csv):{len(known_permits)} 筆")
-
     vision_auto_keyin, vision_review_rows, novote_rescue = run_vision_items(
-        vision_items, known_permits, read_text=vision_text)
+        vision_items, read_text=vision_text)
 
     # ── 步驟 4b：統一寫入 Google Sheets ────────────────────────────────────
     # 簡化為兩個 status,理由欄(reason)負責歸因:

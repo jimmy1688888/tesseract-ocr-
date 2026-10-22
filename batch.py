@@ -47,11 +47,6 @@ class Batch:
         return self.output_dir / "matches.csv"
 
     @property
-    def upload_log(self) -> Path:
-        """已寫入 Sheets 的列,本地審計紀錄;也是「已知許可證清單」的來源。"""
-        return self.output_dir / "upload_log.csv"
-
-    @property
     def employer_crop_dir(self) -> Path:
         """雇主 ROI 截圖(去紅章前的契約頁裁切),供人工複查 H~O 欄。"""
         return self.output_dir / "employer_crops"

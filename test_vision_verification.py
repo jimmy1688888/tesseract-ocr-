@@ -74,14 +74,14 @@ class TestOneRowPerItem:
     ])
     def test_each_verification_level_lands_in_one_place(self, tmp_path, vision_text, where, b):
         auto, review, rescue = run_vision_items(
-            [_item(tmp_path)], known_permits=set(), read_text=lambda p: vision_text)
+            [_item(tmp_path)], read_text=lambda p: vision_text)
         rows = {"auto": auto, "review": review}[where]
         assert len(rows) == 1 and len(auto) + len(review) + len(rescue) == 1
         assert rows[0]["candidate_value"] == b
 
     def test_vision_only_when_tesseract_had_nothing(self, tmp_path):
         auto, review, _ = run_vision_items(
-            [_item(tmp_path, value="")], known_permits=set(),
+            [_item(tmp_path, value="")],
             read_text=lambda p: "No. Izin 1234")
         assert auto == [] and review[0]["candidate_value"] == "1234"
 
@@ -91,15 +91,15 @@ class TestOneRowPerItem:
                  _item(tmp_path, value="3333", no_vote_rescue=True),
                  _item(tmp_path, value="4444")]
         auto, review, rescue = run_vision_items(
-            items, known_permits=set(), read_text=lambda p: "No. Izin 1234")
+            items, read_text=lambda p: "No. Izin 1234")
         assert len(auto) + len(review) + len(rescue) == len(items)
         assert sorted(r["source_docx"] for r in auto + review + rescue) == ["a.docx"] * 4
 
     def test_roi_decides_the_pattern(self, tmp_path):
         """同一段 Vision 文字,下半部截圖取得出、上半部截圖取不出(依 ROI 選 pattern)。"""
-        lower, _, _ = run_vision_items([_item(tmp_path, roi="permit_lower")], set(),
+        lower, _, _ = run_vision_items([_item(tmp_path, roi="permit_lower")],
                                        read_text=lambda p: "No. Izin 1234")
-        upper, _, _ = run_vision_items([_item(tmp_path, roi="permit_upper")], set(),
+        upper, _, _ = run_vision_items([_item(tmp_path, roi="permit_upper")],
                                        read_text=lambda p: "No. Izin 1234")
         assert len(lower) == 1 and upper == []
 
@@ -122,7 +122,7 @@ class TestRealVisionReplay:
             pytest.skip("送 Vision 的截圖不在最新的某日掃描 samples/permit_scan/<日期>/permit_crops")
 
         auto, review, rescue = run_vision_items(
-            items, known_permits=set(), read_text=lambda p: texts[Path(p).name])
+            items, read_text=lambda p: texts[Path(p).name])
 
         assert review == [] and rescue == []
         got = {Path(r["source_docx"]).stem: r["candidate_value"] for r in auto}

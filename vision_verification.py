@@ -26,14 +26,14 @@ __all__ = ["VerificationLevel", "VerifiedResult", "run_vision_items",
            "verify_vision_result"]
 
 
-def run_vision_items(items: list[VisionQueueItem], known_permits: set[str],
+def run_vision_items(items: list[VisionQueueItem],
                      read_text: Callable[[str], str]
                      ) -> tuple[list[dict], list[dict], list[dict]]:
     """送 Vision 那一步:每一筆都分到 (自動寫入, 人工審查, 反查救援) 其中**一處**,絕不丟掉。
 
     read_text 是 Vision client:「截圖路徑 → 全文」(正式流程是 pipeline.vision_text,
     測試換假的)。取號依截圖所屬的 ROI(item.hit_roi),與 Tesseract 同一個函式。
-    雙引擎完全一致才自動寫入;其餘進人工審查(三層交叉比對見 verify_vision_result)。
+    雙引擎完全一致才自動寫入;其餘進人工審查(交叉比對見 verify_vision_result)。
     """
     auto: list[dict] = []        # 雙引擎一致(CONFIRMED) → 自動寫
     review: list[dict] = []      # 任何不一致 → 人工審查
@@ -65,7 +65,6 @@ def run_vision_items(items: list[VisionQueueItem], known_permits: set[str],
         verified = verify_vision_result(
             vision_value=vision_value,
             tesseract_candidate=item.candidate_value,
-            known_permits=known_permits,
             tesseract_conf=item.candidate_conf,
         )
         logger.info(
@@ -86,14 +85,12 @@ def run_vision_items(items: list[VisionQueueItem], known_permits: set[str],
 # ═══════════════════════════════════════════════════════════════════════════
 # ⑧b Vision 結果交叉比對
 # ═══════════════════════════════════════════════════════════════════════════
-# 目的:Vision 自己讀到一個值不代表就對。本層用三組獨立證據交叉驗證:
+# 目的:Vision 自己讀到一個值不代表就對。本層用兩層檢查:
 #   1. 格式驗證 — Vision 值必須是 4 位數(基本 sanity check)
 #   2. 雙引擎交叉 — Vision 值與 Tesseract 原本讀到的值是否一致
-#   3. 已知清單 — 是否在歷史成功 key-in 過的值集合內(來自 upload_log.csv)
 #
 # 設計原則:保守。**只有當 Tesseract 與 Vision 完全一致時才自動 key-in**,
-# 其餘所有情境(包括「Vision 值剛好在已知清單內」)一律標記人工審查。
-# 已知清單僅用於補充 rationale,不會單獨作為自動採用的依據。
+# 其餘所有情境一律標記人工審查。
 
 class VerificationLevel(str, Enum):
     CONFIRMED            = "confirmed"             # 雙引擎完全一致
@@ -105,7 +102,7 @@ class VerificationLevel(str, Enum):
 
 @dataclass
 class VerifiedResult:
-    """三層交叉比對後的決定。
+    """交叉比對後的決定。
 
     should_keyin:是否可自動寫入 Sheets;False 一律進人工審查批次。
     rationale  :給人看的決策理由(會寫到 Sheets 的 reason 欄)。
@@ -114,7 +111,6 @@ class VerifiedResult:
     level: VerificationLevel
     should_keyin: bool
     rationale: str
-    in_known_list: bool = False
 
 
 # 4 位數格式檢查:Vision 回傳的值必須是純 4 位數字才接受,或 4 位數+破折號+1 位數(xxxx-x)。
@@ -156,11 +152,10 @@ def _edit_distance(a: str, b: str) -> int:
 def verify_vision_result(
     vision_value: str,
     tesseract_candidate: str,
-    known_permits: set[str] | None = None,
     *,
     tesseract_conf: float = 0.0,
 ) -> VerifiedResult:
-    """對 Vision 的結果做三層交叉比對。
+    """對 Vision 的結果做交叉比對(格式 → 雙引擎)。
 
     決策表(保守版,僅 CONFIRMED 自動 key-in):
       Level                   | Action                | final_value 來源
@@ -177,14 +172,11 @@ def verify_vision_result(
     參數:
       vision_value         : Vision OCR 萃取的值。空字串代表 Vision 沒有正則命中。
       tesseract_candidate  : 該圖在 Tesseract 階段讀到的最佳候選(可為空字串)。
-      known_permits        : 已知合法 permit 集合;僅影響 rationale,不影響 should_keyin。
       tesseract_conf       : 該 tesseract_candidate 對應的 Tesseract 信心(0-100);
                              只寫進 LIKELY_OCR_CONFUSION 的 rationale,不影響取值。
 
     回傳:VerifiedResult,呼叫端據此決定該列進 key-in 批次或人工審查批次。
     """
-    in_known_list = bool(known_permits and vision_value in known_permits)
-
     # ── 第一層:格式 ──────────────────────────────────────────────────
     if not _is_valid_permit_format(vision_value):
         return VerifiedResult(
@@ -196,36 +188,25 @@ def verify_vision_result(
                 if not vision_value
                 else f"Vision 值 {vision_value!r} 不符合 4 位數格式"
             ),
-            in_known_list=False,
         )
 
     # ── 第二層:跟 Tesseract 比對 ────────────────────────────────────
     # VISION_ONLY:Tesseract 沒讀到值,只有 Vision 給出候選
     if not tesseract_candidate:
-        rationale = (
-            f"僅 Vision 讀到 {vision_value!r}(值在已知清單內,可優先處理),需人工確認"
-            if in_known_list
-            else f"僅 Vision 讀到 {vision_value!r},不在已知清單,需人工審查"
-        )
         return VerifiedResult(
             final_value=vision_value,
             level=VerificationLevel.VISION_ONLY,
             should_keyin=False,
-            rationale=rationale,
-            in_known_list=in_known_list,
+            rationale=f"僅 Vision 讀到 {vision_value!r},需人工審查",
         )
 
     # 兩引擎完全一致 → 唯一自動 key-in 的路徑
     if vision_value == tesseract_candidate:
-        rationale = f"Tesseract 與 Vision 雙引擎一致:{vision_value!r}"
-        if in_known_list:
-            rationale += "(且在已知清單內)"
         return VerifiedResult(
             final_value=vision_value,
             level=VerificationLevel.CONFIRMED,
             should_keyin=True,
-            rationale=rationale,
-            in_known_list=in_known_list,
+            rationale=f"Tesseract 與 Vision 雙引擎一致:{vision_value!r}",
         )
 
     distance = _edit_distance(vision_value, tesseract_candidate)
@@ -240,14 +221,11 @@ def verify_vision_result(
             f"Vision={vision_value!r} 差 1 字元(疑似 OCR 視覺相近字混淆);"
             f"不自動填值,需人工輸入"
         )
-        if in_known_list:
-            rationale += ";Vision 候選在已知清單內"
         return VerifiedResult(
             final_value="",
             level=VerificationLevel.LIKELY_OCR_CONFUSION,
             should_keyin=False,
             rationale=rationale,
-            in_known_list=in_known_list,
         )
 
     # 差 2 字元以上 → 兩引擎不一致,最可疑
@@ -259,5 +237,4 @@ def verify_vision_result(
             f"Tesseract={tesseract_candidate!r} 與 Vision={vision_value!r} "
             f"差異 {distance} 字元,兩引擎不一致,需人工確認"
         ),
-        in_known_list=in_known_list,
     )

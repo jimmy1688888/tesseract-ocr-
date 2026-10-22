@@ -191,7 +191,7 @@ def world(monkeypatch, tmp_path):
     (tmp_path / "docs").mkdir()
     calls = {"vision": [], "rescue": [], "sheets": [], "employer": 0}
 
-    def fake_vision(items, known, read_text):
+    def fake_vision(items, read_text):
         calls["vision"].extend(items)
         return [], [], []
 
