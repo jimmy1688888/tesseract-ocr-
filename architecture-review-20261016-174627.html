@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Architecture review — LinaOCR</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+<style>
+  body { background: #fafaf9; }
+  .seam { border-style: dashed !important; }
+  .leak { color: #dc2626; }
+  .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #f8fafc; }
+  .lbl { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
+</style>
+</head>
+<body class="text-slate-900 font-sans">
+<main class="max-w-5xl mx-auto px-4 sm:px-6 py-12 space-y-12">
+
+<header class="space-y-3">
+  <h1 class="font-serif text-3xl">LinaOCR — architecture review</h1>
+  <p class="text-sm text-slate-500">2026-10-16 · 分支 <code>fix/2-roster-is-not-a-gate</code> · 第一階段行為票(#14、#15)之後、結構票之前</p>
+  <div class="flex flex-wrap gap-4 text-xs text-slate-600">
+    <span class="flex items-center gap-1"><span class="inline-block w-4 h-3 border border-slate-500"></span>module</span>
+    <span class="flex items-center gap-1"><span class="inline-block w-4 h-3 border border-slate-500 seam"></span>seam</span>
+    <span class="flex items-center gap-1"><span class="leak">━▶</span>leak / 重猜</span>
+    <span class="flex items-center gap-1"><span class="inline-block w-4 h-3 deep"></span>deep module</span>
+  </div>
+  <p class="text-xs text-slate-500">範圍:只列 #6~#22、#29/#30 與 10/15 候選 2~5 <b>以外</b>的新候選。熱點:<code>pipeline.py</code>、<code>employer_extract.py</code>(#27、#28)、CSV 序列化(#14、#15)、真實素材測試基礎。</p>
+</header>
+
+<section id="candidates" class="space-y-10">
+
+<!-- A -->
+<article id="cand-a" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">A. 契約樣板類別成為一個 module,整份只判一次</h2>
+  <div class="flex flex-wrap gap-2 text-xs">
+    <span class="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">Strong</span>
+    <span class="px-2 py-0.5 rounded bg-slate-100 text-slate-700">in-process</span>
+  </div>
+  <pre class="font-mono text-sm text-slate-600 whitespace-pre-wrap">employer_extract.py  ID_LABEL :69 · _FORM_LABELS :132 · 錨定 inline regex :468
+                     ID_LABEL_INSTITUTION :73/:400 · _INSTITUTION_NAME_LABEL :66
+                     _is_institution_en :93 → 用在 :441 地址 · :466 英文名 · :583 名稱疑慮
+                     _EN_COMPANY :556 · _name_continuation :526</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="lbl text-slate-500 mb-2">Before:每一行重猜</p>
+      <pre class="mermaid">
+flowchart TB
+  D[契約頁全文<br/>已寫明 Panti Jompo] --> S[#27 評分<br/>_FORM_LABELS]
+  D --> AN[錨定<br/>三級梯]
+  D --> AD[地址行]
+  D --> EN[英文名]
+  D --> ND[名稱疑慮]
+  AD -.->|_is_institution_en| G1((猜))
+  EN -.->|_is_institution_en| G2((猜))
+  ND -.->|_is_institution_en<br/>_EN_COMPANY| G3((猜))
+  classDef leak stroke:#dc2626,stroke-width:2px,color:#dc2626;
+  class G1,G2,G3 leak
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="lbl text-slate-500 mb-2">After:一次判定,大家讀結論</p>
+      <pre class="mermaid">
+flowchart TB
+  D[契約頁全文] --> K[[樣板類別<br/>家庭 / 機構 / 公司<br/>+ 各類標籤字彙]]
+  K --> S[評分]
+  K --> AN[錨定]
+  K --> AD[地址]
+  K --> EN[英文名]
+  K --> ND[名稱疑慮]
+  classDef deep fill:#0f172a,color:#f8fafc,stroke:#0f172a;
+  class K deep
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem</b> — 文件自己的標籤已經說了是機構類,parser 卻在地址、英文名、名稱疑慮三處各用「含 Nursing/Hospital 且不含數字」重猜;「Taoyuan County Private Senior Center」這種名字會被當成英文地址,安靜地掛上假疑慮。</p>
+  <p><b>Solution</b> — 樣板類別成為一個 module,擁有三類的標籤字彙,整份契約判一次;評分、錨定、各欄位抽取、疑慮都讀它的結論。</p>
+  <ul class="list-disc pl-5 text-sm space-y-1">
+    <li>locality:標籤字彙從三份收成一份</li>
+    <li>leverage:一個結論,五個呼叫端</li>
+    <li>測試以類別為軸做表格</li>
+    <li>可測「標籤說機構、名字沒字樣」</li>
+  </ul>
+  <div class="rounded bg-amber-50 border border-amber-200 p-3 text-sm">⚠ ADR-0004 寫明公司型「以英文名含 Co/Ltd 判定」。改由文件標籤判定時要新增 ADR 取代那一句,不靜默推翻。<br/>⏱ 要排在 #9/#10 之前 —— 否則依欄位切三刀後,每一刀各帶一份機構分支。</div>
+</article>
+
+<!-- B -->
+<article id="cand-b" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">B. 一份 docx 的頁面地圖:契約頁、次頁、切結書頁只推導一次</h2>
+  <div class="flex flex-wrap gap-2 text-xs">
+    <span class="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">Strong</span>
+    <span class="px-2 py-0.5 rounded bg-slate-100 text-slate-700">local-substitutable(假分數換掉 Tesseract)</span>
+  </div>
+  <pre class="font-mono text-sm text-slate-600 whitespace-pre-wrap">employer_extract.py  契約頁 :990-999(未達門檻退最高分;全零分退 image2)
+                     次頁 :863-869(同一組分數,未達門檻直接 [],無退路)
+                     切結書頁 :307-323 · _page_score_cache :266(conftest 手動清)
+pipeline.py          複查圖 {2,5,6} :2094 · {2,3} :2116 · _save_review_images 自解序號 :1967</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="lbl text-slate-500 mb-2">Before:三個消費者各推一次,退路不同</p>
+      <div class="space-y-2 text-sm">
+        <div class="border border-slate-400 rounded p-2">雇主擷取 → <code>_best_scored_page</code> → 門檻不到 → <span class="text-amber-700">退最高分 / image2</span></div>
+        <div class="border border-slate-400 rounded p-2">台仲反查 → <code>_best_scored_page</code> → 門檻不到 → <span class="leak">[] 不救</span></div>
+        <div class="border border-slate-400 rounded p-2">切結書救援 → 自己找頁</div>
+        <div class="border border-slate-400 rounded p-2">複查圖 → <span class="leak">絕對序號 {2,3}</span>,不看分數</div>
+        <div class="border border-dashed border-slate-300 rounded p-2 text-slate-500">模組層快取,靠 conftest 清</div>
+      </div>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="lbl text-slate-500 mb-2">After:一張地圖</p>
+      <div class="deep rounded-lg p-4 space-y-2 text-sm">
+        <p class="lbl text-slate-300">頁面地圖(一份 docx)</p>
+        <p>契約頁 + 找不到的原因</p>
+        <p>次頁 · 切結書頁</p>
+        <p class="text-slate-400 text-xs">內部:評分、門檻、退路、快取</p>
+      </div>
+      <div class="mt-3 grid grid-cols-2 gap-2 text-xs text-center">
+        <div class="border border-slate-300 rounded p-1">雇主擷取</div>
+        <div class="border border-slate-300 rounded p-1">台仲反查</div>
+        <div class="border border-slate-300 rounded p-1">切結書救援</div>
+        <div class="border border-slate-300 rounded p-1">複查圖</div>
+      </div>
+    </div>
+  </div>
+  <p><b>Problem</b> — 「哪張圖扮演什麼角色」由三支函式各自推導、退路各不同;33703 只贏 1 分,哪天掉到門檻下,雇主擷取還會退而求其次,反查卻直接放棄,兩邊看到的次頁可能不是同一張。真實素材測試測的是私有的 <code>_best_scored_page(_scored_pages())</code>,碰不到門檻與退路。</p>
+  <p><b>Solution</b> — 一份 docx 的頁面地圖 module,一次回答各角色是哪張、找不到時為什麼;快取由它持有,不再是模組層全域。</p>
+  <ul class="list-disc pl-5 text-sm space-y-1">
+    <li>locality:門檻與退路只寫一處</li>
+    <li>測試跨過公開 interface,不碰私有組合</li>
+    <li>刪掉 conftest 的快取清理</li>
+    <li>33703 可同時驗契約頁與次頁</li>
+  </ul>
+  <div class="rounded bg-amber-50 border border-amber-200 p-3 text-sm">ADR-0005(分層用絕對序號 {2,5,6})維持不動,只收「角色」;ADR-0006「Tesseract 認頁、Vision 取值」照守。CONTEXT.md 說契約頁「靠計分選出、不靠編號」,複查圖的 {2,3} 與此輕微衝突 —— grill 時決定。</div>
+</article>
+
+<!-- C -->
+<article id="cand-c" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">C. matches.csv 成為一個 module:欄位、字面值、編碼、寫出與分組讀回</h2>
+  <div class="flex flex-wrap gap-2 text-xs">
+    <span class="px-2 py-0.5 rounded bg-amber-100 text-amber-800">Worth exploring</span>
+    <span class="px-2 py-0.5 rounded bg-slate-100 text-slate-700">local-substitutable(tmp 檔)</span>
+  </div>
+  <pre class="font-mono text-sm text-slate-600 whitespace-pre-wrap">pipeline.py   CSV_FIELDS :258 · to_csv_row / from_csv_row :326-415
+              寫出:run_scan 內開檔(utf-8-sig、newline):2016,三個 writerow
+              讀回:build_vision_queue 自己開檔 + 分組 :1269
+tests         抄寫同一套開檔方式:test_csv_roundtrip :59 · test_manual_review · test_tiered_scan :70</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="lbl text-slate-500 mb-2">Before:格式知識 4 處正式 + 4 處測試</p>
+      <div class="flex gap-2 items-end h-40">
+        <div class="flex-1 flex flex-col gap-1">
+          <div class="h-6 bg-slate-300 rounded"></div><div class="h-6 bg-slate-300 rounded"></div>
+          <div class="h-6 bg-slate-300 rounded"></div><div class="h-6 bg-slate-300 rounded"></div>
+          <p class="lbl text-center">正式</p>
+        </div>
+        <div class="flex-1 flex flex-col gap-1">
+          <div class="h-6 bg-red-200 rounded"></div><div class="h-6 bg-red-200 rounded"></div>
+          <div class="h-6 bg-red-200 rounded"></div><div class="h-6 bg-red-200 rounded"></div>
+          <p class="lbl text-center leak">測試抄寫</p>
+        </div>
+      </div>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="lbl text-slate-500 mb-2">After:一處擁有</p>
+      <div class="flex gap-3 items-end h-40">
+        <div class="w-1/3"><div class="h-6 border border-slate-500 rounded text-xs text-center">寫出 · 讀回</div><p class="lbl text-center mt-1">interface</p></div>
+        <div class="w-2/3"><div class="h-32 deep rounded p-2 text-xs">欄位順序 · Y/✓ · utf-8-sig · newline · 舊檔相容(scan_tier、manual_review 整句)· 依 docx 分組</div><p class="lbl text-center mt-1">implementation</p></div>
+      </div>
+    </div>
+  </div>
+  <p><b>Problem</b> — #14 自己記下的缺口:正式程式改了編碼,測試也不會紅,因為測試抄了一份開檔方式;<code>build_vision_queue</code> 的分流只能經過磁碟上的檔案測。</p>
+  <p><b>Solution</b> — matches.csv module 擁有整份格式;<code>run_scan</code> 與測試都經由它寫、經由它讀。</p>
+  <ul class="list-disc pl-5 text-sm space-y-1">
+    <li>補上 #14 的編碼缺口</li>
+    <li>刪掉 4 份測試抄寫</li>
+    <li>分流可直接餵 ScanResult 測</li>
+  </ul>
+  <div class="rounded bg-slate-50 border border-slate-200 p-3 text-sm">與 #18(裁切圖寫出移到 run_scan)、ADR-0009(結果走回傳)同方向;可與 #18 同輪。<code>from_csv_row</code> 把未知 status 安靜當 OK(#14 記下不處理的三件之一)也在這個 module 裡解決。</div>
+</article>
+
+<!-- D -->
+<article id="cand-d" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">D. 真實素材 corpus:每份素材的已知答案只記一處</h2>
+  <div class="flex flex-wrap gap-2 text-xs">
+    <span class="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">Strong</span>
+    <span class="px-2 py-0.5 rounded bg-slate-100 text-slate-700">local-substitutable</span>
+  </div>
+  <pre class="font-mono text-sm text-slate-600 whitespace-pre-wrap">real_samples.py(只管路徑與 skip)· test_contract_page.py :188 EXPECTED_CONTRACT_PAGE 寫死
+samples/vision/*.json {image,roi,texts}(10 份,只有 33703 有 expected)
+scan_results/employer_texts.json {image,text}(21 份,沒有任何測試重放)
+real_samples.old_matches_csv → scan_results/(pipeline 的輸出目錄)</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="lbl text-slate-500 mb-2">Before</p>
+      <pre class="mermaid">
+flowchart LR
+  R[real_samples<br/>路徑 + skip] --> T1[test_contract_page<br/>答案寫死]
+  R --> T2[test_manual_review]
+  V[(vision/*.json<br/>格式甲)] --> T3[33703 測試]
+  E[(employer_texts.json<br/>格式乙)] -.->|只有臨時腳本| X((HEAD vs 新版<br/>31 份比對))
+  classDef leak stroke:#dc2626,stroke-width:2px,color:#dc2626;
+  class X leak
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="lbl text-slate-500 mb-2">After</p>
+      <pre class="mermaid">
+flowchart LR
+  C[[素材 corpus<br/>每份:契約頁 · H~O 快照<br/>一種重放格式]] --> T1[契約頁判定]
+  C --> T2[H~O 快照測試<br/>31 份離線]
+  C --> T3[舊 CSV 相容]
+  classDef deep fill:#0f172a,color:#f8fafc,stroke:#0f172a;
+  class C deep
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem</b> — #28 的「HEAD 版 vs 新版、31 份全文逐格比對」是臨時腳本、不在測試裡;#8/#9/#10 驗收條件的「逐格不變」沒有任何可執行的測試在守。素材還放在 pipeline 的輸出目錄,正是 10/16 覆蓋事故的位置。</p>
+  <p><b>Solution</b> — 素材 corpus module:每份素材的已知答案只記一處,重放格式只留一種,素材移出輸出目錄。</p>
+  <ul class="list-disc pl-5 text-sm space-y-1">
+    <li>#8~#10 有回歸網可接</li>
+    <li>31 份 H~O 快照,不花 Vision</li>
+    <li>素材與輸出不再同目錄</li>
+  </ul>
+  <div class="rounded bg-slate-50 border border-slate-200 p-3 text-sm">⏱ 要排在 #8/#9/#10 與候選 A 之前 —— 那幾刀都是「純重構、逐格不變」,沒有這張網就只能靠臨時腳本。不衝突任何 ADR。<code>employer_texts.json</code> 只有一份真備份,搬動前先複製。</div>
+</article>
+
+</section>
+
+<section class="rounded-xl border border-slate-200 bg-white p-6 space-y-3">
+  <h2 class="font-serif text-xl">近期 commit 改變了前提的既有票／候選</h2>
+  <ul class="list-disc pl-5 text-sm space-y-1">
+    <li><b>#6</b>:#24 新增的 <code>Batch.upload_log</code> docstring 仍寫它「也是已知許可證清單的來源」,<code>test_batch.py:89,101</code> 也引用 —— 刪除範圍要含這些</li>
+    <li><b>#7</b>:#28 在 <code>employer_extract.py:508</code> 加了第三處手寫 <code>"；".join</code>,名稱疑慮變成兩段組合</li>
+    <li><b>#8/#9/#10</b>:「21 份」應改 31 份(含 samples/vision 10 份);#10 的錨定已是三級梯;機構分支散進三刀 → 先做 A</li>
+    <li><b>#11</b>:<code>_PLEDGE_FRONT</code>、<code>deink_red_stamp</code> 現在會被 33703 真 Tesseract 測試<b>執行</b>到,但仍無斷言釘住 —— 票裡「從未被執行」已過時</li>
+    <li><b>#22</b>:<code>_FORM_LABELS</code> 的中文選項永遠比不到(上緣 OCR 是 ind+eng),等於死碼;<code>:209</code> docstring 仍提 <code>CONTRACT_MARKERS</code></li>
+    <li><b>#29</b>:#28 新增「H:中文名括號不成對」(<code>:509</code>),又一處欄位字母前綴</li>
+    <li><b>#5 的承諾</b>:<code>pipeline._save_review_images</code> 仍自己解析圖序(<code>:1967</code>)→ 併入 B</li>
+    <li><b>候選 3(仲介反查)</b>:輸入是 B 的次頁;台仲區塊解析在 <code>employer_extract.py:799-967</code>,應一併收進名冊查表器</li>
+    <li>候選 2、4、5、#12、#13、#16、#18:前提不變</li>
+  </ul>
+</section>
+
+<section id="top-recommendation" class="deep rounded-xl p-6 space-y-2">
+  <p class="lbl text-slate-300">Top recommendation</p>
+  <h2 class="font-serif text-2xl"><a href="#cand-d" class="underline">D. 真實素材 corpus</a>,接著 <a href="#cand-a" class="underline">A. 樣板類別</a></h2>
+  <p class="text-slate-200 text-sm">第二階段的雇主欄位三刀(#8~#10)與 A 都是「逐格不變」的重構,D 先把 31 份 H~O 快照變成可執行的回歸網,後面每一刀才守得住;A 必須在 #9/#10 切開之前做,否則機構分支會被複製進每一刀。</p>
+</section>
+
+</main>
+</body>
+</html>

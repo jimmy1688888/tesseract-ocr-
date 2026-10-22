@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>架構檢視 — LinaOCR 2026-10-20</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+<style>
+  body { font-family: "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif; }
+  .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #e2e8f0; }
+  .ghost { border: 1px dashed #94a3b8; color: #64748b; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900">
+<main class="max-w-5xl mx-auto px-4 sm:px-6 py-12 space-y-12">
+
+<header class="space-y-3">
+  <h1 class="text-3xl font-bold">架構檢視 — LinaOCR(#34~#37 之後)</h1>
+  <p class="text-slate-500">2026-10-20 · fix/2-roster-is-not-a-gate · 範圍:employer_extract.py、contract_template.py、real_samples、snapshots</p>
+  <div class="flex flex-wrap gap-3 text-xs text-slate-600">
+    <span class="px-2 py-1 border border-slate-400 rounded">實線框 = module</span>
+    <span class="px-2 py-1 ghost rounded">虛線 = seam</span>
+    <span class="px-2 py-1 border-2 border-red-500 rounded text-red-600">紅 = 外洩／缺陷</span>
+    <span class="px-2 py-1 deep rounded">深色 = deep module</span>
+  </div>
+  <p class="text-sm text-slate-600">已排除 #6~#22、#29/#30、候選 2~5、A~L 與 #35~#37 review 留下的項目。新候選從 <b>M</b> 編起。</p>
+</header>
+
+<section class="space-y-10">
+
+<!-- M -->
+<article class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+  <h2 class="text-xl font-bold">M. 錨定失敗時，切結書救援照樣填 H 欄，日誌卻說「H~O 留空」</h2>
+  <div class="flex gap-2 text-xs"><span class="px-2 py-1 rounded bg-emerald-100 text-emerald-800">Strong</span><span class="px-2 py-1 rounded bg-slate-100">in-process</span><span class="px-2 py-1 rounded bg-orange-100 text-orange-800">行為</span></div>
+  <pre class="font-mono text-sm text-slate-600">employer_extract.py: extract_employer_from_docx(~1136) · _apply_pledge_rescue(~1143) · 早退(~432)
+pipeline.py: _note → 「H~O 留空」日誌(~1689)
+test_pledge_rescue.py:192 手設 f["契約樣板"]</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">Before</div>
+<pre class="mermaid">
+flowchart TB
+  E[extract_employer_fields] -- 錨定失敗 --> N[_note:錨定失敗<br/>欄位全空]
+  N --> R{雇主名稱_中 空?}
+  R -- 是 --> P[_apply_pledge_rescue<br/>就地填 H、改 L]
+  P --> PL[pipeline:有 _note<br/>→ 日誌「H~O 留空」]
+  P --> S[(Sheets:H 有值<br/>L 只有救援那條)]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class PL,S leak
+</pre></div>
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">After</div>
+<pre class="mermaid">
+flowchart TB
+  E[一次擷取] --> X
+  subgraph X[雇主擷取結果]
+    a[區塊找到了沒]
+    b[用了哪個樣板]
+    c[每個值的來源]
+  end
+  X --> D{救援：依結果決定<br/>做不做、怎麼講}
+  classDef deep fill:#1e293b,color:#e2e8f0;
+  class X deep
+</pre></div>
+  </div>
+  <p><b>Problem:</b>救援只看「中文名空不空」,不看 <code>_note</code>;錨定失敗那列 H 欄被救回的名字填上，地址空著卻沒有「未擷取到」,L 欄只剩救援那條，日誌還說「H~O 留空」。#36 為了讓救援看得到樣板，讓早退帶著樣板 —— 樣板只能當 dict 鍵在函式間傳，測試得手設鍵去驅動私有函式。</p>
+  <p><b>Solution:</b>擷取結果明講「區塊找到了沒、用哪個樣板、每個值從哪來」;救援變成對這份結果的決定，而不是就地補丁。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700"><li>日誌與 Sheets 說同一件事</li><li>透過 extract_employer_from_docx 測</li><li>不再手設私有鍵</li></ul>
+  <div class="text-sm bg-amber-50 border border-amber-200 rounded p-2">與 ADR-0003/0004「看得見的疑慮勝過安靜的錯值」相關：要決定錨定失敗時「不救」還是「救並講明」。是候選 <b>I</b>(擷取結果成為有形狀的值)的實證，宜與 I 同輪、在 #7 之前 grill。</div>
+</article>
+
+<!-- N -->
+<article class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+  <h2 class="text-xl font-bold">N. 樣板印在文件上的字，還有好幾份抄在 employer_extract</h2>
+  <div class="flex gap-2 text-xs"><span class="px-2 py-1 rounded bg-amber-100 text-amber-800">Worth exploring</span><span class="px-2 py-1 rounded bg-slate-100">in-process</span></div>
+  <pre class="font-mono text-sm text-slate-600">employer_extract.py: BOILERPLATE(~96) · _EN_INSTITUTION_TITLE · CN_BOILERPLATE(~566)
+                     英文名去標籤 regex Nama…(Majikan|Perusahaan|Panti Jompo…)(~505)
+                     _company_name_in_block 的 (Nama\s*)?Perusahaan(~577)
+contract_template.py: TITLE · _TITLE_TEMPLATE · LABELS · COMPANY_WORDS</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">Before — 加第四種樣板要改這些</div>
+      <div class="grid grid-cols-2 gap-1 text-xs font-mono">
+        <div class="border rounded p-1">TITLE</div><div class="border rounded p-1">_TITLE_TEMPLATE</div>
+        <div class="border rounded p-1">LABELS</div><div class="border border-red-400 rounded p-1">CN_BOILERPLATE</div>
+        <div class="border border-red-400 rounded p-1">BOILERPLATE</div><div class="border border-red-400 rounded p-1">英文名去標籤 regex</div>
+        <div class="border border-red-400 rounded p-1">_company_name_in_block</div><div class="border border-red-400 rounded p-1">_EN_INSTITUTION_TITLE</div>
+      </div>
+      <p class="text-xs text-red-600 mt-2">CN_BOILERPLATE 還認得 contract_template 不認得的 製造工／廠工／漁工</p></div>
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">After</div>
+      <div class="deep rounded p-3 text-sm">contract_template:這份文件印了哪些標題、標籤、樣板字，以及怎麼把它們從候選值裡剝掉</div>
+      <div class="text-xs text-slate-500 mt-2">employer_extract 只問它，不抄</div></div>
+  </div>
+  <p><b>Problem:</b>contract_template 的 docstring 說字彙「只記在這裡」,實際上 employer_extract 還有四、五份；刪除測試成立 —— 刪掉 CN_BOILERPLATE / BOILERPLATE,知識得從 contract_template 的表重建。</p>
+  <p><b>Solution:</b>樣板字彙(含樣板字、去標籤)都歸 contract_template,employer_extract 引用。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700"><li>新樣板只改一處</li><li>「樣板字不會變成名字」逐類測一次</li></ul>
+  <div class="text-sm bg-amber-50 border border-amber-200 rounded p-2">ADR-0010 只把<b>錨定標籤</b>留給 #10,樣板字不在其內。與 #10 共用 regex,宜併入 #10 或緊接其後。</div>
+</article>
+
+<!-- O -->
+<article class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+  <h2 class="text-xl font-bold">O. 各樣板的擷取規則是散落的 if;「認不出照家庭類」沒寫在任何一處</h2>
+  <div class="flex gap-2 text-xs"><span class="px-2 py-1 rounded bg-amber-100 text-amber-800">Worth exploring</span><span class="px-2 py-1 rounded bg-slate-100">in-process</span></div>
+  <pre class="font-mono text-sm text-slate-600">employer_extract.py: _is_org_name_line ×3 · if template is 工廠類 · if template is 認不出
+                     _name_doubt(template=家庭類 預設) · 救援的 fields.get("契約樣板", 家庭類)
+test_employer_name.py:143-151 對私有 _name_doubt 傳 Template</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">Before</div>
+<pre class="mermaid">
+flowchart LR
+  T[Template<br/>只有 is_organisation] --> a[英文地址 if]
+  T --> b[英文名 if]
+  T --> c[工廠類 if]
+  T --> d[認不出 if]
+  T -.預設值.-> e[_name_doubt]
+  T -.預設值.-> f[切結書救援]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class e,f leak
+</pre></div>
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">After</div>
+      <div class="deep rounded p-3 text-sm space-y-1">
+        <div>每個樣板帶自己的擷取規則</div>
+        <div class="pl-3 text-slate-300">名稱行 vs 地址行・做不做音節檢查・公司字樣行優先・要掛的疑慮</div>
+        <div class="pl-3 text-amber-300">認不出 → 明寫「沿用家庭類」</div>
+      </div></div>
+  </div>
+  <p><b>Problem:</b>ADR-0010 的核心決定「認不出照家庭類」在程式裡沒有一處寫明，靠三件事剛好一致：認不出的 is_organisation 是 False、兩個預設值都是家庭類。加樣板或改規則時，要逐個 if 找。</p>
+  <p><b>Solution:</b>樣板自帶擷取規則，extract_employer_fields 問規則而不分岔。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700"><li>樣板 × 規則一張參數化表</li><li>不再對私有函式傳樣板</li><li>認不出的退路寫明</li></ul>
+  <div class="text-sm bg-amber-50 border border-amber-200 rounded p-2">只有約 6 處，樣板多了才划算；排在 N 之後，與 #9(姓名那一刀)、#10(錨定)相鄰。</div>
+</article>
+
+</section>
+
+<section id="top-recommendation" class="rounded-xl p-6 deep space-y-3">
+  <h2 class="text-xl font-bold">Top recommendation</h2>
+  <p><b>M</b>。它是唯一有具體行為矛盾的：錨定失敗那列 Sheets 的 H 欄有值、L 欄沒說清楚，日誌卻說全空 —— ADR-0003 要防的「看不見」。也是候選 <b>I</b> 最好的實證：擷取結果沒有形狀，救援只能就地補丁。</p>
+  <p class="text-sm text-slate-300">順序建議：照舊先 grill <b>E+F</b>;接著 <b>I+M</b> 同輪(要在 #7 前);<b>N</b> 併入 #10;<b>O</b> 等樣板變多或 #9 時再看。</p>
+</section>
+
+</main>
+</body>
+</html>

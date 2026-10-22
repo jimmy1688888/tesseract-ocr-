@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>架構檢視 — LinaOCR 2026-10-19</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+<style>
+  body { font-family: "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif; }
+  .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #e2e8f0; }
+  .ghost { border: 1px dashed #94a3b8; color: #64748b; }
+  .mass { height: 14px; border-radius: 3px; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900">
+<main class="max-w-5xl mx-auto px-4 sm:px-6 py-12 space-y-12">
+
+<header class="space-y-3">
+  <h1 class="text-3xl font-bold">架構檢視 — LinaOCR</h1>
+  <p class="text-slate-500">2026-10-19 · 分支 fix/2-roster-is-not-a-gate @ 52cd8a4 · 熱點:pipeline.py、employer_extract.py、真實素材組</p>
+  <div class="flex flex-wrap gap-3 text-xs text-slate-600">
+    <span class="px-2 py-1 border border-slate-400 rounded">實線框 = module</span>
+    <span class="px-2 py-1 ghost rounded">虛線 = seam</span>
+    <span class="px-2 py-1 border-2 border-red-500 rounded text-red-600">紅 = 外洩／缺陷</span>
+    <span class="px-2 py-1 deep rounded">深色 = deep module</span>
+  </div>
+  <p class="text-sm text-slate-600">已排除:#6~#22、#29/#30、10/15 候選 2~5、10/16 候選 A~D。新候選從 <b>E</b> 編起。</p>
+</header>
+
+<section id="candidates" class="space-y-10">
+
+<!-- E -->
+<article class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+  <h2 class="text-xl font-bold">E. 許可證送審決策：一份 docx 一個決定，收進一個 module</h2>
+  <div class="flex gap-2 text-xs"><span class="px-2 py-1 rounded bg-emerald-100 text-emerald-800">Strong</span><span class="px-2 py-1 rounded bg-slate-100">in-process</span></div>
+  <pre class="font-mono text-sm text-slate-600">pipeline.py: scan_image_large(~856) · decide_result(~910) · aggregate_small_docx(~972)
+             _describe_vision_reason(~1019) · process_large_vs(~1050) · process_small_vs(~1184)
+             build_vision_queue(~1259) · has_permit_vote(563)</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">Before</div>
+<pre class="mermaid">
+flowchart TB
+  S[scan_image_large] --> D[decide_result<br/>算 vision_review]
+  D --> CSV[(matches.csv)]
+  CSV --> Q[build_vision_queue]
+  Q --> L[process_large_vs<br/>規則 A/A2/B/C]
+  Q --> M[process_small_vs<br/>+防禦性退路]
+  L -.重寫一次.-> V[has_permit_vote]
+  L -.事後補理由.-> R[_describe_vision_reason]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class V,R,M leak
+</pre></div>
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">After</div>
+<pre class="mermaid">
+flowchart TB
+  S[一份 docx 的掃描結果] --> R
+  subgraph R[送審決策 module]
+    direction TB
+    r1[多數票謂詞・門檻<br/>只此一處]
+  end
+  R --> O["一個決定＋理由<br/>key-in / Vision / 仲介救援 / 人工"]
+  classDef deep fill:#1e293b,color:#e2e8f0;
+  class R deep
+</pre></div>
+  </div>
+  <p><b>Problem:</b>「這份 docx 該 key-in、送 Vision、救援還是人工，為什麼」要讀六個函式加一次 CSV 來回才答得出；規則 A2 逐字重寫了 <code>has_permit_vote</code>(ADR-0005 停擴掃依賴兩者一致，沒人守);<code>CONF_KEY_IN</code> 與 <code>CONF_KEY_IN_VS</code> 同值兩份；決策逐圖做，一份 docx 可能進佇列多次。<code>process_large_vs</code>/<code>process_small_vs</code>/<code>build_vision_queue</code> 零直接測試。</p>
+  <p><b>Solution:</b>以 docx 為單位，掃描結果進、一個送審決定(去向＋理由)出;謂詞與門檻只活在這裡，事後補理由與防禦性退路刪掉。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700">
+    <li>表格測試，不必寫 CSV</li><li>A2 與停擴掃同一謂詞</li><li>一份 docx 一個決定可斷言</li><li>刪掉兩個補洞函式</li>
+  </ul>
+  <div class="text-sm bg-amber-50 border border-amber-200 rounded p-2">與 ADR-0005 相容(守住它)。與候選 C(matches.csv)只在 CSV 那道 seam 交會。</div>
+</article>
+
+<!-- F -->
+<article class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+  <h2 class="text-xl font-bold">F. Vision 驗證這一步：純函式有 600 行測試，bug 卻在呼叫端</h2>
+  <div class="flex gap-2 text-xs"><span class="px-2 py-1 rounded bg-emerald-100 text-emerald-800">Strong</span><span class="px-2 py-1 rounded bg-slate-100">ports &amp; adapters(Vision client)</span></div>
+  <pre class="font-mono text-sm text-slate-600">pipeline.py: main(~2404-2448) · run_google_vision(~1321) · verify_vision_result
+             RE_PERMIT_ID_LIST / RE_MOL_LIST / RE_PERMIT_ID_LIST_LOWER</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">Before</div>
+<pre class="mermaid">
+flowchart TB
+  Q[佇列項目] --> M{main 內聯}
+  M -- 圖檔不在 --> X[continue<br/>這份 docx 消失]
+  M --> G[run_google_vision<br/>IO+重試+自寫 regex]
+  G --> V[verify_vision_result<br/>有測試]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class X,G leak
+</pre></div>
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">After</div>
+<pre class="mermaid">
+flowchart TB
+  Q[佇列項目] --> F
+  subgraph F[Vision 驗證 module]
+    t[Vision 文字 → 許可證號<br/>與 Tesseract 同一套 pattern]
+  end
+  C[(Vision client<br/>adapter)] -.seam.-> F
+  F --> O["已驗證列 / 救援請求 / 人工＋理由<br/>絕不回空"]
+  classDef deep fill:#1e293b,color:#e2e8f0;
+  class F deep
+</pre></div>
+  </div>
+  <p><b>Problem:</b><code>main</code> 裡 <code>if not Path(item.img_path).exists(): continue</code> 讓整份 docx <b>安靜消失</b>(連人工複查都不進 Sheets);<code>run_google_vision</code> 不用 <code>RE_PERMIT_ID_LIST_LOWER</code>,下半部 ROI 的值在 Vision 那關可能被判格式不符。</p>
+  <p><b>Solution:</b>佇列項目進、一個結果出(已驗證／救援／人工＋理由),Vision client 在 seam 後；文字取號與 Tesseract 共用。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700"><li>缺圖變人工列，可測</li><li>取號規則只一套</li><li>fake client 測編排</li></ul>
+  <div class="text-sm bg-red-50 border border-red-200 rounded p-2">「缺圖安靜丟棄」本身是 bug,不必等重構：可先開一張行為票。</div>
+</article>
+
+<!-- G -->
+<article class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+  <h2 class="text-xl font-bold">G. 地址庫(門牌庫)成為可注入的值</h2>
+  <div class="flex gap-2 text-xs"><span class="px-2 py-1 rounded bg-emerald-100 text-emerald-800">Strong</span><span class="px-2 py-1 rounded bg-slate-100">local-substitutable</span></div>
+  <pre class="font-mono text-sm text-slate-600">address_db.py: _DB_PATH(42) · _CUSTOM_PATH(45) · @lru_cache _load()(99)
+tests: test_address_doubt.py(~42 處) · test_employer_*.py · test_address_norm.py:103
+snapshots.alldata_sha256()</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">Before — 測試的前提藏在 2.4MB 未進版控的檔</div>
+      <div class="space-y-2 text-sm">
+        <div class="flex items-center gap-2"><span class="w-40">~100 支測試</span><div class="mass bg-slate-300 flex-1"></div></div>
+        <div class="text-center text-red-600">↓ 隱性依賴</div>
+        <div class="flex items-center gap-2"><span class="w-40">data/AllData.json<br/><span class="text-xs text-red-600">gitignored・全域・lru_cache</span></span><div class="mass bg-red-400 flex-1"></div></div>
+      </div></div>
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">After</div>
+      <div class="space-y-2 text-sm">
+        <div class="flex items-center gap-2"><span class="w-40">多數測試</span><div class="mass bg-slate-300 flex-1"></div></div>
+        <div class="text-center">↓ 自帶小地址庫(寫明依賴哪些事實)</div>
+        <div class="deep rounded p-2">address_db:地址庫是可給的值；預設仍延遲讀檔</div>
+        <div class="text-xs text-slate-500">少數「真實地址庫」測試：缺檔乾淨 skip</div>
+      </div></div>
+  </div>
+  <p><b>Problem:</b>測試默默斷言真實地理事實(如龜山區有文化七路),那些事實住在被 gitignore 的檔裡；換機器時大量經過 <code>extract_employer_fields</code> 的測試掉進「地址庫無法使用」而轉紅,<code>test_address_norm.py:103</code> 註解說會跳過、實際會出錯。快照得另記地址庫雜湊才分得出「資料變了」。</p>
+  <p><b>Solution:</b>地址庫成為 address_db 可以被給定的值，預設照舊延遲從磁碟讀；測試自建小地址庫。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700"><li>測試說出自己的前提</li><li>換機器照樣綠</li><li>資料更新不再波及邏輯測試</li></ul>
+  <div class="text-sm bg-amber-50 border border-amber-200 rounded p-2">ADR-0001(address_db 擁有台灣地址文字、import 零 I/O)要維持；與候選 5(路名補充檔)相鄰，可同輪 grill。</div>
+</article>
+
+<!-- H -->
+<article class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+  <h2 class="text-xl font-bold">H. 「台灣電話的標準形」只有一個主人</h2>
+  <div class="flex gap-2 text-xs"><span class="px-2 py-1 rounded bg-emerald-100 text-emerald-800">Strong</span><span class="px-2 py-1 rounded bg-slate-100">in-process</span><span class="px-2 py-1 rounded bg-orange-100 text-orange-800">會是行為票</span></div>
+  <pre class="font-mono text-sm text-slate-600">employer_extract.py: _phones_in(44) · 電話計數池(~418) · _phones_in_block(~950)
+permit_lookup.py: _norm_phone(~162) · split_phone_field
+export_roster_xlsx.py: _MULTI_SEP</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">Before — 同一支號碼，四個鍵</div>
+      <table class="text-sm font-mono w-full"><tbody>
+        <tr><td>02-2727-6999</td><td class="text-red-600">→ '02-2727-6999'</td></tr>
+        <tr><td>02 27276999</td><td class="text-red-600">→ '02 27276999'</td></tr>
+        <tr><td>(02)27276999</td><td class="text-red-600">→ '02-27276999'</td></tr>
+        <tr><td>+886-2-27276999</td><td class="text-red-600">→ '0227276999'</td></tr>
+      </tbody></table>
+      <p class="text-xs text-slate-500 mt-2">「出現兩次者優先」看不到換了寫法的同一支；名冊查找另有一套正規化。</p></div>
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">After</div>
+<pre class="mermaid">
+flowchart LR
+  A[雇主電話計數] --> P
+  B[仲介區塊電話] --> P
+  C[名冊查找] --> P
+  P[電話標準形<br/>單一 module]
+  P --> O[O 欄輸出格式<br/>另一個明確決定]
+  classDef deep fill:#1e293b,color:#e2e8f0;
+  class P deep
+</pre></div>
+  </div>
+  <p><b>Problem:</b><code>_phones_in</code> 回傳 OCR 原樣字串，重複計數比的是字串；<code>permit_lookup._norm_phone</code> 另有 +886 規則。ADR-0001 防的「同一概念兩套正規化」,換成電話又出現一次。</p>
+  <p><b>Solution:</b>標準形只一處，計數與名冊查找都用它；寫進 O 欄的格式另行決定。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700"><li>寫法變體一處釘住</li><li>重複判定看得到同號</li><li>名冊與雇主同一尺</li></ul>
+  <div class="text-sm bg-amber-50 border border-amber-200 rounded p-2">要排在 #8(電話那一刀)之前或併入；改計數會動 O 欄 → 行為票，需重錄快照。</div>
+</article>
+
+<!-- I -->
+<article class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+  <h2 class="text-xl font-bold">I. 雇主擷取結果成為一個有形狀的值</h2>
+  <div class="flex gap-2 text-xs"><span class="px-2 py-1 rounded bg-amber-100 text-amber-800">Worth exploring</span><span class="px-2 py-1 rounded bg-slate-100">in-process</span></div>
+  <pre class="font-mono text-sm text-slate-600">employer_extract.py: _EMPTY_FIELDS(~367) · _image/_crop/_text(~1080) · __main__ 鍵清單
+pipeline.py: _EMPLOYER_COL_KEYS(~1642) · fields.pop("_text") · write_doubt_report 欄清單
+snapshots.py: KEYS(29) · test_address_doubt.py 手寫假 dict</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">Before — 一個扁平 dict,三種鍵</div>
+      <div class="flex flex-wrap gap-1 text-xs">
+        <span class="px-2 py-1 bg-sky-100 rounded">雇主名稱_中</span><span class="px-2 py-1 bg-sky-100 rounded">地址_英</span><span class="px-2 py-1 bg-sky-100 rounded">電話</span><span class="px-2 py-1 bg-sky-100 rounded">疑慮標示</span>
+        <span class="px-2 py-1 bg-amber-100 rounded">名稱_疑慮</span><span class="px-2 py-1 bg-amber-100 rounded">縣市_疑慮</span><span class="px-2 py-1 bg-amber-100 rounded">地址_比對</span>
+        <span class="px-2 py-1 bg-rose-100 rounded">_image</span><span class="px-2 py-1 bg-rose-100 rounded">_text</span><span class="px-2 py-1 bg-rose-100 rounded">_note</span>
+      </div>
+      <p class="text-xs text-red-600 mt-2">至少五處各列一份「哪些鍵算輸出」</p></div>
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">After</div>
+      <div class="deep rounded p-3 text-sm space-y-1">
+        <div>雇主擷取結果</div>
+        <div class="pl-3 text-sky-300">輸出欄位</div>
+        <div class="pl-3 text-amber-300">疑慮(含各成因)</div>
+        <div class="pl-3 text-rose-300">來源(頁、裁切、全文、錨定註記)</div>
+      </div></div>
+  </div>
+  <p><b>Problem:</b>Sheets 輸出、內部疑慮成因、流程中介資料共用一個命名空間，消費端靠慣例剝鍵；#34 剛加的 <code>縣市_疑慮</code> 就得同時改 <code>_EMPTY_FIELDS</code>、<code>setdefault</code>、<code>_compose_doubt</code> 三處。</p>
+  <p><b>Solution:</b>擷取結果是一個值，把欄位、疑慮、來源分開。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700"><li>假資料用真型別建</li><li>快照不再抄鍵清單</li><li>新疑慮只改一處</li></ul>
+  <div class="text-sm bg-amber-50 border border-amber-200 rounded p-2">與 #7/#10(怎麼填)和 #12(下游 SheetRow)相鄰：宜在 #7 前 grill,否則 #7~#10 會先把 dict 形狀釘得更牢。</div>
+</article>
+
+<!-- J -->
+<article class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+  <h2 class="text-xl font-bold">J. 「契約頁怎麼讀」的配方與它存下的全文，只有一份</h2>
+  <div class="flex gap-2 text-xs"><span class="px-2 py-1 rounded bg-amber-100 text-amber-800">Worth exploring</span><span class="px-2 py-1 rounded bg-slate-100">ports &amp; adapters(Vision)</span></div>
+  <pre class="font-mono text-sm text-slate-600">employer_extract.py: extract_employer_from_docx(~1068) · extract_employer(~834) · _ab_compare
+snapshots.py: _fetch_text / _prepare(~159) · roi = str(EMPLOYER_ROI[3])(~249)
+pipeline.py: employer_texts.json 寫出(~1685) · real_samples.employer_text</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">Before</div>
+<pre class="mermaid">
+flowchart TB
+  P[pipeline:裁切→去紅章→Vision] --> T1[(employer_texts.json<br/>無 ROI)]
+  S[snapshots:_prepare 重寫一次] --> T2[(samples/vision<br/>鍵='0.35')]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class S,T1 leak
+</pre></div>
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">After</div>
+<pre class="mermaid">
+flowchart TB
+  P[pipeline] --> R
+  S[錄製指令] --> R
+  R[契約頁讀取 module<br/>頁 bytes → 全文＋配方指紋]
+  R --> T[(同一種全文紀錄)]
+  classDef deep fill:#1e293b,color:#e2e8f0;
+  class R deep
+</pre></div>
+  </div>
+  <p><b>Problem:</b>配方的身分被縮成 ROI 下緣 <code>"0.35"</code>;改了其他 ROI 座標或去紅章步驟，素材照舊重放舊配方的全文、快照照綠。正式執行的輸出是另一種格式，無法直接升格成素材。</p>
+  <p><b>Solution:</b>一個 module 擁有「頁 → Vision 全文」與配方指紋，正式流程與錄製指令存同一種紀錄。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700"><li>配方一改素材就顯舊</li><li>錄製不再抄步驟</li><li>實跑輸出可升格素材</li></ul>
+  <div class="text-sm bg-amber-50 border border-amber-200 rounded p-2">#16 只管裁切/去紅章各一份實作，不管配方身分；與候選 B(頁面地圖)相鄰。</div>
+</article>
+
+<!-- K -->
+<article class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+  <h2 class="text-xl font-bold">K. 名冊從三態全域變成明確傳入的依賴</h2>
+  <div class="flex gap-2 text-xs"><span class="px-2 py-1 rounded bg-amber-100 text-amber-800">Worth exploring</span><span class="px-2 py-1 rounded bg-slate-100">local-substitutable</span></div>
+  <pre class="font-mono text-sm text-slate-600">pipeline.py: _PERMIT_LOOKUP: PermitLookup | bool | None(105) · _agency_cols · rescue_… · _warn_if_roster_unavailable
+tests: test_preflight.py · test_batch.py(monkeypatch 私有哨兵)</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">Before</div>
+      <div class="grid grid-cols-3 gap-1 text-xs text-center">
+        <div class="border border-red-400 rounded p-2">None<br/>還沒載</div><div class="border border-red-400 rounded p-2">False<br/>載入失敗(降級)</div><div class="border border-red-400 rounded p-2">PermitLookup</div>
+      </div>
+      <p class="text-xs text-slate-500 mt-2">模組層全域，conftest 不重置；ADR-0009 剛為雇主結果拿掉同一種形狀。</p></div>
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">After</div>
+      <div class="text-sm space-y-2"><div class="border rounded p-2">main 載一次 → 和 Batch 一起往下傳</div><div class="deep rounded p-2">名冊：可用／不可用(明確的變體)</div></div></div>
+  </div>
+  <p><b>Problem:</b>測試要 monkeypatch 私有哨兵值；前一支測試載入的名冊會漏進後面的測試。</p>
+  <p><b>Solution:</b>名冊在 main 載一次、明確往下傳，「不可用」是一個看得見的變體。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700"><li>不再修補私有全域</li><li>測試之間不互相污染</li></ul>
+  <div class="text-sm bg-amber-50 border border-amber-200 rounded p-2">延續 ADR-0009 精神；與候選 3(仲介反查收進名冊查表器)同輪 grill 最順。</div>
+</article>
+
+<!-- L -->
+<article class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+  <h2 class="text-xl font-bold">L. Preflight 搬出 pipeline.py,檢查項可注入</h2>
+  <div class="flex gap-2 text-xs"><span class="px-2 py-1 rounded bg-amber-100 text-amber-800">Worth exploring</span><span class="px-2 py-1 rounded bg-slate-100">ports &amp; adapters</span></div>
+  <pre class="font-mono text-sm text-slate-600">pipeline.py(~2136-2351): _check_tesseract · _gchecks · _check_adc · _check_token · _check_sheets
+                        _check_input · _skipped · run_preflight · tesseract_cmd 於 import 時設定(94)
+employer_extract._ensure_tesseract(另一套路徑與 lang="ind+eng")</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">Before</div>
+<pre class="mermaid">
+flowchart LR
+  ADC --> TOK[token] --> SH[Sheets]
+  ADC -. if/else + _skipped .-> SH
+  T[Tesseract 路徑<br/>import 副作用] --> CT[_check_tesseract]
+  E[_ensure_tesseract<br/>另一套] -.沒檢查.-> X[ ]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class E,T leak
+</pre></div>
+    <div class="rounded-lg border border-slate-200 p-3"><div class="text-xs text-slate-500 mb-1">After</div>
+      <div class="deep rounded p-3 text-sm">preflight module:一批進 → 檢查結果＋過/不過出；跳過的傳遞在裡面；Tesseract 設定由同一個主人提供給掃描與頁面評分</div></div>
+  </div>
+  <p><b>Problem:</b>相依鏈手接；每支測試要修補 4~5 個 pipeline 私有名字；頁面評分的 Tesseract 語言包不在檢查範圍。</p>
+  <p><b>Solution:</b>preflight 自成 module,檢查項是可替換的；Tesseract 的路徑與各呼叫端要的語言包有一個主人。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700"><li>假檢查取代修補私有名</li><li>pipeline.py 少兩百行</li></ul>
+  <div class="text-sm bg-amber-50 border border-amber-200 rounded p-2">ADR-0006 拒絕改掃描的 TESS_LANG(成本),各呼叫端語言要守住它。<code>_check_sheets</code> 的 403/404 分類跟著候選 2 走。</div>
+</article>
+
+<section class="bg-white rounded-xl border border-slate-200 p-6 space-y-2">
+  <h2 class="text-lg font-bold">小事(不成候選)</h2>
+  <ul class="list-disc pl-6 text-sm text-slate-700">
+    <li><code>_save_review_images</code> 自己用 regex 解圖序、寫死 <code>{2,5,6}</code>/<code>{2,3}</code>,違反 CONTEXT.md「圖序只在 docx_images」→ 併入候選 B</li>
+    <li><code>aggregate_small_docx</code> 的 docstring 與 <code>test_aggregate.py</code> 檔頭說每列命中都標 vision_review,實際只標勝出者 → 文件漂移</li>
+    <li><code>verify_vision_result</code> docstring 說 LIKELY_OCR_CONFUSION 依信心取值，實際回空 → 文件漂移</li>
+    <li><code>export_roster_xlsx.py</code> 零測試、import 私有 <code>_is_active</code> → 併入 H 或候選 3</li>
+  </ul>
+</section>
+
+</section>
+
+<section id="top-recommendation" class="rounded-xl p-6 deep space-y-3">
+  <h2 class="text-xl font-bold">Top recommendation</h2>
+  <p><b>E. 許可證送審決策</b>。B 欄許可證是整條 pipeline 的核心產出，而決定它去向的六個函式幾乎零直接測試、有一條 ADR-0005 依賴卻沒人守的重複謂詞，且以「圖」而非「docx」為單位做決定。收成一個 module 後 leverage(一個決定介面)與 locality(謂詞與門檻一處)都最大。</p>
+  <p class="text-sm text-slate-300">順序建議：已排定的 <b>A</b>(要在 #9/#10 前)照舊先做 → <b>E</b>(與 F 同輪 grill,F 的「缺圖安靜丟棄」可先開 bug 票)→ <b>I</b> 要在 #7 之前 grill → <b>H</b> 在 #8 之前 → G、J、K、L 隨相鄰候選同輪。</p>
+</section>
+
+</main>
+</body>
+</html>

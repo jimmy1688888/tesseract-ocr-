@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>架構檢視 — LinaOCR 2026-10-21</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+<style>
+  .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #f8fafc; }
+  .shallow { border: 1px dashed #94a3b8; }
+  .leak { color: #dc2626; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900 font-sans">
+<main class="max-w-5xl mx-auto px-4 sm:px-6 py-12 space-y-12">
+
+<header class="space-y-3">
+  <h1 class="text-3xl font-bold">架構檢視 — LinaOCR(tesseract-ocr-)</h1>
+  <p class="text-slate-600">2026-10-21 · #40~#46 之後 · 熱點:pipeline.py、employer_extract.py、送審決策、Vision 驗證</p>
+  <div class="flex flex-wrap gap-4 text-sm text-slate-600">
+    <span><span class="inline-block w-4 h-3 border border-slate-400 align-middle"></span> module</span>
+    <span><span class="inline-block w-4 h-0 border-t-2 border-dashed border-slate-500 align-middle"></span> seam</span>
+    <span><span class="leak font-bold">→</span> 洩漏</span>
+    <span><span class="inline-block w-4 h-3 deep align-middle"></span> deep module</span>
+  </div>
+  <p class="text-sm text-slate-500">不重複已列過的候選(2~5、A~O、#6~#30、#43)。P~T 是新的。</p>
+</header>
+
+<section id="candidates" class="space-y-10">
+
+<!-- R -->
+<article class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">R. 許可證結果成為一份 docx 一個值 —— 就是 #12 + #13</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-slate-200 text-slate-800">已有票</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100">in-process</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">vision_verification.py:30-86 · pipeline.py:1261-1378(反查救援)、1383-1416(組列)、1956-1963(main 拼列)</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">BEFORE:五個清單、三種形狀</p>
+      <pre class="mermaid">
+flowchart LR
+  K[keyin: VisionQueueItem] --> M[main 拼列]
+  VA[vision_auto: dict candidate_value] --> M
+  VR[vision_review: dict] --> M
+  NV[novote_rescue: dict] --> M
+  MR[manual_review: dict final_value] -->|改名 final→candidate| M
+  M -->|清單位置決定 status| ROW[_row_to_sheet_values<br/>isinstance 分支<br/>final_value or candidate_value<br/>reason or note]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class MR,ROW leak
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">AFTER:每條路產出同一種值</p>
+      <pre class="mermaid">
+flowchart LR
+  D[直接 key-in] --> PR
+  V[Vision 驗證] --> PR
+  RS[反查救援<br/>回傳新值] --> PR
+  PR[[許可證結果<br/>值 · 自動/人工 · 理由]] --> ROW[組 Sheets 一列]
+  classDef deep fill:#0f172a,color:#fff;
+  class PR deep
+      </pre>
+    </div>
+  </div>
+  <div class="rounded bg-amber-50 border border-amber-200 p-2 text-sm">已開票:#12「一種 SheetRow,四處建好」、#13「救援回傳新列」幾乎逐條相同。這次的新事實只有兩條,補進 #12:① 寫 Sheets 的 status 由「放在哪個清單」決定,列本身不帶;② <code>_append_upload_log</code>/<code>_load_upload_log</code> 零呼叫端(與 #6 同輪)。另:#45 的 <code>EMPLOYER_COLUMNS</code> 已讓 #12「欄位對應只一處」的 H~O 那一半成立。</div>
+  <p><b>Problem</b>:B 欄的值住在 <code>final_value</code> 或 <code>candidate_value</code>,救援靠 <code>value_key=</code> 參數就地改 dict,寫 Sheets 的 status 由「放在哪個清單」決定。</p>
+  <p><b>Solution</b>:比照 #45 的雇主擷取結果,許可證這一側也成為一個有形狀的值;救援回傳新值。</p>
+  <ul class="list-disc pl-6 text-sm">
+    <li>測試只斷言結果本身</li><li>刪掉 isinstance 與 or 兜底</li><li>死分支「row 自帶鍵」消失</li><li>與 build_vision_queue 舊格式一起收</li>
+  </ul>
+  <p class="text-sm text-slate-500">附帶:<code>_append_upload_log</code>/<code>_load_upload_log</code> 正式流程零呼叫端,<code>Batch.upload_log</code> 的說明卻寫它是「已寫入 Sheets 的列」(與 #6 已知清單刪除同輪處理)。</p>
+</article>
+
+<!-- Q -->
+<article class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">Q. 「一份 docx 一列」要有擁有者</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-100 text-emerald-800">Strong(行為)</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100">in-process</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">pipeline.py:488 classify_by_count · 1550-1612 run_scan · 1956-1967 main</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-4 text-sm space-y-2">
+      <p class="text-xs font-semibold text-slate-500">BEFORE:零張圖的 docx</p>
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="px-2 py-1 border rounded">0 張圖</span><span>→</span>
+        <span class="px-2 py-1 border rounded">classify → small</span><span>→</span>
+        <span class="px-2 py-1 border rounded">small_bucket 空</span><span class="leak">→</span>
+        <span class="px-2 py-1 border-2 border-red-500 rounded leak">matches.csv 沒有它</span><span class="leak">→</span>
+        <span class="px-2 py-1 border-2 border-red-500 rounded leak">Sheets 沒有它</span>
+      </div>
+      <p class="text-slate-500">雇主那側卻產出「docx 無內嵌圖」擷取結果 —— L 欄的原因沒有列可以寫。<code>--image</code> 對不到也是同一個洞。</p>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-4 text-sm space-y-2">
+      <p class="text-xs font-semibold text-slate-500">AFTER:以這一批為準</p>
+      <div class="deep rounded p-3">batch.docx_files(N 份)⟶ 恰好 N 個結果;產不出來的是一列有理由的人工審查</div>
+      <p class="text-slate-500">不變式只在一處成立,測試一行寫完:N 份輸入 → N 列。</p>
+    </div>
+  </div>
+  <p><b>Problem</b>:main 拼完五個清單,從不比對寫出去的 docx 集合是否等於這一批;#39 修了一個洞,零張圖是另一個。</p>
+  <p><b>Solution</b>:一個地方以「一批」為準保證每份 docx 恰好一個結果(CONTEXT「許可證」:一份 docx 只有一列)。</p>
+  <ul class="list-disc pl-6 text-sm"><li>安靜消失變人工審查</li><li>不變式一支測試守住</li><li>和 R 同一個值</li></ul>
+</article>
+
+<!-- P -->
+<article class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">P. 送審決策只吃讀值(matches.csv 不再夾帶半個決定)</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-100 text-emerald-800">Strong</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100">in-process</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">pipeline.py:864-923 decide_result · 926-962 aggregate_small_docx · submission_decision.py _decide_large / _decide_small</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">BEFORE:門檻判兩次</p>
+      <pre class="mermaid">
+flowchart LR
+  S[掃描當下<br/>decide_result<br/>CONF_KEY_IN / CONF_VOTE_MIN] -->|vision_review, note| CSV[(matches.csv)]
+  A[aggregate_small_docx<br/>挑 winner] --> CSV
+  CSV --> D[送審決策 decide<br/>讀 vision_review 旗標<br/>再挑一次 small winner]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class S,A leak
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">AFTER</p>
+      <pre class="mermaid">
+flowchart LR
+  S[掃描:只產讀值] --> CSV[(matches.csv<br/>讀值 + 觀測欄)]
+  CSV --> D[[送審決策<br/>門檻與 winner 只在這裡]]
+  classDef deep fill:#0f172a,color:#fff;
+  class D deep
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem</b>:submission_decision 說「多數票判斷與各信心門檻只記在這裡」,但上游已用同一批門檻立了 <code>vision_review</code>,決策再讀這個旗標;small 的 winner 寫兩份;測試 fixture 抄上游規則(<code>test_submission_decision.py:28</code>)。</p>
+  <p><b>Solution</b>:刪除測試成立 —— 刪掉 decide_result 的判斷與 aggregate 的挑選,複雜度集中到送審決策;CSV 的旗標降為觀測欄。</p>
+  <ul class="list-disc pl-6 text-sm"><li>門檻真的只一份</li><li>fixture 不抄規則</li><li>不可能的旗標組合消失</li></ul>
+  <div class="rounded bg-amber-50 border border-amber-200 p-2 text-sm">ADR-0005(分層掃描)的停擴掃依賴多數票謂詞 —— 已由 #40 共用 is_permit_vote,這裡不動它。舊 21 份 matches.csv 的 vision_review 欄是歷史資料,讀法要相容。</div>
+</article>
+
+<!-- S -->
+<article class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">S. 次頁台仲區塊搬出雇主擷取</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-amber-100 text-amber-800">Worth exploring</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100">local-substitutable</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">employer_extract.py:891-1059(agency_block_from_next_page 等)· 926 <code>from pipeline import preprocess</code></p>
+  <div class="grid md:grid-cols-2 gap-4 text-sm">
+    <div class="rounded-lg border border-slate-200 p-4 space-y-2">
+      <p class="text-xs font-semibold text-slate-500">BEFORE</p>
+      <div class="flex gap-2 items-center flex-wrap">
+        <span class="px-2 py-1 border rounded">pipeline</span><span class="leak">⇄</span><span class="px-2 py-1 border rounded">employer_extract(含仲介次頁)</span>
+      </div>
+      <p class="text-slate-500">互相 import(第 25 行註解說「兩側不互相 import」);前處理參數手抄一份 <code>{"channel":"R","scale":2,"median":3}</code>;雇主擷取載入失敗 → 反查救援一起失效。</p>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-4 space-y-2">
+      <p class="text-xs font-semibold text-slate-500">AFTER</p>
+      <div class="deep rounded p-3">次頁全文 → {電話, 名稱, 地址}:可用 Vision 全文重放測試,不需 docx/Tesseract/Vision</div>
+    </div>
+  </div>
+  <p><b>Problem</b>:讀的是仲介機構,卻住在雇主擷取,還和 pipeline 循環。</p>
+  <p><b>Solution</b>:台仲區塊解析成為自己的 module,與候選 B(頁面地圖)、3(反查決策梯)同輪。</p>
+</article>
+
+<!-- T -->
+<article class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">T. Vision 全文素材:寫的一方與讀的一方同一個 module</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-amber-100 text-amber-800">Worth exploring</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100">local-substitutable</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">pipeline.py:1195、1216-1232 write_employer_texts · real_samples.py:98-107、156-162 · snapshots.py:343</p>
+  <div class="grid md:grid-cols-3 gap-3 text-sm">
+    <div class="rounded border p-3"><p class="font-semibold">pipeline 寫</p><code>{docx: {image, text}}</code></div>
+    <div class="rounded border p-3"><p class="font-semibold">素材庫讀</p><code>{image, roi, texts: {"0.35": text}}</code></div>
+    <div class="rounded border p-3"><p class="font-semibold">許可證(手工)</p><code>{stem_image: {crop, roi, text}}</code>;<code>vision_text()</code> 不存全文</div>
+  </div>
+  <p><b>Problem</b>:「全文是唯一花錢買來的東西」只落實一半:一次正式執行要變成素材得手工轉檔;H~O 快照只走 extract_employer_fields,切結書救援與擷取狀況(#45/#46)沒被快照守住。</p>
+  <p><b>Solution</b>:重放素材的格式由一個 module 寫也由它讀;和候選 J(契約頁讀取配方)相鄰。</p>
+</article>
+
+</section>
+
+<section id="top-recommendation" class="rounded-xl deep p-6 space-y-3">
+  <h2 class="text-xl font-bold">首推:Q(零張圖的 docx 從 Sheets 安靜消失)</h2>
+  <p>它是真 bug,和 #39 同一類:一份 docx 在 Sheets 上沒有列,人不會知道要去找它。修法小(一張行為票),而且「N 份輸入 → N 列」這條不變式寫成測試後,之後 #12 改列的形狀時有一張網守著。</p>
+  <p>接著是 #12 → #13(就是 R,補上這次的兩條新事實),再來 P:它改送審決策的上游,等下游的列定形後再做才不會改兩次。S、T 等候選 B/J/3 那一輪。</p>
+</section>
+
+</main>
+</body>
+</html>

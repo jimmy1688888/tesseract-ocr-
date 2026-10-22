@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Architecture review — LinaOCR</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+<style>
+  body { font-family: "Noto Sans TC", system-ui, sans-serif; }
+  .seam { border-style: dashed !important; }
+  .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #f8fafc; }
+  .label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+  .mermaid { display: flex; justify-content: center; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900">
+<main class="max-w-5xl mx-auto px-4 sm:px-6 py-12 space-y-14">
+
+<header class="space-y-4">
+  <p class="label text-slate-500">LinaOCR · 2026-10-15 · 分支 fix/2-roster-is-not-a-gate @ 704372b</p>
+  <h1 class="font-serif text-4xl">架構檢視 —— #3 之後</h1>
+  <p class="text-slate-600 text-sm">範圍：最近 40 個 commit 的熱點（pipeline.py ×15、employer_extract.py ×11）與 #3 新增的 identity / google_clients。
+  2026-09-18 的 8 個候選已開成 #1~#22，<b>本份只列票沒涵蓋的</b>。</p>
+  <div class="flex flex-wrap gap-4 text-xs text-slate-600">
+    <span class="flex items-center gap-2"><span class="inline-block w-5 h-4 border-2 border-slate-500 bg-white"></span>module</span>
+    <span class="flex items-center gap-2"><span class="inline-block w-5 h-4 border-2 border-slate-500 seam"></span>seam</span>
+    <span class="flex items-center gap-2"><span class="inline-block w-6 border-t-2 border-red-600"></span>洩漏</span>
+    <span class="flex items-center gap-2"><span class="inline-block w-5 h-4 deep"></span>deep module</span>
+  </div>
+  <nav class="text-sm flex flex-wrap gap-x-4 gap-y-1 text-indigo-700">
+    <a href="#c1">1 一次執行</a><a href="#c2">2 Sheets 目的地</a><a href="#c3">3 反查決策梯</a>
+    <a href="#c4">4 main 的結果</a><a href="#c5">5 路名補充檔</a><a href="#tickets">#3 對既有票的影響</a><a href="#top">首選</a>
+  </nav>
+</header>
+
+<section id="candidates" class="space-y-12">
+
+<!-- ───────────── 1 ───────────── -->
+<article id="c1" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-2xl mr-2">1 · 「一次執行」成為一個 module</h2>
+    <span class="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-800">Strong</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-700">in-process</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-red-100 text-red-800">含已驗證 bug</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">pipeline.py:119-120 · 1604 · 1699-1709 · 1726-1731 · 1789 · 1839-1841 · 2473-2478<br>test_tiered_scan.py:38-39 · test_preflight.py:32,39,53,100,203 · test_address_doubt.py:261-267,314-359</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="label text-slate-500 mb-2">Before</p>
+      <pre class="mermaid">
+flowchart TB
+  F["--file D:\x\32538.docx"] --> M[main]
+  M -->|"完整 Path"| E[collect_employer_fields]
+  M -->|"只剩檔名 source_docx"| R[反查救援]
+  G[("INPUT_DIR = ./docs<br>import 時綁死")] -.-> R
+  R -->|"./docs/32538.docx"| X["不存在 → 靜默 continue<br>存在 → 讀到另一份"]
+  C[("_EMPLOYER_FIELDS_BY_DOCX<br>process 全域")] -.-> D[write_doubt_report]
+  classDef leak stroke:#dc2626,stroke-width:2px,color:#991b1b;
+  class G,X,C leak
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="label text-slate-500 mb-2">After</p>
+      <pre class="mermaid">
+flowchart TB
+  F["--file / ./docs"] --> RC["一次執行<br>檔名 → Path · output_dir<br>衍生路徑 · 本次結果"]
+  RC --> S[run_scan]
+  RC --> E[collect_employer_fields]
+  RC --> R[反查救援]
+  RC --> D[write_doubt_report]
+  classDef deep fill:#0f172a,color:#f8fafc,stroke:#0f172a;
+  class RC deep
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem</b>：docx 一路被縮成檔名，救援時再用 <code>INPUT_DIR / 檔名</code> 拼回去 —— <code>--file</code> 指到別的資料夾時，救援讀錯檔或靜默跳過。</p>
+  <p><b>Solution</b>：一個 module 擁有「這一次執行」：輸入 docx 的完整路徑、輸出目錄與其衍生路徑、本次的雇主結果；往下傳，不再讀 import 時綁死的全域。</p>
+  <ul class="list-disc pl-5 text-sm space-y-1">
+    <li>locality：路徑規則集中一處</li>
+    <li>修掉 <code>--file</code> 救援讀錯檔</li>
+    <li>測試傳入，不再 monkeypatch 5 個全域</li>
+    <li>雇主快取不跨執行殘留</li>
+    <li>順便拆掉 <code>list_input_docx</code> 的 def 時綁定陷阱</li>
+  </ul>
+  <div class="rounded bg-amber-50 border border-amber-200 px-3 py-2 text-sm">⚠ 與 #12、#14、#17、#18 同在 pipeline.py —— 檔案衝突，別同時開。#18（裁切圖寫出移到 run_scan）會受益於它，建議排在 #18 之前。</div>
+</article>
+
+<!-- ───────────── 2 ───────────── -->
+<article id="c2" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-2xl mr-2">2 · Sheets 目的地成為 deep module</h2>
+    <span class="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-800">Strong</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-700">true external (mock)</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">google_clients.py:15-16, 51-59 · pipeline.py:76, 455-475, 1652-1669, 2319-2349<br>test_google_identity.py:244-259（FakeSheets 鏈）· 線 B 的 gemini_bench（讀 P 欄）</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-4 space-y-2 relative">
+      <p class="label text-slate-500">Before —— 知識散在 pipeline 四處</p>
+      <div class="border-2 border-slate-400 rounded p-2 text-xs">google_clients.sheets_service()<div class="text-slate-500">→ 原始 googleapiclient Resource（shallow）</div></div>
+      <div class="grid grid-cols-2 gap-2 text-xs">
+        <div class="border border-red-400 rounded p-2 text-red-800">_sheets_append_atomic<br><span class="text-slate-500">range 字串 · valueInputOption · insertDataOption</span></div>
+        <div class="border border-red-400 rounded p-2 text-red-800">_is_retryable_google_error<br><span class="text-slate-500">429/5xx 分類</span></div>
+        <div class="border border-red-400 rounded p-2 text-red-800">_check_sheets<br><span class="text-slate-500">fields 字串 · 403/404 分類</span></div>
+        <div class="border border-dashed border-red-400 rounded p-2 text-red-800">gemini_bench（即將）<br><span class="text-slate-500">再拼一次 range</span></div>
+      </div>
+      <p class="text-xs text-slate-500">測試要造 <code>spreadsheets().get().execute()</code> 整條鏈</p>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-4 space-y-3">
+      <p class="label text-slate-500">After</p>
+      <div class="deep rounded-lg p-4 space-y-2">
+        <p class="label text-slate-300">Sheets 目的地</p>
+        <p class="font-mono text-sm">append_rows(values)<br>read_rows(columns)<br>probe() → 診斷</p>
+        <div class="grid grid-cols-2 gap-1 text-[11px] text-slate-400 pt-2 border-t border-slate-600">
+          <span>試算表 ID · 工作表</span><span>range 組裝</span><span>寫入選項</span><span>重試判斷</span><span>403 / 404 分類</span><span>身分 → service</span>
+        </div>
+      </div>
+      <div class="flex gap-2 text-xs">
+        <div class="flex-1 border-2 border-slate-400 rounded p-2 text-center">pipeline</div>
+        <div class="flex-1 border-2 border-slate-400 rounded p-2 text-center">preflight</div>
+        <div class="flex-1 border-2 border-slate-400 rounded p-2 text-center">gemini_bench</div>
+      </div>
+    </div>
+  </div>
+  <p><b>Problem</b>：#3 讓 Sheets 的「身分」離開了 pipeline，但 Sheets 的「讀寫知識」沒有 —— <code>sheets_service()</code> 交出原始 Resource，每個呼叫端自己懂 Google 的 request 形狀。</p>
+  <p><b>Solution</b>：把試算表位置、range、寫入選項、重試判斷、狀態碼分類收進一個 module，interface 只剩「寫列／讀欄／探測」。</p>
+  <ul class="list-disc pl-5 text-sm space-y-1">
+    <li>leverage：一個 interface，三個呼叫端</li>
+    <li>線 B 讀 P 欄不再重拼 range</li>
+    <li>測試換掉一個 adapter，不造鏈</li>
+    <li><code>_sheets_append_atomic</code> 從零測試變可測</li>
+    <li>#4 的 <code>_check_sheets</code> 變一行</li>
+  </ul>
+  <div class="rounded bg-sky-50 border border-sky-200 px-3 py-2 text-sm">#12 只管「列的形狀」，本候選管「列送到哪、怎麼送」—— 不重疊，但 #12 做完後 <code>append_rows</code> 的參數型別可直接用 SheetRow。</div>
+</article>
+
+<!-- ───────────── 3 ───────────── -->
+<article id="c3" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-2xl mr-2">3 · 仲介反查的決策梯收進名冊查表器</h2>
+    <span class="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-800">Strong</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-700">in-process</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">pipeline.py:1852-1922 · permit_lookup.py:220-221, 300-339 · test_agency_rescue.py</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="label text-slate-500 mb-2">Before —— 決策在呼叫端，零測試</p>
+      <pre class="mermaid">
+flowchart TB
+  P["pipeline 反查救援<br>（排優先序）"] --> A[agencies_by_phone]
+  P --> B[agencies_by_phone_prefix]
+  P --> C[best_by_name]
+  P --> D[best_by_address]
+  P -->|"max(_ratio)<br>0.78 vs 0.72 兩把尺"| Z{{判決 + reason 字串}}
+  T["test_agency_rescue"] -.只測葉子.-> C
+  T -.-> D
+  classDef leak stroke:#dc2626,stroke-width:2px,color:#991b1b;
+  class P,Z leak
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="label text-slate-500 mb-2">After</p>
+      <pre class="mermaid">
+flowchart TB
+  P[pipeline 反查救援] -->|台仲區塊| R["名冊查表器 · resolve<br>電話精確 → 前綴 → 名稱/地址 → 多家<br>判決 + 依據"]
+  T[測試] -->|"PermitLookup(records)"| R
+  classDef deep fill:#0f172a,color:#f8fafc,stroke:#0f172a;
+  class R deep
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem</b>：「電話精確 → 前綴 → 名稱/地址 → 多家」這道優先序寫在 pipeline，只有葉子函式有測試；而且名稱與地址的相似度用不同門檻，卻被 <code>max()</code> 放在同一把尺上比。</p>
+  <p><b>Solution</b>：名冊查表器自己回答「這個台仲區塊對應哪張許可證、依據是什麼」，pipeline 只轉交區塊、收判決。</p>
+  <ul class="list-disc pl-5 text-sm space-y-1">
+    <li>locality：優先序與 reason 字串同一處</li>
+    <li>不碰 Vision 就能測整道梯</li>
+    <li>「兩把尺比大小」浮上檯面</li>
+    <li>名冊查表器變 deep</li>
+  </ul>
+  <div class="rounded bg-sky-50 border border-sky-200 px-3 py-2 text-sm">與 #13（救援回傳新列）同一段程式 —— 可同一輪做：#13 改輸出形狀，本候選改決策歸屬。</div>
+</article>
+
+<!-- ───────────── 4 ───────────── -->
+<article id="c4" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-2xl mr-2">4 · main 交出一次執行的結果</h2>
+    <span class="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-800">Worth exploring</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-700">in-process</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">pipeline.py:2460-2619, 2651-2654 · 執行.bat</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-4 space-y-1">
+      <p class="label text-slate-500 mb-2">Before —— 閘門關上，結束碼仍是 0</p>
+      <div class="h-10 border-l-4 border-red-500 bg-red-50 px-3 flex items-center text-sm">preflight 未通過 → <code>return</code></div>
+      <div class="h-10 border-l-4 border-red-500 bg-red-50 px-3 flex items-center text-sm">找不到檔案 → <code>return</code></div>
+      <div class="h-10 border-l-4 border-red-500 bg-red-50 px-3 flex items-center text-sm">沒有 .docx → <code>return</code></div>
+      <div class="h-10 border-l-4 border-slate-400 bg-slate-50 px-3 flex items-center text-sm">main → None → exit 0</div>
+      <div class="h-10 border-l-4 border-slate-400 bg-slate-50 px-3 flex items-center text-sm">執行.bat 一律印「處理完成」</div>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-4 space-y-1">
+      <p class="label text-slate-500 mb-2">After</p>
+      <div class="deep rounded p-4 text-sm">main → <b>執行結果</b><br><span class="text-slate-400 text-xs">被哪道閘門擋下 · 各批筆數 · 結束碼</span></div>
+      <div class="h-10 border-l-4 border-emerald-500 bg-emerald-50 px-3 flex items-center text-sm"><code>sys.exit(結果.結束碼)</code></div>
+      <div class="h-10 border-l-4 border-emerald-500 bg-emerald-50 px-3 flex items-center text-sm">執行.bat 依 errorlevel 分兩種結語</div>
+      <div class="h-10 border-l-4 border-emerald-500 bg-emerald-50 px-3 flex items-center text-sm">測試斷言結果，不翻 log</div>
+    </div>
+  </div>
+  <p><b>Problem</b>：main 約 160 行，interface 是 <code>Namespace → None</code>；三種「整批不跑」都只是 return，程序外看不出差別，Step 4a 的組裝也沒有測試入口。</p>
+  <p><b>Solution</b>：main 回傳一次執行的結果，入口把它轉成結束碼。</p>
+  <ul class="list-disc pl-5 text-sm space-y-1">
+    <li>「閘門」語意延伸到程序外</li>
+    <li>main 有了可斷言的 interface</li>
+    <li>批次檔能分辨成功與失敗</li>
+  </ul>
+  <div class="rounded bg-slate-50 border border-slate-200 px-3 py-2 text-sm">已核實：執行.bat 確實不看 errorlevel，但結語有寫「若上方有錯誤訊息，請截圖回報」—— 使用者不是完全被誤導，所以列 Worth exploring 而非 Strong。與候選 1 同做最順。</div>
+</article>
+
+<!-- ───────────── 5 ───────────── -->
+<article id="c5" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-2xl mr-2">5 · 路名補充檔與名冊補充檔對稱</h2>
+    <span class="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-800">Worth exploring</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-700">local-substitutable</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">address_db.py:42-45, 98-141 · permit_lookup.py:46-85 · test_custom_agencies.py · CONTEXT.md:35</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-4">
+      <p class="label text-slate-500 mb-3">Before —— 同一個模式，兩種 seam</p>
+      <div class="flex items-end gap-6 h-48">
+        <div class="flex flex-col items-center gap-1">
+          <div class="w-20 h-8 border-2 border-dashed border-emerald-600 rounded text-[10px] flex items-center justify-center">path 注入</div>
+          <div class="w-20 h-32 bg-slate-200 rounded text-[10px] flex items-center justify-center text-center">名冊補充檔<br>11 支測試</div>
+        </div>
+        <div class="flex flex-col items-center gap-1">
+          <div class="w-20 h-8 border-2 border-red-500 rounded text-[10px] flex items-center justify-center text-red-700">全域路徑</div>
+          <div class="w-20 h-32 bg-slate-200 rounded text-[10px] flex items-center justify-center text-center">路名補充檔<br><b class="text-red-700">0 支</b></div>
+        </div>
+      </div>
+      <p class="text-xs text-slate-500 mt-2">32 支地址測試綁在 2.4MB、gitignore 的 AllData.json 上</p>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-4">
+      <p class="label text-slate-500 mb-3">After</p>
+      <div class="flex items-end gap-6 h-48">
+        <div class="flex flex-col items-center gap-1">
+          <div class="w-20 h-8 border-2 border-dashed border-emerald-600 rounded text-[10px] flex items-center justify-center">path 注入</div>
+          <div class="w-20 h-32 bg-slate-200 rounded text-[10px] flex items-center justify-center">名冊補充檔</div>
+        </div>
+        <div class="flex flex-col items-center gap-1">
+          <div class="w-20 h-8 border-2 border-dashed border-emerald-600 rounded text-[10px] flex items-center justify-center">path 注入</div>
+          <div class="w-20 h-32 bg-slate-200 rounded text-[10px] flex items-center justify-center text-center">路名補充檔<br>小資料測試</div>
+        </div>
+      </div>
+      <p class="text-xs text-slate-500 mt-2">快取留在公開入口；載入本身吃路徑</p>
+    </div>
+  </div>
+  <p><b>Problem</b>：CONTEXT.md 說兩個補充檔是同一個模式，但路名那邊讀全域路徑、就地改 dict、載入被 lru_cache 包住 —— 換不了資料，零測試。</p>
+  <p><b>Solution</b>：載入吃路徑，快取只留在對外入口；和名冊補充檔一樣能用小檔案測。</p>
+  <ul class="list-disc pl-5 text-sm space-y-1">
+    <li>同一模式，同一種 seam</li>
+    <li>新機器不必帶 2.4MB 也能測補充邏輯</li>
+  </ul>
+  <div class="rounded bg-slate-50 border border-slate-200 px-3 py-2 text-sm">不牴觸 ADR-0001（address_db 擁有台灣地址正規化）—— 只動載入，不動歸屬。</div>
+</article>
+
+</section>
+
+<!-- ───────────── 既有票 ───────────── -->
+<section id="tickets" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4 shadow-sm">
+  <h2 class="font-serif text-2xl">#3 對既有票的影響</h2>
+  <div class="overflow-x-auto">
+  <table class="w-full text-sm">
+    <thead class="text-left text-slate-500 label"><tr><th class="py-2 pr-4">票</th><th class="py-2">變化</th></tr></thead>
+    <tbody class="divide-y divide-slate-100 align-top">
+      <tr><td class="py-2 pr-4 font-mono">#16</td><td class="py-2"><b class="text-emerald-700">範圍縮小</b>：非測試檔的 <code>from pipeline import</code> 只剩 employer_extract.py:772（<code>preprocess</code>）一處；票內「client=None 會執行 pipeline 整個 module body」那句已過時。</td></tr>
+      <tr><td class="py-2 pr-4 font-mono">#4</td><td class="py-2"><b class="text-amber-700">前提有兩處變了</b>：① 刪 <code>_check_impersonation</code> 後，未設定時的訊息來自共用套件，寫「請在本專案的 <b>config.py</b> 填入」—— 本 repo 是 identity.py；且 <code>PIPELINE_SA_EMAIL=""</code> 能讓它為空，不算嚴格恆真。② 「preflight 有測試」已部分完成；<code>TestCheckVisionClient</code> 釘著 #4 要刪的函式，要一併刪。</td></tr>
+      <tr><td class="py-2 pr-4 font-mono">#4</td><td class="py-2"><b class="text-amber-700">沒寫到</b>：<code>run_preflight</code> 的 ADC → 權杖短路重寫了共用套件 <code>google_checks</code> 的順序，且本 repo 沒跑 <code>check_gcloud</code>。</td></tr>
+      <tr><td class="py-2 pr-4 font-mono">#3 尾巴</td><td class="py-2"><code>identity.credentials()</code> 正式程式碼零呼叫者（google_clients 直接呼叫身分物件），通不過 deletion test；identity.py 的 docstring 卻說「呼叫端只需要 credentials(scopes)」。線 B 若要用 Vertex 才留，否則刪。</td></tr>
+      <tr><td class="py-2 pr-4 font-mono">—</td><td class="py-2">test_pledge_rescue.py:125/140/153 換掉 <code>vision_full_text</code>，而 <code>rescue_name_from_pledge(p, client=…)</code> 已有注入點沒用到 —— 小，順手時修。</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ───────────── 首選 ───────────── -->
+<section id="top" class="rounded-xl deep p-8 space-y-3">
+  <p class="label text-slate-400">Top recommendation</p>
+  <h2 class="font-serif text-3xl"><a href="#c1" class="underline decoration-slate-500">1 · 「一次執行」成為一個 module</a></h2>
+  <p class="text-slate-300">唯一帶著<b class="text-white">已驗證、會改變結果的 bug</b> 的候選（<code>--file</code> 救援讀錯檔或靜默跳過），而它擋著的東西最多：pipeline 測試裡大半的 monkeypatch、#18 的落點、候選 4 的 interface。線 B 若要先開，則改選 <a href="#c2" class="underline">候選 2</a> —— gemini_bench 是 Sheets 目的地的第二個呼叫端。</p>
+</section>
+
+</main>
+</body>
+</html>
