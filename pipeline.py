@@ -984,16 +984,15 @@ def build_vision_queue(csv_path: Path) -> SubmissionQueue:
     direct_review: list[SheetRow]        = []
 
     for d in read_decisions(csv_path):
-        docx_name = d.source_docx
         if d.destination is Destination.直接KEYIN:
             keyin_rows.append(SheetRow(d.source_docx, d.candidate_value,
                                        SheetStatus.KEYED_IN, d.reason))
             continue
         if d.destination is Destination.直接人工審查:
-            direct_review.append(SheetRow(docx_name, "", SheetStatus.MANUAL_REVIEW, d.reason))
+            direct_review.append(SheetRow(d.source_docx, "", SheetStatus.MANUAL_REVIEW, d.reason))
             continue
         if d.destination is Destination.反查救援 and not d.image_name:
-            manual_review.append(SheetRow(docx_name, "", SheetStatus.MANUAL_REVIEW, d.reason))
+            manual_review.append(SheetRow(d.source_docx, "", SheetStatus.MANUAL_REVIEW, d.reason))
             continue
         vision_items.append(VisionQueueItem(
             source_docx     = d.source_docx,
@@ -1301,13 +1300,12 @@ def rescue_manual_review_via_agency_phone(
                 logger.warning(f"  ⚠ {docx_name} 次頁仲介區塊擷取失敗:{e!r}")
                 block_cache[docx_name] = {"phones": [], "name": "", "address": ""}
         pick = pick_agency(block_cache[docx_name], pl)
-        if pick.permit:
-            rescued += 1
-            row = replace(row, permit=pick.permit, reason=f"{row.reason}；{pick.note}")
-            logger.info(f"  ↻ {docx_name} {pick.note}")
-        elif pick.note:
-            row = replace(row, reason=f"{row.reason}；{pick.note}")
-            logger.info(f"  ⚠ {docx_name} {pick.note}")
+        if pick.note:
+            # 要人工擇一時沒有許可證:B 欄留種子值(全無命中是空、單一判讀是候選值)
+            row = replace(row, permit=pick.permit or row.permit,
+                          reason=f"{row.reason}；{pick.note}")
+            rescued += bool(pick.permit)
+            logger.info(f"  {'↻' if pick.permit else '⚠'} {docx_name} {pick.note}")
         out.append(row)
     logger.info(f"  反查救回 {rescued}/{len(rows)} 筆(填許可證+機構欄)")
     return out

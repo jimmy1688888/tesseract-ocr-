@@ -158,7 +158,7 @@ class TestRescueReturnsNewRows:
 
         for s in seeds:
             (tmp_path / s.source_docx).write_bytes(b"x")
-        roster = Roster(phone={"0211111111": ["1111"]})
+        roster = Roster(phone={"0211111111": ["1111"], "0244444444": ["4444", "5555"]})
         monkeypatch.setattr(pipeline, "_permit_lookup", lambda: roster)
         monkeypatch.setattr(google_clients, "vision_client", lambda: object())
         monkeypatch.setattr(employer_extract, "agency_block_from_next_page",
@@ -177,3 +177,12 @@ class TestRescueReturnsNewRows:
             "a.docx", "1111", SheetStatus.MANUAL_REVIEW,
             "large:全無命中；[電話反查救回] 次頁台仲電話 0211111111 → 許可證 1111／甲仲介(仍請人工核對)")
         assert got[1] is seeds[1]                                # 救不回:原列、種子值留著
+
+    def test_ambiguous_keeps_the_seed_value(self, monkeypatch, tmp_path):
+        """單一判讀低信心的種子列 B 欄是候選值:電話多家要人工擇一時,候選值留著、理由接上各家。"""
+        seed = SheetRow("c.docx", "9999", SheetStatus.MANUAL_REVIEW, "單一判讀低信心")
+        [got] = self._run(monkeypatch, tmp_path, {"c.docx": _block(["0244444444"])}, [seed])
+
+        assert got.permit == "9999"
+        assert got.reason == ("單一判讀低信心；[電話反查·需人工擇一] 台仲電話 0244444444 "
+                              "命中2 家:4444／丁仲介、5555／戊仲介")

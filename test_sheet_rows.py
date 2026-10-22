@@ -161,8 +161,8 @@ KEYED, REVIEW = "keyed-in", "manual_review"
 NOVOTE = "[單一判讀低信心 conf=30.0<50,略過 ROI Vision 改走次頁電話反查] permit部分命中無多數"
 NOHIT = "large:全無命中"
 
-# #12 之前的程式寫出的十五欄,逐格(順序也是:key-in 組在前、人工審查組在後)。
-EXPECTED = [
+# #12 之前的程式寫出的十五欄(快照,不是核對值),逐格(順序也是:key-in 組在前、人工審查組在後)。
+BEFORE_12 = [
     _row("k.docx", "1111", KEYED, "large:permit多數票",
          ("王小明", "WANG XIAO MING", "某市某路1號", "某市某路1號", "",
           "No.1, X Rd.", "999", "0912-345-678")),
@@ -199,4 +199,4 @@ EXPECTED = [
 
 def test_fifteen_columns_cell_by_cell(world):
     P.main(_opts())
-    assert world == EXPECTED
+    assert world == BEFORE_12

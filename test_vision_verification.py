@@ -10,6 +10,7 @@ import pytest
 
 import permit_patterns
 from pipeline import VisionQueueItem
+from sheet_row import SheetStatus
 from permit_patterns import permit_in_text
 from vision_verification import run_vision_items
 
@@ -78,6 +79,8 @@ class TestOneRowPerItem:
         rows = {"auto": auto, "review": review}[where]
         assert len(rows) == 1 and len(auto) + len(review) + len(rescue) == 1
         assert rows[0].permit == b
+        assert rows[0].status is {"auto": SheetStatus.KEYED_IN,
+                                  "review": SheetStatus.MANUAL_REVIEW}[where]
 
     def test_vision_only_when_tesseract_had_nothing(self, tmp_path):
         auto, review, _ = run_vision_items(
