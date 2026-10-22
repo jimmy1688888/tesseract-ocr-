@@ -280,7 +280,7 @@ E~G 空，先確認 `data/agency_roster.json` 存在、再確認 B 欄有值且�
 流程（`employer_extract.py`，由 `pipeline.collect_employer_fields` 對每份 docx 呼叫一次）：
 
 1. **找契約頁（不花 API）**：對 docx 每張圖的上緣 35% 跑本機 Tesseract，
-   數「契約頁特徵字」（PERJANJIAN KERJA、甲方名稱、Nomor Telepon…）命中數，
+   數「契約頁特徵字」（PERJANJIAN KERJA、Nama Majikan、Nomor Telepon…）命中數，
    取最高分且 ≥2 者。找不到 → 該檔 H~O 留空、存候選頁截圖供人工判斷。
 2. **ROI 裁切**：契約頁上緣 35% 全寬（`EMPLOYER_ROI`），涵蓋標題、甲方名稱、
    地址中英、電話。裁切圖（去紅章**前**原貌）存 `scan_results/employer_crops/`

@@ -21,7 +21,7 @@ from real_samples import REAL_DOCX, checked_contract_page, needs_samples, sample
 _FORM_TEXT = ("Nama Majikan: FANGYUAN TOWNSHIP FARMERS' ASSOCIATION "
               "Nama Pemberi Kerja: Fangyuan Township Farmers' Association "
               "Alamat: No. 195, Fangyuan Section "
-              "電話號碼 Nomor Telepon: 04-8984111")
+              "Nomor Telepon: 04-8984111")
 # 次頁:版面乾淨,原圖就讀得到,但只有樣板 prose(PROSE ×1)
 _PROSE_TEXT = ("Perjanjian Kerja dibuat dalam rangkap 2 (dua) asli, "
                "1 (satu) untuk PIHAK PERTAMA, SELANJUTNYA")
