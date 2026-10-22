@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 
 from contract_template import Template
+from tw_phone import display_form
 
 
 class ExtractionStatus(Enum):
@@ -118,5 +119,10 @@ class EmployerExtraction:
         return compose_doubts(((Doubt(WHOLE, reason),) if reason else ()) + self.doubts)
 
     def cell(self, key: str) -> str:
-        """H~O 某一欄的內容(key 是 EMPLOYER_COLUMNS 的值)。"""
-        return self.疑慮標示 if key == DOUBT_KEY else getattr(self.values, key)
+        """H~O 某一欄的內容(key 是 EMPLOYER_COLUMNS 的值)。
+        電話的值是電話標準形(比對用),寫 O 欄這一刻才轉成給人讀的顯示形(#49)。"""
+        if key == DOUBT_KEY:
+            return self.疑慮標示
+        if key == "電話":
+            return display_form(self.values.電話)
+        return getattr(self.values, key)

@@ -64,6 +64,19 @@ class TestExtractionFailureIsAResult:
         assert row[11] == "H~O:雇主擷取失敗(例外),未擷取"   # L 寫原因(#46)
 
 
+class TestSheetsRowPhone:
+    """寫 Sheets 的那一列:O 欄是電話顯示形,擷取結果的值仍是標準形(#49)。"""
+
+    def test_o_column_written_in_display_form(self, offline_identity):
+        import pipeline
+        got = {"99996.docx": EmployerExtraction(ExtractionStatus.擷取成功,
+                                                EmployerValues(電話="0920875667"))}
+        row = pipeline._row_to_sheet_values({"source_docx": "99996.docx"},
+                                            pipeline.SheetStatus.MANUAL_REVIEW, got)
+        assert row[14] == "0920-875-667"                  # O 欄
+        assert got["99996.docx"].values.電話 == "0920875667"
+
+
 class TestColumns:
 
     def test_h_to_o_in_order(self):
@@ -79,7 +92,16 @@ class TestColumns:
             Doubt("地址_中標準", "打錯字的欄位")
 
     def test_cell_gives_values_and_the_composed_l_column(self):
-        r = EmployerExtraction(ExtractionStatus.擷取成功, EmployerValues(電話="02-1234"),
+        r = EmployerExtraction(ExtractionStatus.擷取成功, EmployerValues(地址_中="台北市"),
                                (Doubt("地址_中_標準", "中文地址未擷取到"),))
-        assert r.cell("電話") == "02-1234"
+        assert r.cell("地址_中") == "台北市"
         assert r.cell("疑慮標示") == "J:中文地址未擷取到"
+
+    def test_o_column_is_display_form_but_value_stays_standard_form(self):
+        """O 欄寫電話顯示形;擷取結果的值仍是電話標準形(比對、快照都用它)(#49)。"""
+        r = EmployerExtraction(ExtractionStatus.擷取成功, EmployerValues(電話="037985657"))
+        assert r.cell("電話") == "037-985657"
+        assert r.values.電話 == "037985657"
+
+    def test_o_column_empty_when_no_phone(self):
+        assert EmployerExtraction(ExtractionStatus.擷取成功).cell("電話") == ""
