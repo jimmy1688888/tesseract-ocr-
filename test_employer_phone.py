@@ -9,7 +9,7 @@
 """
 import pytest
 
-from employer_extract import pick_employer_phone
+from employer_extract import locate_employer_block, pick_employer_phone
 
 
 class TestNoFallbackOutsideBlock:
@@ -21,6 +21,17 @@ class TestNoFallbackOutsideBlock:
                "電話:09376",                  # 讀壞:位數不足
                "Nomor Telepon:"]
         assert pick_employer_phone(seg) == ""
+
+    def test_32098_intact_agency_phone_above_block_never_wins(self):
+        """仲介框的電話完好、雇主電話讀壞:定位區塊再挑電話 → 留空,不是仲介電話。"""
+        lines = ["台中中文/英名稱: 苙與人力仲介有限公司",
+                 "電話:03-5310852",
+                 "電話:03-5310852",
+                 "甲方名稱 (以下簡稱為甲方): 王小明",
+                 "電話:09376",
+                 "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
+        block = locate_employer_block(lines)
+        assert pick_employer_phone(lines[block.start:block.end]) == ""
 
     def test_empty_block_has_no_phone(self):
         assert pick_employer_phone([]) == ""

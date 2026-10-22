@@ -353,7 +353,7 @@ def pick_employer_phone(seg: list[str]) -> str:
     """雇主區塊內挑出雇主電話(電話標準形);挑不到回空字串。
 
     三個實測教訓,各有一組測試(test_employer_phone.py):
-    - 只吃雇主區塊:雇主電話被格式/紅章毀掉時,全文統計的 fallback 會把仲介電話
+    - 只吃雇主區塊:雇主電話被格式/紅章毀掉時,退回全文統計會把仲介電話
       誤當雇主電話(32098),故寧可留空也不取區塊外的號碼。
     - 標籤行優先:「電話/Nomor Telepon」行上的號碼先算;農業契約地址含地號,
       會被電話規則誤當電話(32262)。標籤行取不到才退回全區塊。
@@ -372,53 +372,6 @@ def pick_employer_phone(seg: list[str]) -> str:
                 labeled_counts[m] = labeled_counts.get(m, 0) + 1
     pool = labeled_counts or all_counts
     return max(pool, key=pool.get, default="")
-
-
-def extract_employer_fields(text: str) -> EmployerExtraction:
-    """從 Vision 全文擷取雇主欄位(缺項為空字串)。
-
-    擷取狀況只會是擷取成功或雇主區塊未錨定;來源只填契約樣板(圖檔、全文由呼叫端補)。
-    """
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    # 契約樣板整份判一次(ADR-0010),下面的英文地址、英文名、字數音節數檢查都看它。
-    # 錨定失敗的早退也帶著它:之後的切結書救援要依樣板決定做不做音節檢查。
-    template = contract_template(text)
-
-    block = locate_employer_block(lines)
-    if isinstance(block, BlockNotAnchored):
-        return EmployerExtraction(ExtractionStatus.雇主區塊未錨定, source=Source(template),
-                                  detail=block.detail)
-    seg = lines[block.start:block.end]
-    phone = pick_employer_phone(seg)
-    address = pick_employer_address(seg, template)
-    names = pick_employer_names(seg, address, template)
-
-    addr = _standardize_address(address.cn, address.en_anchor)
-    values = EmployerValues(
-        # 補齊不成對括號:擷取時 strip 或 OCR 可能只留單邊,寫進 Sheets 會缺一邊。
-        雇主名稱_中=_balance_brackets(names.cn),
-        雇主名稱_英=_balance_brackets(names.en),
-        地址_中=address.cn,
-        地址_中_標準=addr.standard,
-        地址_英=address.en,
-        郵遞區號=addr.zip,
-        電話=phone,
-    )
-    # 順序即 L 欄的順序:樣板 → 名稱 → 地址 → 縣市 → 門牌。
-    doubts = (
-        # 樣板決定整套擷取規則,講的是一整份,不只名稱。
-        *_doubts(WHOLE, "契約樣板未辨識,以家庭類規則擷取"
-                 if template is Template.認不出 else ""),
-        # 括號是補出來的就要講:斷行沒接上時(_name_continuation 只接緊鄰的下一行,
-        # 而 Vision 逐欄序列化不保證相鄰),補齊後的「…機構(王)」看起來完全正常,
-        # 而機構名又不做字數檢查 —— 不標的話就是看不見的錯值。
-        *_doubts(_NAME_CN, "中文名括號不成對,已補齊"
-                 if values.雇主名稱_中 != names.cn else ""),
-        *_doubts(_NAME_CN, _name_doubt(values.雇主名稱_中, values.雇主名稱_英, template)),
-        *addr.doubts,
-        *_doubts(_ADDR_STD, _house_number_doubt(values.地址_中, values.地址_英)),
-    )
-    return EmployerExtraction(ExtractionStatus.擷取成功, values, doubts, Source(template))
 
 
 class EmployerAddress(NamedTuple):
@@ -522,6 +475,53 @@ def pick_employer_names(seg: list[str], address: EmployerAddress,
     if template is Template.工廠類:
         name_en = _company_name_in_block(seg) or name_en
     return EmployerNames(name_cn, name_en)
+
+
+def extract_employer_fields(text: str) -> EmployerExtraction:
+    """從 Vision 全文擷取雇主欄位(缺項為空字串)。
+
+    擷取狀況只會是擷取成功或雇主區塊未錨定;來源只填契約樣板(圖檔、全文由呼叫端補)。
+    """
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    # 契約樣板整份判一次(ADR-0010),下面的英文地址、英文名、字數音節數檢查都看它。
+    # 錨定失敗的早退也帶著它:之後的切結書救援要依樣板決定做不做音節檢查。
+    template = contract_template(text)
+
+    block = locate_employer_block(lines)
+    if isinstance(block, BlockNotAnchored):
+        return EmployerExtraction(ExtractionStatus.雇主區塊未錨定, source=Source(template),
+                                  detail=block.detail)
+    seg = lines[block.start:block.end]
+    phone = pick_employer_phone(seg)
+    address = pick_employer_address(seg, template)
+    names = pick_employer_names(seg, address, template)
+
+    std = _standardize_address(address.cn, address.en_anchor)
+    values = EmployerValues(
+        # 補齊不成對括號:擷取時 strip 或 OCR 可能只留單邊,寫進 Sheets 會缺一邊。
+        雇主名稱_中=_balance_brackets(names.cn),
+        雇主名稱_英=_balance_brackets(names.en),
+        地址_中=address.cn,
+        地址_中_標準=std.standard,
+        地址_英=address.en,
+        郵遞區號=std.zip,
+        電話=phone,
+    )
+    # 順序即 L 欄的順序:樣板 → 名稱 → 地址 → 縣市 → 門牌。
+    doubts = (
+        # 樣板決定整套擷取規則,講的是一整份,不只名稱。
+        *_doubts(WHOLE, "契約樣板未辨識,以家庭類規則擷取"
+                 if template is Template.認不出 else ""),
+        # 括號是補出來的就要講:斷行沒接上時(_name_continuation 只接緊鄰的下一行,
+        # 而 Vision 逐欄序列化不保證相鄰),補齊後的「…機構(王)」看起來完全正常,
+        # 而機構名又不做字數檢查 —— 不標的話就是看不見的錯值。
+        *_doubts(_NAME_CN, "中文名括號不成對,已補齊"
+                 if values.雇主名稱_中 != names.cn else ""),
+        *_doubts(_NAME_CN, _name_doubt(values.雇主名稱_中, values.雇主名稱_英, template)),
+        *std.doubts,
+        *_doubts(_ADDR_STD, _house_number_doubt(values.地址_中, values.地址_英)),
+    )
+    return EmployerExtraction(ExtractionStatus.擷取成功, values, doubts, Source(template))
 
 
 # 中文樣板字。BOILERPLATE 從頭到尾只有印尼文與英文,且只用在英文名那條路徑——

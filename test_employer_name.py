@@ -48,7 +48,8 @@ class TestNamesFromBlock:
 
     def test_chinese_and_english_names(self):
         addr = pick_employer_address(self.SEG, Template.家庭類)
-        assert pick_employer_names(self.SEG, addr, Template.家庭類) ==             EmployerNames(cn="李宜蓁", en="LI, Yi-JHEN")
+        assert pick_employer_names(self.SEG, addr, Template.家庭類) == EmployerNames(
+            cn="李宜蓁", en="LI, Yi-JHEN")
 
     def test_lines_that_are_the_address_are_not_names(self):
         """地址抽取挑中的行不再當名字 —— 姓名唯一的外部依賴就是地址結果。"""
