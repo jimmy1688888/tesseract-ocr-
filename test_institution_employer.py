@@ -17,6 +17,7 @@ import pytest
 from employer_extract import extract_employer_fields
 from employer_result import ExtractionStatus
 from real_samples import checked_employer_fields, employer_text
+from tw_phone import standard_form
 
 # 33703 在現行 ROI 下的 Vision 序列化順序:中文名斷兩行;Nama 標籤之後先插進
 # 「地址:」與中文地址,才輪到機構英文名(兩行,第二行是負責人拼音)
@@ -79,7 +80,7 @@ class TestInstitutionContract:
     def test_chinese_address_and_phone(self):
         f = _fields(_INSTITUTION)
         assert f.values.地址_中 == "新北市板橋區文化路一段100號(3樓)"
-        assert f.values.電話 == "02-29681234"
+        assert f.values.電話 == "0229681234"
 
     def test_no_syllable_count_doubt_for_institution(self):
         """機構名的中文字數與英譯音節數本來就對不上,不是疑慮。"""
@@ -127,7 +128,7 @@ class TestDamagedInstitutionLabel:
         assert f.status is ExtractionStatus.擷取成功
         assert f.values.雇主名稱_英 == _EN_NAME
         assert f.values.地址_英 == _EN_ADDR
-        assert f.values.電話 == "02-29681234"
+        assert f.values.電話 == "0229681234"
 
     def test_chinese_name_left_blank_not_guessed(self):
         f = _fields(self.LINES)
@@ -199,4 +200,6 @@ def test_33703_replayed_from_saved_vision_text():
     if not checked:
         pytest.skip("33703 沒有雇主欄位核對值")
     for k, v in checked.items():
+        if k == "電話":              # 核對值照人看到的寫(06-9219899),O 欄是電話標準形
+            v = standard_form(v)
         assert getattr(f.values, k) == v, k

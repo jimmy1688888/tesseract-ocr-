@@ -25,20 +25,13 @@ from PIL import Image, ImageOps
 # docx 內嵌圖與圖序只有一份,與 pipeline 共用(#5);兩側不互相 import。
 from contract_template import COMPANY_WORDS, Template, contract_template
 from docx_images import image_sort_key, read_images
+from tw_phone import phones_in
 from employer_result import (VALUE_KEYS, WHOLE, Doubt, EmployerExtraction, EmployerValues,
                              ExtractionStatus, Source)
 
 logger = logging.getLogger(__name__)
 
 CJK        = re.compile(r"[一-鿿]")
-# 台灣電話:0 開頭,號段間可夾 '-'/空白(涵蓋 02-2727-6999 這種雙連字號)。
-# 總位數收斂 9~10 碼(台灣市話/手機),排除統編(8碼)、放款金額(如 0075-0010)等雜訊。
-PHONE      = re.compile(r"(?<!\d)(0\d(?:[-\s]?\d){7,8})(?!\d)")
-# 括號區碼格式:(04)7775-863、(02) 2371-7608。統一正規化成「區碼-號碼」。
-PHONE_PAREN = re.compile(r"\((0\d{1,3})\)\s*(\d{3,4})\s*-?\s*(\d{3,4})(?!\d)")
-# 國際格式 +886 / 886:國碼後省略市話/手機的前導 0(+886 2 2727 6999 = 02-27276999、
-# +886 912 345 678 = 0912345678),抓國碼後的數字段(容分隔),交呼叫端補 0 還原國內號。
-PHONE_INTL = re.compile(r"(?<!\d)\+?886[\s.-]*([\d][\d\s.-]{6,12}\d)")
 # 電話標籤行(不含「傳真」,避免傳真號被當電話):優先取此類行上的號碼。
 PHONE_LINE_LABEL = re.compile(r"電話|Nomor\s*Telepon", re.I)
 # 傳真起點:同一行常寫成「電話:03-5310852,傳真:03-5277128」,取號碼前先切掉後段,
@@ -46,17 +39,6 @@ PHONE_LINE_LABEL = re.compile(r"電話|Nomor\s*Telepon", re.I)
 FAX_SPLIT = re.compile(r"傳真|Fax", re.I)
 
 
-def _phones_in(line: str) -> list[str]:
-    """抓一行內的電話候選。括號區碼正規化為「04-7775863」;
-    +886 國際格式還原為國內「0…」格式(去國碼、補前導 0);一般格式原樣。"""
-    out = list(PHONE.findall(line))
-    for area, a, b in PHONE_PAREN.findall(line):
-        out.append(f"{area}-{a}{b}")
-    for m in PHONE_INTL.finditer(line):
-        digits = re.sub(r"\D", "", m.group(1)).lstrip("0")  # 去 886 後分隔與冗餘前導 0
-        if 8 <= len(digits) <= 9:                  # 市話8 / 手機9(皆已省前導 0)
-            out.append("0" + digits)               # 補回國內前導 0 → 與名冊格式一致
-    return out
 CN_ADDR    = re.compile(r"[縣市].{0,20}?[路街道段巷弄號樓]")
 EN_ADDR_KW = re.compile(
     r"\b(No\.|Rd\.|St\.|Dist\.|Lane|Alley|Sec\.|Village|Township|County|City|Taiwan)\b",
@@ -437,7 +419,7 @@ def extract_employer_fields(text: str) -> EmployerExtraction:
     #    雇主電話被格式/紅章毀掉時,全文統計的 fallback 會把仲介電話
     #    誤當雇主電話(32098 實例),故寧可留空也不取區塊外的號碼。
     #    優先「電話/Nomor Telepon 標籤行」上的號碼:農業契約地址含地號
-    #    (0075-0010…)會被 PHONE regex 誤當電話,標籤行優先可避開(32262 教訓);
+    #    (0075-0010…)會被電話規則誤當電話,標籤行優先可避開(32262 教訓);
     #    標籤行取不到才退回全區塊。出現兩次者(電話+Nomor Telepon 各一)優先。
     #    同行的「傳真」後段先切掉:雇主/仲介都常寫成
     #    「電話:03-5310852,傳真:03-5277128」,不切則傳真號與電話一起進統計,
@@ -447,7 +429,7 @@ def extract_employer_fields(text: str) -> EmployerExtraction:
     for l in seg:
         l = FAX_SPLIT.split(l, maxsplit=1)[0]
         on_label = bool(PHONE_LINE_LABEL.search(l))
-        for m in _phones_in(l):
+        for m in phones_in(l):
             all_counts[m] = all_counts.get(m, 0) + 1
             if on_label:
                 labeled_counts[m] = labeled_counts.get(m, 0) + 1
@@ -986,14 +968,14 @@ def _agency_block_lines(docx_path: str, client=None) -> list[str]:
 
 def _phones_in_block(block: list[str]) -> list[str]:
     """區塊內抽台灣電話:排除印尼行(交錯版面),切掉「傳真/Fax」後段;去重保序。
-    台灣電話為 0 開頭格式,印尼 +62 本就不被 _phones_in 抓,再加 _ID_LINE 雙保險。"""
+    台灣電話為 0 開頭格式,印尼 +62 本就不被 phones_in 抓,再加 _ID_LINE 雙保險。"""
     seen: set[str] = set()
     phones: list[str] = []
     for l in block:
         if _ID_LINE.search(l):
             continue
         head = FAX_SPLIT.split(l, maxsplit=1)[0]
-        for ph in _phones_in(head):
+        for ph in phones_in(head):
             if ph not in seen:
                 seen.add(ph)
                 phones.append(ph)

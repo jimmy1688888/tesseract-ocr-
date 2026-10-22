@@ -16,6 +16,7 @@ import pytest
 
 import real_samples as rs
 from employer_extract import extract_employer_fields
+from tw_phone import standard_form
 
 # 雇主在高雄,仲介在臺中;仲介地址被逐欄序列化夾在甲方標籤與雇主地址標籤之間,
 # 門牌還被切到下一行(33704 的形態)。
@@ -177,4 +178,6 @@ def test_replayed_vision_text_matches_checked_values(stem):
         pytest.skip(f"{stem} 沒有雇主欄位核對值")
     f = extract_employer_fields(rs.employer_text(stem))
     for k, v in checked.items():
+        if k == "電話":              # 核對值照人看到的寫(06-9219899),O 欄是電話標準形
+            v = standard_form(v)
         assert getattr(f.values, k) == v, k

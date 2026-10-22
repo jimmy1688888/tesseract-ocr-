@@ -12,7 +12,7 @@
 額外加三個「衍生欄」,都直接沿用 permit_lookup 的同一套判斷,確保人工看到的
 與 pipeline 反查時用的完全一致(不另寫一套規則):
   - 狀態      ← _is_active():未廢止且未終止營業 = 有效
-  - 電話(正規化) ← _norm_phone():去分隔符、+886 還原前導 0,這才是反查用的鍵
+  - 電話(正規化) ← split_phone_field():每支號碼轉電話標準形(tw_phone),這才是反查用的鍵
   - 電話備註   ← 標出反查會失準的列(同欄多組號碼/分機、碼數不足)
 """
 from __future__ import annotations

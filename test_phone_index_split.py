@@ -98,3 +98,25 @@ class TestBuildPhoneIndex:
 
     def test_no_key_for_blank_phone(self):
         assert build_phone_index([_rec("1965-1", "")]) == {}
+
+
+class TestRosterPhoneColumnKeptVerbatim:
+    """G 欄(名冊電話)照抄原文,不轉電話標準形(ADR-0011):一格塞兩支號碼或分機,
+    轉了會丟官方資料。反查的鍵才是標準形。"""
+
+    @pytest.mark.parametrize("raw", [
+        "03-3253456/3253507",       # 兩支號碼(第二支缺區碼)
+        "(03)-3554436#171",         # 主號 + 分機
+        "072114387、0925510286",
+    ])
+    def test_lookup_returns_raw_phone_cell(self, raw):
+        from permit_lookup import PermitLookup
+        pl = PermitLookup([_rec("3647", raw)])
+        assert pl.lookup("3647")["電話"] == raw
+
+    def test_raw_cell_still_found_by_standard_form(self):
+        from permit_lookup import PermitLookup
+        pl = PermitLookup([_rec("2515", "(03)-3554436#171")])
+        assert [a["電話"] for a in pl.agencies_by_phone("03-3554436")] == ["(03)-3554436#171"]
+        assert [a["許可證"] for a in pl.agencies_by_phone_prefix("0335544")] == []   # 不足 8 碼
+        assert [a["許可證"] for a in pl.agencies_by_phone_prefix("03355443")] == ["2515"]

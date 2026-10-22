@@ -106,7 +106,12 @@ class TestValuesFromMangledBlock:
 
     def test_phone_extracted_and_fax_excluded(self):
         # 傳真 04-23263528 必須被切掉,只留電話(名冊反查靠這支)
-        assert _phones_in_block(self.BLOCK) == ["04-23263526"]
+        assert _phones_in_block(self.BLOCK) == ["0423263526"]
+
+    def test_same_phone_written_two_ways_deduped(self):
+        """去重以電話標準形為鍵(#48):同一支號碼寫法不同,只留一支候選。"""
+        assert _phones_in_block(["電話:04-23263526", "TEL: 0423263526",
+                                 "(04)2326-3526"]) == ["0423263526"]
 
     def test_address_extracted(self):
         assert _address_in_block(self.BLOCK) == "台中市北區台灣大道2段360號23樓之1"

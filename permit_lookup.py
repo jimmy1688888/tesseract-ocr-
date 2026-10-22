@@ -29,6 +29,7 @@ from pathlib import Path
 # address_db 只依賴標準函式庫、且 import 時不讀任何資料檔,故可安全頂層 import
 # ——即使 data/AllData.json 缺席也不影響本模組。見 docs/adr/0001。
 from address_db import fold_variants
+from tw_phone import PHONE_MIN_LEN, standard_form
 
 # 手動更新用:瀏覽器開此連結下載 JSON,覆蓋 ROSTER_PATH
 ROSTER_JSON_URL = "https://apiservice.mol.gov.tw/OdService/download/A17000000J-020001-QHy"
@@ -159,20 +160,6 @@ def build_indices(records: list[dict]) -> tuple[dict[int, dict], dict[str, dict]
     return main_index, branch_index
 
 
-def _norm_phone(phone: str) -> str:
-    """電話正規化:去掉所有非數字(02-2727-6999 → 0227276999),供反查比對。
-    國際格式 +886(去非數字後為 886…)還原為國內前導 0:886227276999 → 0227276999。
-    國內號一律 0 開頭、無 886 前綴,故此轉換只會命中國際格式,不誤傷國內號。"""
-    n = re.sub(r"\D", "", str(phone or ""))
-    if n.startswith("886"):
-        n = "0" + n[3:].lstrip("0")   # 去國碼、還原單一前導 0(容 +886-02… 這種多寫 0)
-    return n
-
-
-# 台灣市話/手機正規化後為 9~10 碼;低於此長度視為殘段(分機、缺區碼的第二支)。
-# 同時是前綴反查的最短比對長度——兩處用同一個值,避免各自漂移。
-PHONE_MIN_LEN = 8
-
 # 名冊「電話」欄常把多支號碼或分機擠在同一格(全表 24 筆,其中有效機構 12 筆):
 #   '03-3253456/3253507'、'072114387、0925510286'、'037-364897.364898' → 兩支號碼
 #   '(03)-3554436#171'、'02-29819295*13'                             → 主號 + 分機
@@ -185,7 +172,7 @@ _PHONE_EXT_SEP = re.compile(r"[#*]")
 
 
 def split_phone_field(raw: str) -> list[str]:
-    """名冊電話欄 → 正規化號碼清單(去重保序);單一號碼即回單元素清單。
+    """名冊電話欄 → 電話標準形清單(去重保序);單一號碼即回單元素清單。
 
     先拆多支號碼,再切掉各段的分機。不足 PHONE_MIN_LEN 碼的殘段丟棄:那是分機
     (#171)或缺區碼的第二支(如 '03-3253456/3253507' 的 3253507),短到只能靠
@@ -193,14 +180,14 @@ def split_phone_field(raw: str) -> list[str]:
     """
     out: list[str] = []
     for seg in _PHONE_FIELD_SEP.split(str(raw or "")):
-        n = _norm_phone(_PHONE_EXT_SEP.split(seg, maxsplit=1)[0])
+        n = standard_form(_PHONE_EXT_SEP.split(seg, maxsplit=1)[0])
         if len(n) >= PHONE_MIN_LEN and n not in out:
             out.append(n)
     return out
 
 
 def build_phone_index(records: list[dict]) -> dict[str, list[dict]]:
-    """建「正規化電話 → 有效機構列」索引,供全無命中時以仲介電話反查許可證。
+    """建「電話標準形 → 有效機構列」索引,供全無命中時以仲介電話反查許可證。
 
     只收目前有效者;同電話多家(約 2.6%)保留全部,由呼叫端判定模糊不採用。
     一筆記錄可產生多把 key(電話欄塞了兩支號碼時),見 split_phone_field。
@@ -300,7 +287,7 @@ class PermitLookup:
     def agencies_by_phone(self, phone: str) -> list[dict]:
         """電話反查機構:回傳所有命中的有效機構(依許可證去重),0/1/多筆皆可能。
         用於全無命中救援——多筆(同電話多家台仲)時由呼叫端列出供人工擇一。"""
-        n = _norm_phone(phone)
+        n = standard_form(phone)
         if not n:
             return []
         by_permit = {h["許可證"]: h for h in self.phone_index.get(n, [])}
@@ -310,9 +297,9 @@ class PermitLookup:
                                  min_len: int = PHONE_MIN_LEN) -> list[dict]:
         """電話『前綴』反查(OCR 少碼容錯):以「一方為另一方前綴且共同長度 ≥ min_len」
         比對,回傳去重後的有效機構(0/1/多筆);呼叫端只在唯一命中時採用。
-        比精確反查寬鬆,故設 8 碼門檻——台灣市話/手機正規化後 9~10 碼,容許少 1~2 碼,
+        比精確反查寬鬆,故設 8 碼門檻——台灣市話/手機標準形 9~10 碼,容許少 1~2 碼,
         又足夠長以避免誤命中(如 32401:022371760 少一碼,前綴唯一命中正確機構)。"""
-        q = _norm_phone(phone)
+        q = standard_form(phone)
         if len(q) < min_len:
             return []
         hits: dict[str, dict] = {}
