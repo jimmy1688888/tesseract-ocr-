@@ -306,6 +306,49 @@ def _best_scored_page(scored: list[tuple[int, str, bytes]]
     return max(scored, key=lambda t: t[0]) if scored else None
 
 
+class EmployerBlock(NamedTuple):
+    """雇主區塊在全文行裡的上下界:lines[start:end]。"""
+    start: int
+    end: int                       # 不含;沒有甲方段落結束標記時是行數
+
+
+class BlockNotAnchored(NamedTuple):
+    """雇主區塊錨不到。detail 只進日誌(擷取狀況是雇主區塊未錨定)。"""
+    detail: str
+
+
+def locate_employer_block(lines: list[str]) -> EmployerBlock | BlockNotAnchored:
+    """雇主區塊的上下界(上界跳過仲介 block,下界切在乙方之前)。
+
+    起點① 甲方標籤;② 標籤被 OCR 毀掉時退印尼文標籤 Nama Majikan——
+      實測 7 份契約它一律完好,且其「前一行」永遠是甲方姓名那行,故往回退一行
+      以納入中文姓名。它落在仲介框之下,退到這裡不會把仲介電話捲進來。
+      ③ 機構類退 Nama Panti Jompo,不往回退(見 ID_LABEL_INSTITUTION)。
+    刻意不再退「MAJIKAN DENGAN」:那是標題字,而 Vision 對兩欄版面是逐欄
+      序列化,標題屬右欄、雇主資料屬左欄,輸出順序與版面上下無關
+      (32417:標題 y=104 卻排在第 15 行,雇主 y=166 反而排在第 10 行),
+      拿它當起點等於賭 Vision 這次怎麼切欄。
+    終點:甲方段落結束標記,把乙方(勞工)資料排除在統計之外。
+    錨都失效 → BlockNotAnchored,不退回「從第 0 行開始」:實測 7 份契約中有 6 份
+      會因此把仲介框的名稱/地址/電話整組當成雇主填進去(32447、32417 甚至抓到
+      仲介的傳真號)。那是「看起來完全合理的錯誤資料」,人工審核看不出破綻,
+      比留空危險得多。比照 32098 與台仲區塊的既有決定:錨不到就不猜,交人工。
+    """
+    start = next((i for i, l in enumerate(lines) if NAME_LABEL.search(l)), None)
+    if start is None:
+        i = next((i for i, l in enumerate(lines) if ID_LABEL.search(l)), None)
+        if i is not None:
+            start = max(0, i - 1)
+        else:
+            start = next((i for i, l in enumerate(lines)
+                          if ID_LABEL_INSTITUTION.search(l)), None)
+        if start is None:
+            return BlockNotAnchored("甲方標籤、Nama Majikan、Nama Panti Jompo 皆未命中")
+    end = next((i for i in range(start + 1, len(lines))
+                if PARTY_END.search(lines[i])), len(lines))
+    return EmployerBlock(start, end)
+
+
 def pick_employer_phone(seg: list[str]) -> str:
     """雇主區塊內挑出雇主電話(電話標準形);挑不到回空字串。
 
@@ -341,34 +384,11 @@ def extract_employer_fields(text: str) -> EmployerExtraction:
     # 錨定失敗的早退也帶著它:之後的切結書救援要依樣板決定做不做音節檢查。
     template = contract_template(text)
 
-    # ── 定位雇主區塊(上界跳過仲介 block,下界切在乙方之前)──
-    # 起點① 甲方標籤;② 標籤被 OCR 毀掉時退印尼文標籤 Nama Majikan——
-    #   實測 7 份契約它一律完好,且其「前一行」永遠是甲方姓名那行,故往回退一行
-    #   以納入中文姓名。它落在仲介框之下,退到這裡不會把仲介電話捲進來。
-    # 刻意不再退「MAJIKAN DENGAN」:那是標題字,而 Vision 對兩欄版面是逐欄
-    #   序列化,標題屬右欄、雇主資料屬左欄,輸出順序與版面上下無關
-    #   (32417:標題 y=104 卻排在第 15 行,雇主 y=166 反而排在第 10 行),
-    #   拿它當起點等於賭 Vision 這次怎麼切欄。
-    # 終點:甲方段落結束標記,把乙方(勞工)資料排除在統計之外。
-    # 兩個錨都失效 → 回空並註記,不退回「從第 0 行開始」:實測 7 份契約中有 6 份
-    #   會因此把仲介框的名稱/地址/電話整組當成雇主填進去(32447、32417 甚至抓到
-    #   仲介的傳真號)。那是「看起來完全合理的錯誤資料」,人工審核看不出破綻,
-    #   比留空危險得多。比照 32098 與台仲區塊的既有決定:錨不到就不猜,交人工。
-    start = next((i for i, l in enumerate(lines) if NAME_LABEL.search(l)), None)
-    if start is None:
-        i = next((i for i, l in enumerate(lines) if ID_LABEL.search(l)), None)
-        if i is not None:
-            start = max(0, i - 1)
-        else:
-            start = next((i for i, l in enumerate(lines)
-                          if ID_LABEL_INSTITUTION.search(l)), None)
-        if start is None:
-            return EmployerExtraction(
-                ExtractionStatus.雇主區塊未錨定, source=Source(template),
-                detail="甲方標籤、Nama Majikan、Nama Panti Jompo 皆未命中")
-    end = next((i for i in range(start + 1, len(lines))
-                if PARTY_END.search(lines[i])), len(lines))
-    seg = lines[start:end]
+    block = locate_employer_block(lines)
+    if isinstance(block, BlockNotAnchored):
+        return EmployerExtraction(ExtractionStatus.雇主區塊未錨定, source=Source(template),
+                                  detail=block.detail)
+    seg = lines[block.start:block.end]
     phone = pick_employer_phone(seg)
     address = pick_employer_address(seg, template)
     names = pick_employer_names(seg, address, template)

@@ -16,7 +16,8 @@
 第 15 行,雇主 y=166 反而排在第 10 行),拿它當起點等於賭 Vision 怎麼切欄。
 """
 
-from employer_extract import extract_employer_fields
+from employer_extract import (BlockNotAnchored, EmployerBlock, extract_employer_fields,
+                              locate_employer_block)
 from employer_result import ExtractionStatus
 
 # 32417 次頁 ROI 的實際 OCR(節錄):仲介框在前,甲方標籤已毀,乙方標籤完好
@@ -69,6 +70,44 @@ _LINES_NORMAL = [
 
 def _fields(lines):
     return extract_employer_fields("\n".join(lines))
+
+
+class TestLocateEmployerBlock:
+    """區塊定位這一刀直接吃 lines(#10):上下界出;錨不到時原因是回傳值的一部分。"""
+
+    def test_party_a_label_to_party_end(self):
+        assert locate_employer_block(_LINES_NORMAL) == EmployerBlock(
+            _LINES_NORMAL.index("甲方名稱 (以下簡稱為甲方): 李宜蓁"),
+            _LINES_NORMAL.index("SELANJUTNYA DISEBUT PIHAK PERTAMA"))
+
+    def test_damaged_label_steps_back_one_line_from_nama_majikan(self):
+        """32417:甲方標籤被毀 → 退 Nama Majikan、往回一行納入中文姓名;不錨到乙方。"""
+        block = locate_employer_block(_LINES_32417)
+        assert _LINES_32417[block.start] == "用戶名稱(以下統為甲方): 林志明"
+        assert _LINES_32417[block.end] == "SELANJUTNYA DISEBUT PIHAK PERTAMA"
+
+    def test_nama_majikan_on_first_line_does_not_step_before_zero(self):
+        assert locate_employer_block(["Nama Majikan: WANG", "PIHAK KEDUA"]) == EmployerBlock(0, 1)
+
+    def test_institution_label_does_not_step_back(self):
+        """機構類退到 Nama Panti Jompo 時不往回退:往回一行只拿得到後半截機構名(33703)。"""
+        lines = ["…長照機構(負責", "Nama Panti Jompo / Rumah Sakit:", "Alamat:"]
+        assert locate_employer_block(lines) == EmployerBlock(1, 3)
+
+    def test_party_a_label_preferred_over_nama_majikan(self):
+        lines = ["Nama Majikan:", "x", "雇主名稱: 王小明", "y"]
+        assert locate_employer_block(lines).start == 2
+
+    def test_no_party_end_runs_to_last_line(self):
+        lines = ["甲方名稱: 王小明", "地址:", "高雄市左營區華夏路100號"]
+        assert locate_employer_block(lines) == EmployerBlock(0, 3)
+
+    def test_not_anchored_is_a_returned_value_with_reason(self):
+        got = locate_employer_block(["台中中文/英名稱: 苙與人力仲介有限公司", "0989346899"])
+        assert got == BlockNotAnchored("甲方標籤、Nama Majikan、Nama Panti Jompo 皆未命中")
+
+    def test_empty_lines_not_anchored(self):
+        assert isinstance(locate_employer_block([]), BlockNotAnchored)
 
 
 class TestDamagedPartyALabel:
