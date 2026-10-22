@@ -15,7 +15,8 @@ L 欄一個字都沒有。
 import pytest
 
 import real_samples as rs
-from employer_extract import extract_employer_fields
+from contract_template import Template
+from employer_extract import EmployerAddress, extract_employer_fields, pick_employer_address
 from tw_phone import standard_form
 
 # 雇主在高雄,仲介在臺中;仲介地址被逐欄序列化夾在甲方標籤與雇主地址標籤之間,
@@ -109,6 +110,38 @@ class TestAddressLabelFirst:
             "SELANJUTNYA DISEBUT PIHAK PERTAMA",
         ]
         assert _fields(lines).values.地址_中 == "高雄市左營區華夏路100號3樓"
+
+
+class TestAddressFromBlock:
+    """地址這一刀直接吃雇主區塊(#9):中文地址／英文地址／英文提示出,不必走錨定。"""
+
+    def test_labelled_address_wins_over_earlier_agency_address(self):
+        seg = ["臺中市西區民權路88號5樓", "地址:", "高雄市左營區華夏路100號3樓"]
+        assert pick_employer_address(seg, Template.家庭類).cn == "高雄市左營區華夏路100號3樓"
+
+    def test_english_address_joins_roc_and_drops_alamat(self):
+        seg = ["Alamat: 3F., No.100, Huaxia Rd., Zuoying Dist., Kaohsiung City, Taiwan",
+               "R.O.C."]
+        a = pick_employer_address(seg, Template.家庭類)
+        assert a.en == "3F., No.100, Huaxia Rd., Zuoying Dist., Kaohsiung City, Taiwan R.O.C."
+        assert a.en_anchor == a.en
+
+    def test_cjk_soiled_english_line_is_only_a_hint(self):
+        """紅章殘影把中文字黏進英文地址行:不當 地址_英 輸出,只給英文行錨定用。"""
+        soiled = "司賜聼12.Ln.18, Zhongshan Rd., Hsinchu City"
+        a = pick_employer_address([soiled], Template.家庭類)
+        assert a == EmployerAddress(cn="", en="", en_hint=soiled)
+        assert a.en_anchor == soiled
+
+    @pytest.mark.parametrize("template,expect_en", [
+        (Template.機構類, "No.5, Zhongzheng Rd., Zhubei City, Hsinchu County"),
+        (Template.家庭類, "Hsinchu County Private Long-term Care Institution"),
+    ])
+    def test_organisation_name_line_is_not_an_address(self, template, expect_en):
+        """機構類的英文名常含縣市字、沒有門牌號:是名稱不是地址(ADR-0010)。"""
+        seg = ["Hsinchu County Private Long-term Care Institution",
+               "Alamat: No.5, Zhongzheng Rd., Zhubei City, Hsinchu County"]
+        assert pick_employer_address(seg, template).en == expect_en
 
 
 class TestCityMismatchDoubt:

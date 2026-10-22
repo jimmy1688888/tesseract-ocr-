@@ -370,12 +370,60 @@ def extract_employer_fields(text: str) -> EmployerExtraction:
                 if PARTY_END.search(lines[i])), len(lines))
     seg = lines[start:end]
     phone = pick_employer_phone(seg)
+    address = pick_employer_address(seg, template)
+    names = pick_employer_names(seg, address, template)
 
-    # ── 地址:中文靠行政區+街道 pattern;英文靠地址關鍵字 ──
-    # 中文先看雇主區塊內「地址」標籤之後幾行:兩欄版面被逐欄序列化時,仲介框的
-    # 下半段(含仲介的中文地址)會夾進雇主區塊、排在雇主地址之前(33704)。
-    # 找不到才退回「區塊內第一個像地址的行」—— 標籤與地址也會被拆開(32510、
-    # 32518、33701)。只看區塊內的標籤:仲介框也有地址標籤(ADR-0003 追加)。
+    addr = _standardize_address(address.cn, address.en_anchor)
+    values = EmployerValues(
+        # 補齊不成對括號:擷取時 strip 或 OCR 可能只留單邊,寫進 Sheets 會缺一邊。
+        雇主名稱_中=_balance_brackets(names.cn),
+        雇主名稱_英=_balance_brackets(names.en),
+        地址_中=address.cn,
+        地址_中_標準=addr.standard,
+        地址_英=address.en,
+        郵遞區號=addr.zip,
+        電話=phone,
+    )
+    # 順序即 L 欄的順序:樣板 → 名稱 → 地址 → 縣市 → 門牌。
+    doubts = (
+        # 樣板決定整套擷取規則,講的是一整份,不只名稱。
+        *_doubts(WHOLE, "契約樣板未辨識,以家庭類規則擷取"
+                 if template is Template.認不出 else ""),
+        # 括號是補出來的就要講:斷行沒接上時(_name_continuation 只接緊鄰的下一行,
+        # 而 Vision 逐欄序列化不保證相鄰),補齊後的「…機構(王)」看起來完全正常,
+        # 而機構名又不做字數檢查 —— 不標的話就是看不見的錯值。
+        *_doubts(_NAME_CN, "中文名括號不成對,已補齊"
+                 if values.雇主名稱_中 != names.cn else ""),
+        *_doubts(_NAME_CN, _name_doubt(values.雇主名稱_中, values.雇主名稱_英, template)),
+        *addr.doubts,
+        *_doubts(_ADDR_STD, _house_number_doubt(values.地址_中, values.地址_英)),
+    )
+    return EmployerExtraction(ExtractionStatus.擷取成功, values, doubts, Source(template))
+
+
+class EmployerAddress(NamedTuple):
+    """雇主區塊裡的地址,都是 OCR 原文(標準化另由 _standardize_address 做)。"""
+    cn: str                        # 地址_中
+    en: str                        # 地址_英
+    # 紅章殘影把中文字黏進的英文地址行:不輸出,只給英文行錨定用(CONTEXT.md)。
+    en_hint: str
+
+    @property
+    def en_anchor(self) -> str:
+        """餵給英文行錨定的英文:英文地址,讀不到才用 en_hint。"""
+        return self.en or self.en_hint
+
+
+def pick_employer_address(seg: list[str], template: Template) -> EmployerAddress:
+    """雇主區塊內的中文地址、英文地址與英文提示;缺項為空字串。
+
+    中文靠行政區+街道 pattern;英文靠地址關鍵字。
+    中文先看雇主區塊內「地址」標籤之後幾行:兩欄版面被逐欄序列化時,仲介框的
+    下半段(含仲介的中文地址)會夾進雇主區塊、排在雇主地址之前(33704)。
+    找不到才退回「區塊內第一個像地址的行」—— 標籤與地址也會被拆開(32510、
+    32518、33701)。只看區塊內的標籤:仲介框也有地址標籤(ADR-0003 追加)。
+    機構類／工廠類的英文名稱行不是英文地址(_is_org_name_line,ADR-0010)。
+    """
     addr_cn = _labelled_cn_address(seg)
     addr_en = en_hint = ""
     for idx, l in enumerate(seg):
@@ -393,14 +441,27 @@ def extract_employer_fields(text: str) -> EmployerExtraction:
         # 留給 address_db 的英文錨定反查用(不寫入任何輸出欄位)。
         if not en_hint and _has_cjk(l) and EN_ADDR_KW.search(l) and len(l) > 12:
             en_hint = l
+    return EmployerAddress(addr_cn, addr_en, en_hint)
 
-    # ── 名稱:掃整個雇主區塊,排除地址/標籤,依中日韓/拉丁分中英 ──
-    # 掃整段而非前 9 行:Vision 對兩欄版面逐欄序列化,中文名與它的標籤未必相鄰——
-    # 32508 的「呂偉」排在區塊第 9 行(索引剛好落在舊窗口外),中間隔著從另一欄
-    # 串進來的契約標題區塊,於是標題「勞動契約 家庭幫傭」反而先命中成了雇主名。
+
+class EmployerNames(NamedTuple):
+    """雇主區塊裡的名稱,OCR 原樣:不成對的括號由呼叫端補齊並掛疑慮。"""
+    cn: str                        # 雇主名稱_中
+    en: str                        # 雇主名稱_英
+
+
+def pick_employer_names(seg: list[str], address: EmployerAddress,
+                        template: Template) -> EmployerNames:
+    """雇主區塊內的中英文名稱;缺項為空字串。地址抽取挑中的行不當名字。
+
+    掃整個雇主區塊,排除地址/標籤,依中日韓/拉丁分中英。
+    掃整段而非前 9 行:Vision 對兩欄版面逐欄序列化,中文名與它的標籤未必相鄰——
+    32508 的「呂偉」排在區塊第 9 行(索引剛好落在舊窗口外),中間隔著從另一欄
+    串進來的契約標題區塊,於是標題「勞動契約 家庭幫傭」反而先命中成了雇主名。
+    """
     name_cn = name_en = ""
     for idx, l in enumerate(seg):
-        if ADDR_LABEL.search(l) or PHONE_LABEL.search(l) or l in (addr_cn, addr_en):
+        if ADDR_LABEL.search(l) or PHONE_LABEL.search(l) or l in (address.cn, address.en):
             continue
         nxt = seg[idx + 1] if idx + 1 < len(seg) else ""
         # 英文名:優先取 Nama 標籤後的值(同行),否則取整行(去冒號前綴)。
@@ -440,33 +501,7 @@ def extract_employer_fields(text: str) -> EmployerExtraction:
     # (30770 抓成一個編號)。含公司字樣的行優先,找不到才用上面的現行規則(#37)。
     if template is Template.工廠類:
         name_en = _company_name_in_block(seg) or name_en
-
-    addr = _standardize_address(addr_cn or "", addr_en or en_hint)
-    values = EmployerValues(
-        # 補齊不成對括號:擷取時 strip 或 OCR 可能只留單邊,寫進 Sheets 會缺一邊。
-        雇主名稱_中=_balance_brackets(name_cn),
-        雇主名稱_英=_balance_brackets(name_en),
-        地址_中=addr_cn,
-        地址_中_標準=addr.standard,
-        地址_英=addr_en,
-        郵遞區號=addr.zip,
-        電話=phone,
-    )
-    # 順序即 L 欄的順序:樣板 → 名稱 → 地址 → 縣市 → 門牌。
-    doubts = (
-        # 樣板決定整套擷取規則,講的是一整份,不只名稱。
-        *_doubts(WHOLE, "契約樣板未辨識,以家庭類規則擷取"
-                 if template is Template.認不出 else ""),
-        # 括號是補出來的就要講:斷行沒接上時(_name_continuation 只接緊鄰的下一行,
-        # 而 Vision 逐欄序列化不保證相鄰),補齊後的「…機構(王)」看起來完全正常,
-        # 而機構名又不做字數檢查 —— 不標的話就是看不見的錯值。
-        *_doubts(_NAME_CN, "中文名括號不成對,已補齊"
-                 if values.雇主名稱_中 != name_cn else ""),
-        *_doubts(_NAME_CN, _name_doubt(values.雇主名稱_中, values.雇主名稱_英, template)),
-        *addr.doubts,
-        *_doubts(_ADDR_STD, _house_number_doubt(values.地址_中, values.地址_英)),
-    )
-    return EmployerExtraction(ExtractionStatus.擷取成功, values, doubts, Source(template))
+    return EmployerNames(name_cn, name_en)
 
 
 # 中文樣板字。BOILERPLATE 從頭到尾只有印尼文與英文,且只用在英文名那條路徑——

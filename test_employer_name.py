@@ -13,7 +13,8 @@
 import re
 
 from contract_template import Template
-from employer_extract import (extract_employer_fields, _name_doubt,
+from employer_extract import (EmployerAddress, EmployerNames, extract_employer_fields,
+                              pick_employer_address, pick_employer_names, _name_doubt,
                               _house_number_doubt)
 
 # 32508 實況節錄:標籤行沒有名字,契約標題從另一欄串進來,真名遠在後面
@@ -35,6 +36,31 @@ _LINES_TITLE_INTERFERES = [
 
 def _f(lines):
     return extract_employer_fields("\n".join(lines))
+
+
+class TestNamesFromBlock:
+    """姓名這一刀直接吃雇主區塊加地址結果(#9),不必走錨定。"""
+
+    SEG = ["甲方名稱 (以下簡稱為甲方): 李宜蓁",
+           "Nama Majikan: LI, Yi-JHEN",
+           "地址:",
+           "新竹市北區磐石路29號7樓"]
+
+    def test_chinese_and_english_names(self):
+        addr = pick_employer_address(self.SEG, Template.家庭類)
+        assert pick_employer_names(self.SEG, addr, Template.家庭類) ==             EmployerNames(cn="李宜蓁", en="LI, Yi-JHEN")
+
+    def test_lines_that_are_the_address_are_not_names(self):
+        """地址抽取挑中的行不再當名字 —— 姓名唯一的外部依賴就是地址結果。"""
+        seg = ["WANG XIAO MING", "CHEN DA WEI"]
+        addr = EmployerAddress(cn="", en="WANG XIAO MING", en_hint="")
+        assert pick_employer_names(seg, addr, Template.家庭類).en == "CHEN DA WEI"
+
+    def test_factory_prefers_company_line(self):
+        """工廠類:含公司字樣的行優先於「第一個像英文名的行」(#37)。"""
+        seg = ["Nama Perusahaan:", "CLI-6323", "TAIWAN FOO INDUSTRIAL CO., LTD."]
+        names = pick_employer_names(seg, EmployerAddress("", "", ""), Template.工廠類)
+        assert names.en == "TAIWAN FOO INDUSTRIAL CO., LTD."
 
 
 class TestChineseBoilerplateRejected:
