@@ -153,7 +153,7 @@ class TestDocx:
         assert rs.docx_samples() == []
 
 
-def _scan_batch(corpus, name):
+def _day_scan(corpus, name):
     """samples/permit_scan/<name>/matches.csv"""
     p = corpus / "permit_scan" / name / "matches.csv"
     p.parent.mkdir(parents=True)
@@ -161,28 +161,28 @@ def _scan_batch(corpus, name):
     return p
 
 
-class TestPermitScanBatches:
-    """許可證掃描素材一批一個資料夾 samples/permit_scan/<日期>/,讀最新一批(#43)。"""
+class TestDayScans:
+    """某日掃描:許可證掃描素材一天一個資料夾 samples/permit_scan/<日期>/,讀最新的那天(#43)。"""
 
-    def test_reads_the_latest_batch(self, corpus):
-        _scan_batch(corpus, "2026-10-20")
-        latest = _scan_batch(corpus, "2026-10-21")
-        _scan_batch(corpus, "2026-09-30")
+    def test_reads_the_latest_day(self, corpus):
+        _day_scan(corpus, "2026-10-20")
+        latest = _day_scan(corpus, "2026-10-21")
+        _day_scan(corpus, "2026-09-30")
         assert _no_skip(rs.permit_scan_csv) == latest
 
-    def test_batch_without_matches_csv_is_not_a_batch(self, corpus):
-        """掃描跑到一半(還沒寫出 matches.csv)的資料夾,不能把上一批擠掉。"""
-        done = _scan_batch(corpus, "2026-10-21")
+    def test_folder_without_matches_csv_is_not_a_day_scan(self, corpus):
+        """掃描跑到一半(還沒寫出 matches.csv)的資料夾,不能把前一次擠掉。"""
+        done = _day_scan(corpus, "2026-10-21")
         (corpus / "permit_scan" / "2026-10-22").mkdir()
         assert _no_skip(rs.permit_scan_csv) == done
 
     def test_non_date_folders_are_ignored(self, corpus):
-        done = _scan_batch(corpus, "2026-10-21")
-        _scan_batch(corpus, "zz-scratch")
+        done = _day_scan(corpus, "2026-10-21")
+        _day_scan(corpus, "zz-scratch")
         assert _no_skip(rs.permit_scan_csv) == done
 
     def test_old_flat_layout_is_not_read(self, corpus):
-        """搬遷前的 permit_scan/matches.csv 不算一批:不讀它,免得新舊兩份混著用。"""
+        """搬遷前的 permit_scan/matches.csv 不算某日掃描:不讀它,免得新舊兩份混著用。"""
         p = corpus / "permit_scan" / "matches.csv"
         p.parent.mkdir(parents=True)
         p.write_text("source_docx\n", encoding="utf-8")
@@ -190,22 +190,22 @@ class TestPermitScanBatches:
             rs.permit_scan_csv()
         assert rs.permit_scans() == []
 
-    def test_permit_scans_has_legacy_and_only_the_latest_batch(self, corpus):
+    def test_permit_scans_has_legacy_and_only_the_latest_day(self, corpus):
         legacy = corpus / "legacy" / "matches.21份.backup.csv"
         legacy.parent.mkdir(parents=True)
         legacy.write_text("source_docx\n", encoding="utf-8")
-        _scan_batch(corpus, "2026-10-20")
-        latest = _scan_batch(corpus, "2026-10-21")
+        _day_scan(corpus, "2026-10-20")
+        latest = _day_scan(corpus, "2026-10-21")
         assert rs.permit_scans() == [legacy, latest]
 
-    def test_no_batches_at_all(self, corpus):
+    def test_no_day_scans_at_all(self, corpus):
         assert rs.permit_scans() == []
         with pytest.raises(pytest.skip.Exception):
             rs.permit_scan_csv()
 
     def test_vision_texts_stay_at_the_top(self, corpus):
-        """截圖打 Vision 的全文不屬於某次掃描:留在 permit_scan/ 上層。"""
-        _scan_batch(corpus, "2026-10-21")
+        """截圖打 Vision 的全文不屬於某日掃描:留在 permit_scan/ 上層。"""
+        _day_scan(corpus, "2026-10-21")
         _write_json(corpus / "permit_scan" / "vision_texts.json",
                     {"30768_image5": {"crop": "30768_image5.png", "roi": "permit_lower",
                                       "text": "No jin:1234"}})

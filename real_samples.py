@@ -13,14 +13,14 @@
                                  允許只填部分;沒填的不驗
   samples/snapshots/             快照(機器輸出,不是真值),見 snapshots.py
   samples/legacy/                舊格式檔(如 #15 之前寫出的 matches.csv)
-  samples/permit_scan/<日期>/    新素材在本機跑許可證掃描的輸出,一批一個資料夾(#43):
+  samples/permit_scan/<日期>/    某日掃描:新素材在本機跑許可證掃描的輸出,一天一個資料夾(#43):
                                  matches.csv 與 permit_crops/ mol_crops/ low_conf_crops/
-                                 no_hit_review/。讀最新一批(日期最大、已寫出 matches.csv),
+                                 no_hit_review/。讀最新的某日掃描(日期最大、已寫出 matches.csv),
                                  是送審快照的素材之一。之後每次本機掃描,Batch 的
                                  output_dir 指到 samples/permit_scan/<今天日期>/
   samples/permit_scan/vision_texts.json
                                  送 Vision 的截圖打過一次 Vision 存下的全文
-                                 {stem_image: {crop, roi, text}};不屬於某一批,留在上層
+                                 {stem_image: {crop, roi, text}};不屬於某日掃描,留在上層
   samples/review/                錄製新素材時匯出的各頁圖,供人確認契約頁
 
 核對值跟著素材放、不放測試程式裡:沒有素材,核對值毫無用處。
@@ -168,25 +168,25 @@ def permit_vision_texts() -> dict[str, str]:
     return {v["crop"]: v["text"] for v in data.values()}
 
 
-_BATCH_NAME = re.compile(r"\d{4}-\d{2}-\d{2}")
+_DAY_NAME = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def _latest_permit_scan() -> Path | None:
-    """最新一批許可證掃描的 matches.csv:permit_scan/<日期>/ 裡日期最大、且已寫出 matches.csv 的。
+    """最新的某日掃描的 matches.csv:permit_scan/<日期>/ 裡日期最大、且已寫出 matches.csv 的。
 
-    還沒寫出 matches.csv 的資料夾(掃描跑到一半)不算一批,不會把上一批擠掉。
+    還沒寫出 matches.csv 的資料夾(掃描跑到一半)不算某日掃描,不會把前一次擠掉。
     YYYY-MM-DD 的字串順序就是日期順序。
     """
     if not _permit_scan().is_dir():
         return None
-    batches = sorted(d.name for d in _permit_scan().iterdir()
-                     if d.is_dir() and _BATCH_NAME.fullmatch(d.name)
+    days = sorted(d.name for d in _permit_scan().iterdir()
+                     if d.is_dir() and _DAY_NAME.fullmatch(d.name)
                      and (d / "matches.csv").is_file())
-    return _permit_scan() / batches[-1] / "matches.csv" if batches else None
+    return _permit_scan() / days[-1] / "matches.csv" if days else None
 
 
 def permit_scan_csv() -> Path:
-    """最新一批新素材本機掃出的 matches.csv;沒有任何一批就 skip。"""
+    """最新的某日掃描(新素材本機掃出)的 matches.csv;一次都沒有就 skip。"""
     p = _latest_permit_scan()
     if p is None:
         pytest.skip("沒有 samples/permit_scan/<日期>/matches.csv")
@@ -194,9 +194,9 @@ def permit_scan_csv() -> Path:
 
 
 def permit_scans() -> list[Path]:
-    """真實素材的許可證掃描結果(matches.csv):舊 21 份 + 最新一批新素材;沒有就空清單。
+    """真實素材的許可證掃描結果(matches.csv):舊 21 份 + 最新的某日掃描;沒有就空清單。
 
-    只取最新一批:各批掃的是同一組 docx,全取的話同一份 docx 會有好幾個決定。
+    只取最新的那天:每天掃的是同一組 docx,全取的話同一份 docx 會有好幾個決定。
     """
     legacy = ROOT / "legacy" / "matches.21份.backup.csv"
     latest = _latest_permit_scan()

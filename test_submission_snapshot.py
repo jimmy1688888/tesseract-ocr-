@@ -7,7 +7,7 @@
 diff 交人看過。pytest 只比對、絕不寫入,也不打任何 API。
 
 素材:舊 21 份的 matches.csv(samples/legacy/)與新素材在本機掃出的 matches.csv
-(samples/permit_scan/<日期>/ 最新一批)。都不進版控,不在就 skip。
+(samples/permit_scan/<日期>/ 最新的某日掃描)。都不進版控,不在就 skip。
 """
 import csv
 
