@@ -15,7 +15,6 @@
 標題屬右欄、雇主資料屬左欄,輸出順序與版面上下無關(32417 標題 y=104 排在
 第 15 行,雇主 y=166 反而排在第 10 行),拿它當起點等於賭 Vision 怎麼切欄。
 """
-import pytest
 
 from employer_extract import extract_employer_fields
 from employer_result import ExtractionStatus
@@ -125,31 +124,6 @@ class TestPartyBBoundary:
         assert _fields(lines).values.電話 == "0989346899"
 
 
-class TestSamePhoneCountedByStandardForm:
-    """同號判斷用電話標準形(#48、ADR-0011):寫法不同的同一支號碼要合併計數。"""
-
-    def _lines(self, *phone_lines):
-        return ["甲方名稱 (以下簡稱為甲方): 王小明", *phone_lines,
-                "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
-
-    def test_hyphenated_and_plain_count_as_two(self):
-        """「電話」與「Nomor Telepon」各寫一次、一個有連字號 → 計兩次,勝過只出現一次的號碼。
-        排在前面的 03-7985657 只出現一次:用原字串計數時三支各一次,會挑到它。"""
-        f = _fields(self._lines("電話:03-7985657",
-                                "電話:0920-875-667",
-                                "Nomor Telepon:0920875667"))
-        assert f.values.電話 == "0920875667"
-
-    @pytest.mark.parametrize("line,expect", [
-        ("電話:0920-875-667", "0920875667"),          # 連字號
-        ("電話:0920 875 667", "0920875667"),          # 空白
-        ("電話:(03)7985-657", "037985657"),           # 括號區碼
-        ("電話:+886 920 875 667", "0920875667"),      # 國際格式
-    ])
-    def test_column_o_in_standard_form(self, line, expect):
-        assert _fields(self._lines(line)).values.電話 == expect
-
-
 class TestAnchorFailureReturnsEmpty:
     """甲方標籤與 Nama Majikan 都錨不到 → 回空並註記,不退回「從第 0 行開始」。
 
@@ -185,38 +159,3 @@ class TestAnchorFailureReturnsEmpty:
 
     def test_normal_path_status_is_success(self):
         assert _fields(_LINES_NORMAL).status is ExtractionStatus.擷取成功
-
-
-class TestFaxExcludedFromEmployerPhone:
-    """雇主電話統計也要切掉同行的傳真後段(原本只有台仲區塊那條路徑有做)。"""
-
-    def test_damaged_phone_does_not_fall_back_to_fax(self):
-        """電話號碼被 OCR 毀掉、傳真完好時,不切傳真就會拿傳真號充數(32417 實例)。
-
-        『電話:093766)傳真:07-2692232』整行是電話標籤行,傳真號因此靠
-        labeled 優先勝出。切掉後段 → 只剩讀壞的 093766(不合格式)→ 留空。
-        """
-        lines = [
-            "甲方名稱 (以下簡稱為甲方): 王小明",
-            "電話:093766)傳真:07-2692232",
-            "Nomor Telepon:",
-            "SELANJUTNYA DISEBUT PIHAK PERTAMA",
-        ]
-        assert _fields(lines).values.電話 == ""
-
-    def test_phone_before_fax_still_taken(self):
-        """同行有完好電話時照抽,不能因為切除而連電話一起丟掉。"""
-        lines = [
-            "甲方名稱 (以下簡稱為甲方): 王小明",
-            "電話:03-5310852,傳真:03-5277128",
-            "SELANJUTNYA DISEBUT PIHAK PERTAMA",
-        ]
-        assert _fields(lines).values.電話 == "035310852"
-
-    def test_fax_keyword_case_insensitive(self):
-        lines = [
-            "甲方名稱 (以下簡稱為甲方): 王小明",
-            "TEL: 03-5310852 FAX: 03-5277128",
-            "SELANJUTNYA DISEBUT PIHAK PERTAMA",
-        ]
-        assert _fields(lines).values.電話 == "035310852"

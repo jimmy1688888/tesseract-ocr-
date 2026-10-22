@@ -306,6 +306,31 @@ def _best_scored_page(scored: list[tuple[int, str, bytes]]
     return max(scored, key=lambda t: t[0]) if scored else None
 
 
+def pick_employer_phone(seg: list[str]) -> str:
+    """雇主區塊內挑出雇主電話(電話標準形);挑不到回空字串。
+
+    三個實測教訓,各有一組測試(test_employer_phone.py):
+    - 只吃雇主區塊:雇主電話被格式/紅章毀掉時,全文統計的 fallback 會把仲介電話
+      誤當雇主電話(32098),故寧可留空也不取區塊外的號碼。
+    - 標籤行優先:「電話/Nomor Telepon」行上的號碼先算;農業契約地址含地號,
+      會被電話規則誤當電話(32262)。標籤行取不到才退回全區塊。
+    - 同行的「傳真」後段先切掉:常寫成「電話:03-5310852,傳真:03-5277128」,
+      不切則傳真號進統計,且該行就是標籤行,傳真會靠標籤行優先勝出(32447/32417)。
+    出現次數多者優先(電話+Nomor Telepon 各一),同分取先出現的;同號以標準形計數(#48)。
+    """
+    labeled_counts: dict[str, int] = {}
+    all_counts: dict[str, int] = {}
+    for l in seg:
+        l = FAX_SPLIT.split(l, maxsplit=1)[0]
+        on_label = bool(PHONE_LINE_LABEL.search(l))
+        for m in phones_in(l):
+            all_counts[m] = all_counts.get(m, 0) + 1
+            if on_label:
+                labeled_counts[m] = labeled_counts.get(m, 0) + 1
+    pool = labeled_counts or all_counts
+    return max(pool, key=pool.get, default="")
+
+
 def extract_employer_fields(text: str) -> EmployerExtraction:
     """從 Vision 全文擷取雇主欄位(缺項為空字串)。
 
@@ -344,32 +369,7 @@ def extract_employer_fields(text: str) -> EmployerExtraction:
     end = next((i for i in range(start + 1, len(lines))
                 if PARTY_END.search(lines[i])), len(lines))
     seg = lines[start:end]
-
-    # ── 電話:只統計雇主區塊內。仲介框在區塊上方,其電話絕不能混入——
-    #    雇主電話被格式/紅章毀掉時,全文統計的 fallback 會把仲介電話
-    #    誤當雇主電話(32098 實例),故寧可留空也不取區塊外的號碼。
-    #    優先「電話/Nomor Telepon 標籤行」上的號碼:農業契約地址含地號
-    #    (0075-0010…)會被電話規則誤當電話,標籤行優先可避開(32262 教訓);
-    #    標籤行取不到才退回全區塊。出現兩次者(電話+Nomor Telepon 各一)優先。
-    #    同行的「傳真」後段先切掉:雇主/仲介都常寫成
-    #    「電話:03-5310852,傳真:03-5277128」,不切則傳真號與電話一起進統計,
-    #    且該行本身就是標籤行,傳真反而會靠 labeled 優先勝出(32447/32417 實例)。
-    labeled_counts: dict[str, int] = {}
-    all_counts: dict[str, int] = {}
-    for l in seg:
-        l = FAX_SPLIT.split(l, maxsplit=1)[0]
-        on_label = bool(PHONE_LINE_LABEL.search(l))
-        for m in phones_in(l):
-            all_counts[m] = all_counts.get(m, 0) + 1
-            if on_label:
-                labeled_counts[m] = labeled_counts.get(m, 0) + 1
-    pool = labeled_counts or all_counts
-    phone = ""
-    dup = [p for p, c in pool.items() if c >= 2]
-    if dup:
-        phone = max(dup, key=lambda p: pool[p])
-    elif pool:
-        phone = max(pool, key=lambda p: pool[p])
+    phone = pick_employer_phone(seg)
 
     # ── 地址:中文靠行政區+街道 pattern;英文靠地址關鍵字 ──
     # 中文先看雇主區塊內「地址」標籤之後幾行:兩欄版面被逐欄序列化時,仲介框的
