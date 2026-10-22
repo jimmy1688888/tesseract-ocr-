@@ -43,15 +43,16 @@ def scan_env(tmp_path, monkeypatch):
     def make(images, large_result=lambda docx, name: None):
         monkeypatch.setattr(P.docx_images, "read_images", lambda p: list(images))
 
-        def _large(docx, name, data, out_dir, roi_filter=""):
+        def _large(docx, name, data, roi_filter=""):
             scanned["large"].append(name)
-            return large_result(docx, name)
+            r = large_result(docx, name)
+            return P.Reading(r, []) if r else None
 
-        def _small(docx, name, data, out_dir):
+        def _small(docx, name, data):
             scanned["small"].append(name)
-            return P.ScanResult(source_docx=docx, image_name=name,
-                                docx_class="small",
-                                status=P.ResultStatus.SMALL_NO_HIT)
+            return P.Reading(P.ScanResult(source_docx=docx, image_name=name,
+                                          docx_class="small",
+                                          status=P.ResultStatus.SMALL_NO_HIT), [])
 
         monkeypatch.setattr(P, "scan_image_large", _large)
         monkeypatch.setattr(P, "scan_image_mol_only", _small)

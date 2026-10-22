@@ -33,7 +33,7 @@ class TestFlagIsSetWithReasonInNote:
     def test_small_image_without_mol(self, monkeypatch, tmp_path):
         _no_ocr_hits(monkeypatch)
 
-        r = P.scan_image_mol_only("a.docx", "image1.png", b"", tmp_path)
+        r, _ = P.scan_image_mol_only("a.docx", "image1.png", b"")
 
         assert r.manual_review is True
         assert "mol 無值" in r.note

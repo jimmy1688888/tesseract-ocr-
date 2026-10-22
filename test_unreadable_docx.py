@@ -93,9 +93,10 @@ BAD = [
 @pytest.fixture
 def mol_hit(monkeypatch):
     """好的 small docx:每張圖都讀到同一個 mol 多數票(不跑 Tesseract)。"""
-    def fake(docx, name, data, out_dir):
-        return P.ScanResult(source_docx=docx, image_name=name, docx_class="small",
-                            mol="1234", mol_conf=80.0, mol_from_vote=True, hit_roi="mol")
+    def fake(docx, name, data):
+        return P.Reading(P.ScanResult(source_docx=docx, image_name=name, docx_class="small",
+                                      mol="1234", mol_conf=80.0, mol_from_vote=True,
+                                      hit_roi="mol"), [])
     monkeypatch.setattr(P, "scan_image_mol_only", fake)
 
 

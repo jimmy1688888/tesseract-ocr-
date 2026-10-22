@@ -622,107 +622,114 @@ def _collect_mol_votes(image_bytes: bytes) -> list[tuple[str, float]]:
     return entries
 
 
-def _apply_mol_vote(result: ScanResult, image_bytes: bytes, out_dir: Path,
-                    stem: str) -> bool:
-    """mol ROI 先跑 PERMIT_VOTE_CONFIGS 多數票;有贏家就寫進 result(含裁切圖)並回傳 True。
+class Crop(NamedTuple):
+    """一張要寫出的裁切圖:掃描只決定要寫什麼,寫檔由 run_scan 做(#18)。"""
+    field: str      # 寫出後路徑記在 ScanResult 的哪一格:mol_crop / permit_crop / low_conf
+    path: Path      # 相對於這一批的輸出目錄
+    roi: tuple      # 從轉正後的原圖裁哪一塊(相對比例)
+
+
+class Reading(NamedTuple):
+    """一張圖的判讀:讀值整理(ScanResult)+ 要寫出的裁切圖。
+
+    crops 還沒寫出,result 的 mol_crop / permit_crop / low_conf 是空的;
+    run_scan 寫出後才把路徑填回去。
+    """
+    result: ScanResult
+    crops: list[Crop]
+
+
+def _crop_stem(docx_name: str, img_name: str) -> str:
+    return f"{Path(docx_name).stem}_{Path(img_name).stem}"
+
+
+def _apply_mol_vote(result: ScanResult, image_bytes: bytes, stem: str) -> Crop | None:
+    """mol ROI 先跑 PERMIT_VOTE_CONFIGS 多數票;有贏家就寫進 result,回傳要寫出的裁切圖。
 
     small 與 large 的 mol ROI 共用(以前是兩段複製貼上,#17)。
     """
     vote = majority_vote(_collect_mol_votes(image_bytes))
     if not vote:
-        return False
+        return None
     result.mol           = vote.value
     result.mol_conf      = vote.conf
     result.mol_from_vote = True
     result.hit_roi       = "mol"
-    crop_dir = out_dir / "mol_crops"
-    crop_dir.mkdir(parents=True, exist_ok=True)
-    crop_path = crop_dir / f"{stem}.png"
-    crop(open_upright(image_bytes), ROI_REGIONS["mol"]).save(crop_path)
-    result.mol_crop = str(crop_path)
     logger.info(
         f"  ★ mol 多數票：{vote.value}  avg_conf={vote.conf}"
         f"  ({vote.count}/{vote.total} 票)"
     )
-    return True
+    return Crop("mol_crop", Path("mol_crops") / f"{stem}.png", ROI_REGIONS["mol"])
 
 
-def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
-                        out_dir: Path) -> ScanResult:
+def _low_conf_crop(stem: str, roi_name: str, roi_coords: tuple, conf: float) -> Crop:
+    path = Path("low_conf_crops") / f"{stem}_{roi_name}_conf{int(conf)}.png"
+    logger.info(f"  ⚠ 低信心 {conf} < {CONF_KEY_IN}：{path.name}")
+    return Crop("low_conf", path, roi_coords)
+
+
+def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes) -> Reading:
     """small docx 專用：只掃 mol ROI。
 
     第一階段先跑 PERMIT_VOTE_CONFIGS 多數票；有多數票直接採用並標記 mol_from_vote=True。
     無多數票時退回 first-hit（SCAN_CONFIGS → FALLBACK_CONFIGS）。
 
-    out_dir 是這一批的輸出目錄，命中的裁切圖寫在它底下（#18 會把寫出移到 run_scan）。
+    不碰硬碟:命中的裁切圖放在回傳的 crops,由 run_scan 寫出(#18)。
     """
-    stem = f"{Path(docx_name).stem}_{Path(img_name).stem}"
+    stem = _crop_stem(docx_name, img_name)
     result = _empty_result(docx_name, img_name, "small")
-    raw_img = None
     roi_coords = ROI_REGIONS["mol"]
 
     # ── 第一階段：多數票（PERMIT_VOTE_CONFIGS 6組）────────────────────
-    if _apply_mol_vote(result, image_bytes, out_dir, stem):
-        return result
+    vote_crop = _apply_mol_vote(result, image_bytes, stem)
+    if vote_crop:
+        return Reading(result, [vote_crop])
 
     # ── 第二階段：first-hit（SCAN_CONFIGS → FALLBACK_CONFIGS）────────
-    mol_found = False
-    for config_list in (SCAN_CONFIGS, FALLBACK_CONFIGS):
-        if mol_found:
-            break
-        for cfg in config_list:
-            img = preprocess(image_bytes, {**cfg, "roi": roi_coords})
-            lang = cfg.get("lang", TESS_LANG)
-            text, conf = ocr_with_conf(img, lang, build_tess_config(cfg))
-            logger.debug(f"  ✗ mol/{cfg['name']}  conf={conf:.0f}  text={text[:400]!r}")
-            _, _, mol, mol_layer = find_permits(text)
-            if not mol:
-                continue
-            result.mol       = mol
-            result.mol_layer = mol_layer
-            result.mol_conf  = conf
-            result.hit_config = cfg["name"]
-            result.hit_roi   = "mol"
-            if raw_img is None:
-                raw_img = open_upright(image_bytes)
-            crop_dir = out_dir / "mol_crops"
-            crop_dir.mkdir(parents=True, exist_ok=True)
-            crop_path = crop_dir / f"{stem}.png"
-            crop(raw_img, roi_coords).save(crop_path)
-            result.mol_crop = str(crop_path)
-            if conf < CONF_KEY_IN:
-                low_dir = out_dir / "low_conf_crops"
-                low_dir.mkdir(parents=True, exist_ok=True)
-                low_path = low_dir / f"{stem}_mol_conf{int(conf)}.png"
-                crop(raw_img, roi_coords).save(low_path)
-                result.low_conf = str(low_path)
-                logger.info(f"  ⚠ 低信心 {conf} < {CONF_KEY_IN}：{low_path.name}")
-            logger.debug(f"  ★ mol/{cfg['name']}  conf={conf}  mol={mol!r}")
-            mol_found = True
-            break
+    crops: list[Crop] = []
+    for cfg in SCAN_CONFIGS + FALLBACK_CONFIGS:
+        img = preprocess(image_bytes, {**cfg, "roi": roi_coords})
+        lang = cfg.get("lang", TESS_LANG)
+        text, conf = ocr_with_conf(img, lang, build_tess_config(cfg))
+        logger.debug(f"  ✗ mol/{cfg['name']}  conf={conf:.0f}  text={text[:400]!r}")
+        _, _, mol, mol_layer = find_permits(text)
+        if not mol:
+            continue
+        result.mol       = mol
+        result.mol_layer = mol_layer
+        result.mol_conf  = conf
+        result.hit_config = cfg["name"]
+        result.hit_roi   = "mol"
+        crops.append(Crop("mol_crop", Path("mol_crops") / f"{stem}.png", roi_coords))
+        if conf < CONF_KEY_IN:
+            crops.append(_low_conf_crop(stem, "mol", roi_coords, conf))
+        logger.debug(f"  ★ mol/{cfg['name']}  conf={conf}  mol={mol!r}")
+        return Reading(result, crops)
 
-    if not mol_found:
-        result.manual_review = True
-        result.note          = "mol 無值，需人工判斷"
-        logger.info(f"  ⚠ {img_name}: mol 無值，標記人工審查")
-    return result
+    result.manual_review = True
+    result.note          = "mol 無值，需人工判斷"
+    logger.info(f"  ⚠ {img_name}: mol 無值，標記人工審查")
+    return Reading(result, crops)
 
 
 def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
-                     out_dir: Path, roi_filter: str = "") -> ScanResult | None:
-    """large docx 專用：掃 mol + permit。
+                     roi_filter: str = "") -> Reading | None:
+    """large docx 專用：掃 mol + permit。全無命中回傳 None。
 
-    out_dir 是這一批的輸出目錄，命中的裁切圖寫在它底下（#18 會把寫出移到 run_scan）。
+    不碰硬碟:命中的裁切圖放在回傳的 crops,由 run_scan 寫出(#18)。
 
     roi_filter：若非空字串，只掃指定的 ROI（對應 CLI --roi）。
     過去版本由 module-level ROI_FILTER 全域變數承載，現改為參數注入，
     讓函數行為僅依輸入決定，方便測試與並行化。
     """
-    stem = f"{Path(docx_name).stem}_{Path(img_name).stem}"
+    stem = _crop_stem(docx_name, img_name)
     result = _empty_result(docx_name, img_name, "large")
-    raw_img = None
+    crops: list[Crop] = []
     fields_found: set[str] = set()
     any_hit = False
+
+    def planned(crop_field: str) -> bool:
+        return any(c.field == crop_field for c in crops)
 
     for roi_name, roi_coords in ROI_REGIONS.items():
         if roi_filter and roi_name != roi_filter:
@@ -732,67 +739,55 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
             continue
 
         # ── mol ROI：先嘗試多數票（PERMIT_VOTE_CONFIGS 6組）────────────
-        if roi_name == "mol" and _apply_mol_vote(result, image_bytes, out_dir, stem):
+        if roi_name == "mol":
+            vote_crop = _apply_mol_vote(result, image_bytes, stem)
+            if vote_crop:
+                crops.append(vote_crop)
+                any_hit = True
+                fields_found.add(field)
+                continue   # 跳過 mol ROI 的 first-hit
+
+        for cfg in SCAN_CONFIGS + FALLBACK_CONFIGS:
+            img = preprocess(image_bytes, {**cfg, "roi": roi_coords})
+            lang = cfg.get("lang", TESS_LANG)
+            text, conf = ocr_with_conf(img, lang, build_tess_config(cfg))
+            logger.debug(
+                f"  ✗ {roi_name}/{cfg['name']}  conf={conf:.0f}"
+                f"  text={text[:400]!r}"
+            )
+            is_permit_roi = roi_name.startswith("permit")
+            permit_id_list = permit_id_patterns(roi_name) if roi_name.startswith("permit") else None
+            id_, id_layer, mol, mol_layer = find_permits(
+                text, permit_id_list,
+                find_mol=not is_permit_roi,
+                find_id=is_permit_roi,
+            )
+            if not (id_ or mol):
+                continue
+            if id_:
+                result.id = id_
+                result.id_layer = id_layer
+                if not result.id_conf:
+                    result.id_conf = conf
+            if mol:
+                result.mol = mol
+                result.mol_layer = mol_layer
+                if not result.mol_conf:
+                    result.mol_conf = conf
+            if not result.hit_config:
+                result.hit_config = cfg["name"]
+                result.hit_roi = roi_name
             any_hit = True
             fields_found.add(field)
-            continue   # 跳過 mol ROI 的 first-hit
-
-        roi_hit = False
-        for config_list in (SCAN_CONFIGS, FALLBACK_CONFIGS):
-            if roi_hit:
-                break
-            for cfg in config_list:
-                img = preprocess(image_bytes, {**cfg, "roi": roi_coords})
-                lang = cfg.get("lang", TESS_LANG)
-                text, conf = ocr_with_conf(img, lang, build_tess_config(cfg))
-                logger.debug(
-                    f"  ✗ {roi_name}/{cfg['name']}  conf={conf:.0f}"
-                    f"  text={text[:400]!r}"
-                )
-                is_permit_roi = roi_name.startswith("permit")
-                permit_id_list = permit_id_patterns(roi_name) if roi_name.startswith("permit") else None
-                id_, id_layer, mol, mol_layer = find_permits(
-                    text, permit_id_list,
-                    find_mol=not is_permit_roi,
-                    find_id=is_permit_roi,
-                )
-                if not (id_ or mol):
-                    continue
-                if id_:
-                    result.id = id_
-                    result.id_layer = id_layer
-                    if not result.id_conf:
-                        result.id_conf = conf
-                if mol:
-                    result.mol = mol
-                    result.mol_layer = mol_layer
-                    if not result.mol_conf:
-                        result.mol_conf = conf
-                if not result.hit_config:
-                    result.hit_config = cfg["name"]
-                    result.hit_roi = roi_name
-                any_hit = True
-                roi_hit = True
-                fields_found.add(field)
-                if raw_img is None:
-                    raw_img = open_upright(image_bytes)
-                # 寫對應欄位的 crop（mol_crop 或 permit_crop）
-                crop_attr = f"{field}_crop"   # "mol_crop" or "permit_crop"
-                if not getattr(result, crop_attr, ""):
-                    crop_dir = out_dir / f"{field}_crops"
-                    crop_dir.mkdir(parents=True, exist_ok=True)
-                    crop_path = crop_dir / f"{stem}.png"
-                    crop(raw_img, roi_coords).save(crop_path)
-                    setattr(result, crop_attr, str(crop_path))
-                if conf < CONF_KEY_IN and not result.low_conf:
-                    low_dir = out_dir / "low_conf_crops"
-                    low_dir.mkdir(parents=True, exist_ok=True)
-                    low_path = low_dir / f"{stem}_{roi_name}_conf{int(conf)}.png"
-                    crop(raw_img, roi_coords).save(low_path)
-                    result.low_conf = str(low_path)
-                    logger.info(f"  ⚠ 低信心 {conf} < {CONF_KEY_IN}：{low_path.name}")
-                logger.debug(f"  ★ {roi_name}/{cfg['name']}  conf={conf}  id={id_!r} mol={mol!r}")
-                break
+            # 對應欄位的 crop（mol_crop 或 permit_crop）,每欄只寫第一個命中的 ROI
+            crop_field = f"{field}_crop"   # "mol_crop" or "permit_crop"
+            if not planned(crop_field):
+                crops.append(Crop(crop_field, Path(f"{field}_crops") / f"{stem}.png",
+                                  roi_coords))
+            if conf < CONF_KEY_IN and not planned("low_conf"):
+                crops.append(_low_conf_crop(stem, roi_name, roi_coords, conf))
+            logger.debug(f"  ★ {roi_name}/{cfg['name']}  conf={conf}  id={id_!r} mol={mol!r}")
+            break
 
     if not any_hit:
         return None
@@ -832,7 +827,7 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
         result.id_from_vote = True
         logger.info(f"  → mol 無值，permit 多數票：{permit_vote}  avg_conf={permit_vote_avg_conf}")
 
-    return result
+    return Reading(result, crops)
 
 
 def _empty_result(docx_name: str, img_name: str, docx_class: str) -> ScanResult:
@@ -1387,16 +1382,32 @@ def _save_review_images(review_dir: Path, docx_path: Path,
     return saved
 
 
+def _write_crops(out_dir: Path, image_bytes: bytes, reading: Reading) -> ScanResult:
+    """把一張圖判讀出的裁切圖寫到這一批的輸出目錄,路徑填回 result 並回傳它。
+
+    掃描只決定要寫什麼;寫檔(與它需要的解碼、轉正)只在這裡(#18)。
+    """
+    result, crops = reading
+    if crops:
+        upright = open_upright(image_bytes)
+        for c in crops:
+            path = out_dir / c.path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            crop(upright, c.roi).save(path)
+            setattr(result, c.field, str(path))
+    return result
+
+
 def _scan_tier(docx_name: str, images: list[tuple[str, bytes]],
                roi_filter: str, tier: int, out_dir: Path) -> list[ScanResult]:
     """掃一層的圖，回傳有命中的結果（已跑過 decide_result 並標上 scan_tier）。"""
     out: list[ScanResult] = []
     for img_name, img_bytes in images:
-        result = scan_image_large(docx_name, img_name, img_bytes, out_dir,
-                                  roi_filter=roi_filter)
-        if not result:
+        reading = scan_image_large(docx_name, img_name, img_bytes, roi_filter=roi_filter)
+        if not reading:
             logger.debug(f"  {docx_name} / {img_name}  未命中")
             continue
+        result = _write_crops(out_dir, img_bytes, reading)
         decide_result(result)
         result.scan_tier = tier
         out.append(result)
@@ -1472,9 +1483,9 @@ def run_scan(batch: Batch, image_filter: str = "",
                 # 過濾會把它掃成零張、產出一筆與真的讀不到無從分辨的「全無命中」。
                 for img_name, img_bytes in images:
                     total += 1
-                    small_bucket.append(
-                        scan_image_mol_only(docx_path.name, img_name, img_bytes, out_dir)
-                    )
+                    small_bucket.append(_write_crops(
+                        out_dir, img_bytes,
+                        scan_image_mol_only(docx_path.name, img_name, img_bytes)))
             else:
                 large_docs += 1
                 tier1, rest = (images, []) if full_scan else split_tiers(images)
