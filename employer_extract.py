@@ -23,7 +23,8 @@ from typing import NamedTuple
 # 兩側不互相 import。
 from contract_template import COMPANY_WORDS, Template, contract_template
 from docx_images import image_sort_key, read_images
-from pixels import NEXT_PAGE_DEINK, crop, crop_png, deink_red_stamp, open_upright, preprocess, to_png
+from pixels import (NEXT_PAGE_DEINK, crop, crop_png, deink_red_stamp, open_upright,
+                    preprocess, to_png)
 from employer_result import (VALUE_KEYS, WHOLE, Doubt, EmployerExtraction, EmployerValues,
                              ExtractionStatus, Source)
 from tw_phone import phones_in

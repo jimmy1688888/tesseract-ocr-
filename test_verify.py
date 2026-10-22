@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """verify_vision_result 與輔助函數的行為測試。
 
-這層是 Vision 結果的最後一道閘門:對每個 Vision OCR 回傳值,做三層檢查
+這層是 Vision 結果的最後一道閘門:對每個 Vision OCR 回傳值,做兩層檢查
 (格式 → 雙引擎比對),決定可否自動 key-in。
 
 設計原則:**只有雙引擎(Tesseract + Vision)完全一致才自動 key-in**。

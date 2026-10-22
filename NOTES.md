@@ -124,7 +124,7 @@ Sheets 每列 **15 欄**，H~O 由 `pipeline.py` 於寫入前自動填入：
   → **不再重掃同一 ROI 區段**，直接走救援。
 - **取值**：次頁**整頁** OCR（仍只 1 次 Vision — Vision 按張計費，整頁與裁半同額度），
   取得 `{phones, name, address}`；`block_cache` 去重。次頁也走去紅章
-  （`_deink_next_page_png`，比照紅通道_2x_中值3）。
+  （`pixels.NEXT_PAGE_DEINK`，就是紅通道_2x_中值3）。
 - **台仲區塊定界**：台仲在次頁**左右不定**（32345 在右、32324 在左），原「只裁左半」的
   幾何隔離會在台仲於右側時剛好裁到印尼那格。改為**整頁語意錨定**：
   `_is_agency_label_line`（短行 + 非句號結尾）找起點，`_ID_LINE` 排除印尼行做台印分離；
