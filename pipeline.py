@@ -586,11 +586,28 @@ def _collect_permit_votes(image_bytes: bytes, roi_coords: tuple,
     return entries
 
 
-def _majority_vote(values: list[str], min_count: int = 2) -> str:
-    if not values:
-        return ""
-    best, count = Counter(values).most_common(1)[0]
-    return best if count >= min_count else ""
+class Vote(NamedTuple):
+    """多數票的結果。沒有贏家時 value 為空、conf 為 0,且為假值。"""
+    value: str      # 贏家;不到 min_count 票為 ""
+    conf: float     # 贏家各票的平均信心(四捨五入到 0.1)
+    count: int      # 贏家得票數
+    total: int      # 總票數(有讀到值的設定數)
+
+    def __bool__(self) -> bool:
+        return bool(self.value)
+
+
+def majority_vote(entries: list[tuple[str, float]], min_count: int = 2) -> Vote:
+    """(值, 信心) 清單 → 多數票。同票數時先被讀到的值贏(Counter 的順序)。
+
+    挑贏家與算「得票平均信心」只在這裡;以前三個呼叫端各寫一次平均(#17)。
+    """
+    if entries:
+        best, count = Counter(v for v, _ in entries).most_common(1)[0]
+        if count >= min_count:
+            confs = [c for v, c in entries if v == best]
+            return Vote(best, round(sum(confs) / len(confs), 1), count, len(entries))
+    return Vote("", 0.0, 0, len(entries))
 
 
 def _collect_mol_votes(image_bytes: bytes) -> list[tuple[str, float]]:
@@ -603,6 +620,31 @@ def _collect_mol_votes(image_bytes: bytes) -> list[tuple[str, float]]:
         if mol:
             entries.append((mol, conf))
     return entries
+
+
+def _apply_mol_vote(result: ScanResult, image_bytes: bytes, out_dir: Path,
+                    stem: str) -> bool:
+    """mol ROI 先跑 PERMIT_VOTE_CONFIGS 多數票;有贏家就寫進 result(含裁切圖)並回傳 True。
+
+    small 與 large 的 mol ROI 共用(以前是兩段複製貼上,#17)。
+    """
+    vote = majority_vote(_collect_mol_votes(image_bytes))
+    if not vote:
+        return False
+    result.mol           = vote.value
+    result.mol_conf      = vote.conf
+    result.mol_from_vote = True
+    result.hit_roi       = "mol"
+    crop_dir = out_dir / "mol_crops"
+    crop_dir.mkdir(parents=True, exist_ok=True)
+    crop_path = crop_dir / f"{stem}.png"
+    crop(open_upright(image_bytes), ROI_REGIONS["mol"]).save(crop_path)
+    result.mol_crop = str(crop_path)
+    logger.info(
+        f"  ★ mol 多數票：{vote.value}  avg_conf={vote.conf}"
+        f"  ({vote.count}/{vote.total} 票)"
+    )
+    return True
 
 
 def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
@@ -620,25 +662,7 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
     roi_coords = ROI_REGIONS["mol"]
 
     # ── 第一階段：多數票（PERMIT_VOTE_CONFIGS 6組）────────────────────
-    mol_entries = _collect_mol_votes(image_bytes)
-    mol_vote = _majority_vote([v for v, _ in mol_entries], min_count=2)
-    if mol_vote:
-        winning_confs = [c for v, c in mol_entries if v == mol_vote]
-        avg_conf = round(sum(winning_confs) / len(winning_confs), 1)
-        result.mol          = mol_vote
-        result.mol_conf     = avg_conf
-        result.mol_from_vote = True
-        result.hit_roi      = "mol"
-        raw_img = open_upright(image_bytes)
-        crop_dir = out_dir / "mol_crops"
-        crop_dir.mkdir(parents=True, exist_ok=True)
-        crop_path = crop_dir / f"{stem}.png"
-        crop(raw_img, roi_coords).save(crop_path)
-        result.mol_crop = str(crop_path)
-        logger.info(
-            f"  ★ mol 多數票：{mol_vote}  avg_conf={avg_conf}"
-            f"  ({len(winning_confs)}/{len(mol_entries)} 票)"
-        )
+    if _apply_mol_vote(result, image_bytes, out_dir, stem):
         return result
 
     # ── 第二階段：first-hit（SCAN_CONFIGS → FALLBACK_CONFIGS）────────
@@ -708,30 +732,10 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
             continue
 
         # ── mol ROI：先嘗試多數票（PERMIT_VOTE_CONFIGS 6組）────────────
-        if roi_name == "mol":
-            mol_entries = _collect_mol_votes(image_bytes)
-            mol_vote = _majority_vote([v for v, _ in mol_entries], min_count=2)
-            if mol_vote:
-                winning_confs = [c for v, c in mol_entries if v == mol_vote]
-                avg_conf = round(sum(winning_confs) / len(winning_confs), 1)
-                result.mol           = mol_vote
-                result.mol_conf      = avg_conf
-                result.mol_from_vote = True
-                result.hit_roi       = "mol"
-                if raw_img is None:
-                    raw_img = open_upright(image_bytes)
-                crop_dir = out_dir / "mol_crops"
-                crop_dir.mkdir(parents=True, exist_ok=True)
-                crop_path = crop_dir / f"{stem}.png"
-                crop(raw_img, roi_coords).save(crop_path)
-                result.mol_crop = str(crop_path)
-                any_hit = True
-                fields_found.add(field)
-                logger.info(
-                    f"  ★ mol 多數票：{mol_vote}  avg_conf={avg_conf}"
-                    f"  ({len(winning_confs)}/{len(mol_entries)} 票)"
-                )
-                continue   # 跳過 mol ROI 的 first-hit
+        if roi_name == "mol" and _apply_mol_vote(result, image_bytes, out_dir, stem):
+            any_hit = True
+            fields_found.add(field)
+            continue   # 跳過 mol ROI 的 first-hit
 
         roi_hit = False
         for config_list in (SCAN_CONFIGS, FALLBACK_CONFIGS):
@@ -803,12 +807,9 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
             image_bytes, ROI_REGIONS["permit_lower"],
             permit_id_list=RE_PERMIT_ID_LIST_LOWER)
         all_entries = upper_entries + lower_entries
-        all_values  = [v for v, _ in all_entries]
-        permit_vote = _majority_vote(all_values, min_count=2)
-        if permit_vote:
-            winning_confs = [c for v, c in all_entries if v == permit_vote]
-            permit_vote_avg_conf = round(sum(winning_confs) / len(winning_confs), 1)
-        elif all_entries:
+        vote = majority_vote(all_entries)
+        permit_vote, permit_vote_avg_conf = vote.value, vote.conf
+        if not vote and all_entries:
             best = max(all_entries, key=lambda x: x[1])
             result.id = best[0]
             result.id_conf = float(best[1])
