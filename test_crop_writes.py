@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """裁切圖:掃描決定要寫什麼,run_scan 寫出(#18)。
 
-以前六個 mkdir + save 交織在 OCR 迴圈裡,要跑到投票與交叉比對就得先寫檔。
+以前六個 mkdir + save 交織在 OCR 迴圈裡,要跑到多數票與交叉比對就得先寫檔。
 現在掃描回傳 Reading(result, crops),不碰硬碟;寫出的檔名與路徑與以前相同:
 
     <輸出目錄>/mol_crops/<docx>_<圖>.png

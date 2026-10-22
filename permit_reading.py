@@ -2,7 +2,7 @@
 """許可證判讀:一張圖的 image bytes → 一次判讀(CONTEXT.md「ROI 掃描」「多數票」「分層掃描」)。
 
 不碰硬碟、不碰網路、不改全域:OCR 由參數注入(預設 tesseract),裁切圖只回傳
-「要寫什麼」(Crop),寫出由 pipeline.run_scan 做(#18)。所以投票、交叉比對、
+「要寫什麼」(Crop),寫出由 pipeline.run_scan 做(#18)。所以多數票、交叉比對、
 擴掃決策都能用假 OCR 直接測(#19);以前只能靠 monkeypatch 模組屬性。
 
   scan_image_large / scan_image_mol_only   一張圖 → Reading(ScanResult, crops)
@@ -171,7 +171,7 @@ class ScanResult:
 
     # ─── 內部 flag（取代過去的 _id_from_vote） ───────────────────────────
     id_from_vote:  bool = False
-    mol_from_vote: bool = False   # mol 值來自多數票（SCAN_CONFIGS 全跑後投票）
+    mol_from_vote: bool = False   # mol 值來自多數票（PERMIT_VOTE_CONFIGS 那幾組的多數票）
 
     # ─── 序列化 ──────────────────────────────────────────────────────────
     def to_csv_row(self) -> dict[str, str]:
@@ -510,7 +510,7 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
                 f"  text={text[:400]!r}"
             )
             is_permit_roi = roi_name.startswith("permit")
-            permit_id_list = permit_id_patterns(roi_name) if roi_name.startswith("permit") else None
+            permit_id_list = permit_id_patterns(roi_name) if is_permit_roi else None
             id_, id_layer, mol, mol_layer = find_permits(
                 text, permit_id_list,
                 find_mol=not is_permit_roi,
@@ -585,7 +585,7 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
 
 
 def _empty_result(docx_name: str, img_name: str, docx_class: str) -> ScanResult:
-    """建立空白 ScanResult(維持函數名以減少呼叫端 churn,但回傳型別變了)。"""
+    """一張圖還沒讀到任何東西時的 ScanResult(也用來造佔位列)。"""
     return ScanResult(
         source_docx=docx_name,
         image_name=img_name,
@@ -744,7 +744,7 @@ def aggregate_small_docx(results: list[ScanResult]) -> list[ScanResult]:
         r.final_value = w_value
         r.final_conf  = round(w_conf, 1) if w_conf else 0.0
         if r is not winner:
-            r.mol_from_vote = False   # 只保留 winner 的投票旗標
+            r.mol_from_vote = False   # 只保留 winner 的多數票旗標
 
     # mol 多數票且平均信心高於門檻 → 直接 key-in，無須送 Vision
     if winner.mol_from_vote and winner.mol_conf > CONF_MOL_VOTE_MIN:

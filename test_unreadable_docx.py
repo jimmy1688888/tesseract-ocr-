@@ -91,13 +91,13 @@ BAD = [
 
 
 @pytest.fixture
-def mol_hit(monkeypatch):
-    """好的 small docx:每張圖都讀到同一個 mol 多數票(不跑 Tesseract)。"""
+def mol_hit():
+    """好的 small docx:每張圖都讀到同一個 mol 多數票(不跑 Tesseract)。注入 run_scan 用。"""
     def fake(docx, name, data):
         return P.Reading(P.ScanResult(source_docx=docx, image_name=name, docx_class="small",
                                       mol="1234", mol_conf=80.0, mol_from_vote=True,
                                       hit_roi="mol"), [])
-    monkeypatch.setattr(P, "scan_image_mol_only", fake)
+    return fake
 
 
 def _csv_rows(path):
@@ -124,7 +124,8 @@ class TestScanWritesPlaceholder:
     def test_bad_file_does_not_stop_the_batch(self, mol_hit, tmp_path):
         """壞檔排在前面:後面的好 docx 照常產出。"""
         bad, good = not_zip(tmp_path), good_small(tmp_path)
-        P.run_scan(Batch((bad, good), source=tmp_path, output_dir=tmp_path / "out"))
+        P.run_scan(Batch((bad, good), source=tmp_path, output_dir=tmp_path / "out"),
+                   read_small=mol_hit)
 
         rows = _csv_rows(tmp_path / "out" / "matches.csv")
         assert {r["source_docx"] for r in rows} == {bad.name, good.name}
@@ -158,13 +159,14 @@ class TestDirectManualReview:
 
 # ─── 不變式:一批 N 份 → matches.csv 恰好 N 份、送審決策恰好 N 個 ─────────
 
-def test_every_docx_in_the_batch_is_accounted_for(mol_hit, monkeypatch, tmp_path):
+def test_every_docx_in_the_batch_is_accounted_for(mol_hit, tmp_path):
     large = _docx(tmp_path / "large.docx", {f"image{n}.png": _png() for n in range(1, 8)})
-    monkeypatch.setattr(P, "scan_image_large", lambda *a, **k: None)   # large 全無命中
     docs = (no_media(tmp_path), emf_only(tmp_path), not_zip(tmp_path),
             corrupt_zip(tmp_path), good_small(tmp_path), large)
 
-    csv_path = P.run_scan(Batch(docs, source=tmp_path, output_dir=tmp_path / "out"))
+    csv_path = P.run_scan(Batch(docs, source=tmp_path, output_dir=tmp_path / "out"),
+                          read_small=mol_hit,
+                          read_large=lambda *a, **k: None)   # large 全無命中
 
     names = sorted(p.name for p in docs)
     assert sorted({r["source_docx"] for r in _csv_rows(csv_path)}) == names

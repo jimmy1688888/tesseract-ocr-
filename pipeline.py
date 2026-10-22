@@ -744,8 +744,8 @@ def _write_crops(out_dir: Path, image_bytes: bytes, reading: Reading) -> ScanRes
 
 def run_scan(batch: Batch, image_filter: str = "",
              roi_filter: str = "", full_scan: bool = False, *,
-             read_large: Callable[..., Reading | None] | None = None,
-             read_small: Callable[..., Reading] | None = None) -> Path:
+             read_large: Callable[..., Reading | None] = scan_image_large,
+             read_small: Callable[..., Reading] = scan_image_mol_only) -> Path:
     """掃這一批的 docx，輸出 matches.csv，回傳 csv 路徑。
 
     所有產出（matches.csv、裁切圖、無命中複查圖）都寫在 batch.output_dir 底下。
@@ -756,8 +756,6 @@ def run_scan(batch: Batch, image_filter: str = "",
     read_large / read_small：一張圖 → 判讀,預設 permit_reading 的 Tesseract 版本。
                   測試傳假的進來,就不必跑 Tesseract。
     """
-    read_large = read_large or scan_image_large
-    read_small = read_small or scan_image_mol_only
     out_dir = batch.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = batch.matches_csv

@@ -39,7 +39,7 @@ class TestScanImageLarge:
         assert _large(FakeOcr()) is None
 
     def test_permit_vote_without_mol(self):
-        """mol 沒讀到:permit 上下兩半各跑投票那 6 組,多數票取代單一判讀。"""
+        """mol 沒讀到:permit 上下兩半各跑多數票那 6 組設定,多數票取代單一判讀。"""
         ocr = FakeOcr().every("permit_upper", "No. Izin: 1234", 70.0)
         ocr[("permit_lower", PERMIT_VOTE_CONFIGS[0]["name"])] = ("No. Izin 1234", 40.0)
 
@@ -59,7 +59,7 @@ class TestScanImageLarge:
         assert (r.mol, r.mol_from_vote, r.id, r.id_from_vote) == ("1234", True, "1234", False)
 
     def test_mol_and_permit_disagree(self):
-        """兩個都讀到就不投 permit 票:衝突留給送審決策(mol≠permit 衝突)。"""
+        """兩個都讀到就不跑 permit 多數票:衝突留給送審決策(mol≠permit 衝突)。"""
         ocr = (FakeOcr().every("mol", "MOL 1234", 70.0, PERMIT_VOTE_CONFIGS)
                .every("permit_upper", "No. Izin: 1284", 60.0))
 
@@ -76,7 +76,7 @@ class TestScanImageLarge:
         r, _ = _large(ocr)
 
         assert r.status is R.ResultStatus.PERMIT_PARTIAL
-        # 候選值是投票那 6 組裡信心最高的(不是 first-hit 讀到的第一個)
+        # 候選值是多數票那 6 組設定裡信心最高的(不是 first-hit 讀到的第一個)
         i = max(FIRST_HIT.index(c) for c in PERMIT_VOTE_CONFIGS)
         assert i != 0
         assert (r.id, r.id_conf) == (f"12{i:02d}", 40.0 + i)
