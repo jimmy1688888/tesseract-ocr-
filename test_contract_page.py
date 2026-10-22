@@ -17,13 +17,14 @@ import employer_extract as ee
 from real_samples import REAL_DOCX, checked_contract_page, needs_samples, sample
 
 # 資料表頁:去紅章後才讀得到的欄位標籤(FORM ×2)
-_FORM_TEXT = ("雇主名稱:彰化縣芳苑鄉農會(林木村) "
+# 上緣 OCR 是 ind+eng,讀不出中日韓字,所以假文字裡也不放中文。
+_FORM_TEXT = ("Nama Majikan: FANGYUAN TOWNSHIP FARMERS' ASSOCIATION "
               "Nama Pemberi Kerja: Fangyuan Township Farmers' Association "
               "Alamat: No. 195, Fangyuan Section "
               "電話號碼 Nomor Telepon: 04-8984111")
 # 次頁:版面乾淨,原圖就讀得到,但只有樣板 prose(PROSE ×1)
 _PROSE_TEXT = ("Perjanjian Kerja dibuat dalam rangkap 2 (dua) asli, "
-               "1 (satu) untuk PIHAK PERTAMA — 勞動契約")
+               "1 (satu) untuk PIHAK PERTAMA, SELANJUTNYA")
 
 
 def _fake_ocr(monkeypatch, table: dict[bytes, str]) -> None:
@@ -69,9 +70,9 @@ class TestScoreContractPage:
         assert ee.score_contract_page(b"img3") == 3
 
 
-class TestFindContractImage:
+class TestStampedFormPageIsPicked:
 
-    def test_stamped_form_page_beats_clean_prose_page(self, monkeypatch):
+    def test_stamped_form_page_beats_clean_prose_page(self, tmp_path, monkeypatch):
         """32426 的實況:image2 被紅章蓋住、image3 乾淨。去紅章後仍須選中 image2。"""
         _fake_ocr(monkeypatch, {
             b"img2": "",                    # 原圖:紅章蓋住,讀不到
@@ -79,13 +80,10 @@ class TestFindContractImage:
             b"img3": _PROSE_TEXT,
             b"D:img3": _PROSE_TEXT,
         })
-        images = [("image3.jpeg", b"img3"), ("image2.jpeg", b"img2")]
-        assert ee.find_contract_image(images)[0] == "image2.jpeg"
-
-    def test_all_pages_below_min_score_returns_none(self, monkeypatch):
-        """全都達不到門檻 → None(維持原本「不猜」行為)。"""
-        _fake_ocr(monkeypatch, {})
-        assert ee.find_contract_image([("image1.jpeg", b"img1")]) is None
+        p = _make_docx(tmp_path / "32426.docx", {"image2.jpeg": b"img2",
+                                                 "image3.jpeg": b"img3"})
+        _s, name, _b, found = ee.pick_contract_page(ee._scored_pages(p))
+        assert (name, found) == ("image2.jpeg", True)
 
 
 # ── 評分快取:同一份 docx 在一次 pipeline 會被兩個入口各評一次,共用之 ──────

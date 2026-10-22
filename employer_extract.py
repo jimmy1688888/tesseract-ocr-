@@ -22,7 +22,7 @@ from typing import NamedTuple
 # docx 內嵌圖與圖序只有一份,與 pipeline 共用(#5);像素前處理也是(#16)。
 # 兩側不互相 import。
 from contract_template import COMPANY_WORDS, Template, contract_template
-from docx_images import image_sort_key, read_images
+from docx_images import read_images
 from pixels import (NEXT_PAGE_DEINK, crop, crop_png, deink_red_stamp, open_upright,
                     preprocess, to_png)
 from employer_result import (VALUE_KEYS, WHOLE, Doubt, EmployerExtraction, EmployerValues,
@@ -95,11 +95,11 @@ EMPLOYER_ROI = (0.0, 0.0, 1.0, 0.35)
 
 # 契約頁特徵字:用來從 docx 多張圖中辨識「哪一張是勞動契約頁」。
 # 分兩類加權計分,以區辨「雇主資料表」與「簽名頁」:
-#   FORM_LABELS(權重 2):只出現在雇主資料表的欄位標籤(雇主/甲方名稱、
-#     Nama Majikan/Perusahaan/Pemberi Kerja、Alamat、Nomor Telepon、
-#     招募許可函號、MOL License)。這正是我們要抽資料的那頁。
+#   FORM_LABELS(權重 2):只出現在雇主資料表的欄位標籤(Nama Majikan/
+#     Perusahaan/Pemberi Kerja、Alamat、Nomor Telepon、MOL License)。
+#     這正是我們要抽資料的那頁。
 #   PROSE_MARKERS(權重 1):樣板文字,簽名頁的長段 prose 也密集出現
-#     (PERJANJIAN KERJA、PIHAK PERTAMA、SELANJUTNYA、MAJIKAN DENGAN、勞動契約)。
+#     (PERJANJIAN KERJA、PIHAK PERTAMA、SELANJUTNYA、MAJIKAN DENGAN)。
 # 只數總命中會讓 prose 密集的簽名頁壓過真正的資料表(32262 農業契約教訓:
 # image3 簽名頁 prose 命中 4 > image2 資料表 2 → 選錯頁、名稱抽到樣板字)。
 # 加權後資料表(欄位標籤×2)穩定勝出;標題被紅章毀時仍有 FORM 標籤撐分。
@@ -110,21 +110,17 @@ EMPLOYER_ROI = (0.0, 0.0, 1.0, 0.35)
 # 醫療費用條款的條文頁也拿 FORM 加權(33703 的 image4 就因此多 2 分)。
 # 修正後 33703 是 6 比 5,只贏 1 分 —— 那是真實差距,不要靠重複計分灌大。
 #
-# 另:中文標籤(招募許可/甲方名稱/雇主名稱)目前其實比對不到 —— 上緣 OCR 用
-# ind+eng,沒有載 chi_tra。
+# 只列印尼文/英文:上緣 OCR 用 ind+eng,沒有載 chi_tra,中文標籤讀不出來。
 _FORM_LABELS = re.compile(
     r"Nama\s*Majikan|Nama\s*Perusahaan|Pemberi\s*Kerja|Nomor\s*Telepon"
     r"|Nama\s*Panti\s*Jompo(?:\s*/\s*Rumah\s*Sakit)?"
-    r"|Alamat|MOL\s*License|招募許可|甲方名稱|雇主名[稱称]",
+    r"|Alamat|MOL\s*License",
     re.I,
 )
 _PROSE_MARKERS = re.compile(
-    r"PERJANJIAN\s*KERJA|MAJIKAN\s*DENGAN|PIHAK\s*PERTAMA|SELANJUTNYA|勞動契約",
+    r"PERJANJIAN\s*KERJA|MAJIKAN\s*DENGAN|PIHAK\s*PERTAMA|SELANJUTNYA",
     re.I,
 )
-# 向後相容:保留舊名(外部若引用),等同兩類聯集。
-CONTRACT_MARKERS = re.compile(
-    _FORM_LABELS.pattern + "|" + _PROSE_MARKERS.pattern, re.I)
 
 # 切結書(Surat Pernyataan Biaya dan Gaji)第一頁的標題。用來找雇主姓名的第二個
 # 來源:那個欄位實測 6/6 都在「切結書第一頁的下一頁」(見 ADR-0006)。
@@ -207,7 +203,7 @@ def _tesseract_top_text(image_bytes: bytes, top_frac: float = 0.35) -> str:
 
 def score_contract_page(image_bytes: bytes) -> int:
     """一張圖的契約頁分數:欄位標籤(FORM)×2 + 樣板(PROSE)×1。
-    加權讓「雇主資料表」壓過只有 prose 的簽名頁(見 CONTRACT_MARKERS 註解)。
+    加權讓「雇主資料表」壓過只有 prose 的簽名頁(見 _FORM_LABELS 上方註解)。
 
     **先去紅章再掃**:資料表那頁的欄位標籤常被大紅章整片蓋住,原圖直送 Tesseract
     會一個 FORM 標籤都讀不到 → 該頁 0 分,輸給只有 prose 的次頁,契約頁選錯
@@ -237,26 +233,6 @@ def _page_marks(image_bytes: bytes) -> tuple[int, bool]:
 
 # 認定為契約頁的最低分。低於此值視為「頁面身分不明」,呼叫端各自決定退路。
 MIN_CONTRACT_SCORE = 2
-
-
-def find_contract_image(images: list[tuple[str, bytes]],
-                        min_score: int = MIN_CONTRACT_SCORE
-                        ) -> tuple[str, bytes] | None:
-    """從 (檔名, bytes) 清單挑出契約頁:取特徵字命中數最高者,需 ≥ min_score。
-
-    以 Tesseract 掃各圖上緣、計 CONTRACT_MARKERS 命中數;同分時取自然排序在前者。
-    找不到(全都 < min_score)回傳 None。
-
-    註:給「手邊只有圖、沒有 docx 路徑」的呼叫端用。有 docx 路徑者請走
-    _scored_pages(),同一份 docx 的評分只會算一次。
-    """
-    best: tuple[str, bytes] | None = None
-    best_score = 0
-    for name, b in sorted(images, key=lambda x: image_sort_key(x[0])):
-        s = score_contract_page(b)
-        if s > best_score:
-            best_score, best = s, (name, b)
-    return best if best_score >= min_score else None
 
 
 # docx → {圖檔名: 契約頁分數}。評分含 Tesseract(每份 docx 數秒),而同一份 docx
@@ -806,24 +782,6 @@ def vision_full_text(image_bytes: bytes, client=None) -> str:
     return resp.full_text_annotation.text if resp.full_text_annotation else ""
 
 
-def extract_employer(img_path: str, client=None, deink: bool = True,
-                     roi: tuple | None = EMPLOYER_ROI) -> EmployerExtraction:
-    """對單張圖跑 Vision DOCUMENT_TEXT_DETECTION,再擷取雇主欄位。
-
-    處理順序:讀檔 → (可選)ROI 裁切 → (可選)去紅章 → Vision → 解析。
-    roi  :預設 EMPLOYER_ROI(上緣→Nomor Telepon);傳 None 用整張圖。
-    deink:預設 True,送 Vision 前先去紅章前處理(選項 A)。
-    """
-    with open(img_path, "rb") as f:
-        content = f.read()
-    if roi:
-        content = crop_png(content, roi)
-    if deink:
-        content = deink_red_stamp(content)
-    text = vision_full_text(content, client=client)
-    return extract_employer_fields(text)
-
-
 # 台灣/印尼仲介區塊標記。台印電話都以 0 開頭、格式會重疊,無法靠純格式區分,
 # 故用「標記錨定」切出台仲區塊。台仲區塊在次頁左右不定(32345 在右、32324 在左),
 # 不能靠幾何裁半;改為整頁 OCR(仍只 1 次 Vision),以『台灣仲介』欄位標籤錨定起點、
@@ -979,11 +937,6 @@ def agency_block_from_next_page(docx_path: str, client=None) -> dict:
     }
 
 
-def agency_phones_from_next_page(docx_path: str, client=None) -> list[str]:
-    """(相容保留)只取台仲區塊電話候選,等同 agency_block_from_next_page()['phones']。"""
-    return agency_block_from_next_page(docx_path, client=client)["phones"]
-
-
 def pick_contract_page(scored: list[tuple[int, str, bytes]]
                        ) -> tuple[int, str, bytes, bool] | None:
     """正式流程選哪張當契約頁:(分數, 檔名, bytes, 是否找到)。
@@ -1084,53 +1037,17 @@ def _apply_pledge_rescue(result: EmployerExtraction, docx_path: str,
     return replace(result, values=replace(result.values, 雇主名稱_中=got), doubts=doubts)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# A/B 測試小工具:比較「去紅章前 vs 後」的擷取結果,並可另存 deink 影像供目視
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _ab_compare(img_path: str, dump: str = "", roi: tuple | None = EMPLOYER_ROI) -> None:
-    """單張圖:在同一個 ROI 內比較「去紅章前 vs 後」的雇主欄位差異。"""
-    from google_clients import vision_client
-    client = vision_client()
-
-    with open(img_path, "rb") as f:
-        raw = f.read()
-    base = crop_png(raw, roi) if roi else raw   # 兩邊都套 ROI,單獨看 deink 效果
-
-    if dump:
-        with open(dump, "wb") as f:
-            f.write(deink_red_stamp(base))
-        print(f"已輸出 ROI+去紅章影像:{dump}")
-
-    before = extract_employer_fields(vision_full_text(base, client))
-    after  = extract_employer_fields(vision_full_text(deink_red_stamp(base), client))
-
-    print(f"\n== {img_path}  (ROI={roi}) ==")
-    for k in (*VALUE_KEYS, "疑慮標示"):
-        b, a = before.cell(k), after.cell(k)
-        flag = "  ← 變更" if b != a else ""
-        print(f"[{k}]\n  去紅章前: {b!r}\n  去紅章後: {a!r}{flag}")
-
-
 if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(description="雇主資料擷取(契約頁偵測 + ROI + 去紅章)")
-    ap.add_argument("path", help="契約影像(jpg/png)或 .docx 檔路徑")
-    ap.add_argument("--dump", default="", help="另存 ROI+去紅章後影像到此路徑(供目視)")
-    ap.add_argument("--no-ab", action="store_true", help="單圖時只跑正式流程,不做 A/B")
+    ap.add_argument("path", help=".docx 檔路徑")
     ap.add_argument("--full", action="store_true", help="不裁 ROI,對整張圖處理")
     args = ap.parse_args()
 
-    roi = None if args.full else EMPLOYER_ROI
-
-    if args.path.lower().endswith(".docx"):
-        # docx:自動找契約頁 → ROI → 去紅章 → Vision
-        res = extract_employer_from_docx(args.path, deink=True, roi=roi)
-        print(f"採用契約頁:{res.source.image or '(無)'}  {res.status.value} {res.detail}")
-        for k in (*VALUE_KEYS, "疑慮標示"):
-            print(f"  {k}: {res.cell(k)!r}")
-    elif args.no_ab:
-        print(extract_employer(args.path, deink=True, roi=roi))
-    else:
-        _ab_compare(args.path, dump=args.dump, roi=roi)
+    # 自動找契約頁 → ROI → 去紅章 → Vision
+    res = extract_employer_from_docx(args.path, deink=True,
+                                     roi=None if args.full else EMPLOYER_ROI)
+    print(f"採用契約頁:{res.source.image or '(無)'}  {res.status.value} {res.detail}")
+    for k in (*VALUE_KEYS, "疑慮標示"):
+        print(f"  {k}: {res.cell(k)!r}")

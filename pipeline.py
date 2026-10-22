@@ -229,7 +229,6 @@ class ResultStatus(str, Enum):
 class SheetStatus(str, Enum):
     """寫入 Google Sheets 時的 status 欄值。"""
     KEYED_IN      = "keyed-in"
-    VISION        = "vision"
     MANUAL_REVIEW = "manual_review"
 
 
@@ -1364,7 +1363,7 @@ def write_sheets_batched(row_groups: list[tuple[list, SheetStatus]],
     參數：
       row_groups：[(rows, status), ...]（同一 status 的列為一組；與「一批」無關）
         rows 可以是 dict list 或 VisionQueueItem list；
-        status 為 SheetStatus 列舉值（keyed-in / vision / manual_review）。
+        status 為 SheetStatus 列舉值（keyed-in / manual_review）。
 
     特性：
       1. 合併成一次 API 呼叫 → 中途網路失敗時不會出現「半成功」狀態。
