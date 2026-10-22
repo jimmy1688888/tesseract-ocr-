@@ -25,9 +25,9 @@ from PIL import Image, ImageOps
 # docx 內嵌圖與圖序只有一份,與 pipeline 共用(#5);兩側不互相 import。
 from contract_template import COMPANY_WORDS, Template, contract_template
 from docx_images import image_sort_key, read_images
-from tw_phone import phones_in
 from employer_result import (VALUE_KEYS, WHOLE, Doubt, EmployerExtraction, EmployerValues,
                              ExtractionStatus, Source)
+from tw_phone import phones_in
 
 logger = logging.getLogger(__name__)
 

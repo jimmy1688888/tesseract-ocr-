@@ -120,3 +120,30 @@ class TestValuesFromMangledBlock:
         # 名稱被章毀成「鼎力及院發…」(正解為鼎力國際開發有限公司):抽得到但不可靠,
         # 故電話反查排在名稱之前——這裡只釘住「不會把標籤行當成名稱」。
         assert "Taiwan" not in _name_in_block(self.BLOCK)
+
+
+class TestRescueReasonUsesStandardForm:
+    """D 欄反查理由裡的台仲電話來自 OCR,跟著寫成電話標準形(#48)。
+    替身只放在外部邊界:次頁 Vision 讀出的行、Vision client;名冊用注入的假名冊。"""
+
+    def test_reason_shows_standard_form(self, monkeypatch, tmp_path):
+        import employer_extract
+        import google_clients
+        import pipeline
+        from batch import Batch
+        from permit_lookup import PermitLookup
+
+        roster = PermitLookup([{"許可證": "2340", "機構名稱": "測試仲介", "機構地址": "地址",
+                                "電話": "(02)2727-6999#12", "廢止許可日期": "", "終止營業日期": ""}])
+        monkeypatch.setattr(pipeline, "_permit_lookup", lambda: roster)
+        monkeypatch.setattr(google_clients, "vision_client", lambda: object())
+        monkeypatch.setattr(employer_extract, "_agency_block_lines",
+                            lambda path, client=None: ["電話:02-2727-6999,傳真:02-2727-6000"])
+        docx = tmp_path / "32417.docx"
+        docx.write_bytes(b"x")
+        items = [{"source_docx": "32417.docx", "final_value": "", "reason": "全無命中"}]
+
+        assert pipeline.rescue_manual_review_via_agency_phone(Batch.from_file(docx), items) == 1
+        assert items[0]["final_value"] == "2340"
+        assert "台仲電話 0227276999 " in items[0]["reason"]
+        assert "02-2727-6999" not in items[0]["reason"]

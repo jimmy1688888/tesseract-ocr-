@@ -38,7 +38,8 @@ def phones_in(line: str) -> list[str]:
     """抓一行內的台灣電話,回電話標準形(去重保序)。
 
     一般格式、括號區碼、+886 國際格式三條規則各抓一次;同一段字被兩條規則都抓到
-    (+886-02-2727-6999)只算一次 —— 呼叫端拿出現次數挑雇主電話,不能被重複抓灌水。"""
+    (+886-02-2727-6999)只算一次 —— 呼叫端拿出現次數挑雇主電話,不能被重複抓灌水。
+    代價:同一行真的寫了兩次同一支號碼,也只算一次;「出現兩次」要靠兩行。"""
     out: list[str] = []
 
     def add(n: str) -> None:
@@ -48,9 +49,9 @@ def phones_in(line: str) -> list[str]:
     for m in _PHONE.findall(line):
         add(standard_form(m))
     for area, a, b in _PHONE_PAREN.findall(line):
-        add(area + a + b)
+        add(standard_form(area + a + b))
     for m in _PHONE_INTL.finditer(line):
-        digits = re.sub(r"\D", "", m.group(1)).lstrip("0")  # 去 886 後分隔與冗餘前導 0
-        if 8 <= len(digits) <= 9:                  # 市話8 / 手機9(皆已省前導 0)
-            add("0" + digits)
+        n = standard_form("886" + m.group(1))   # +886 還原只在 standard_form 一處
+        if 9 <= len(n) <= 10:                   # 市話 9 / 手機 10(還原前導 0 後)
+            add(n)
     return out
