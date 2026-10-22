@@ -179,28 +179,12 @@ class TestSheetRowSurvivesRosterFailure:
 
     PERMIT = "2340"
 
-    def _row(self, record):
-        return pipeline._row_to_sheet_values(record, pipeline.SheetStatus.KEYED_IN, {})
-
-    def test_queue_item_keeps_permit_and_blanks_agency_cols(self, roster_unavailable):
-        row = self._row(pipeline.VisionQueueItem(
-            source_docx="32417.docx",
-            image_name="image5.jpeg",
-            img_path="",
-            candidate_value=self.PERMIT,
-            reason="多數票",
-        ))
+    @pytest.mark.parametrize("status", list(pipeline.SheetStatus))
+    def test_row_keeps_permit_and_blanks_agency_cols(self, roster_unavailable, status):
+        row = pipeline._row_to_sheet_values(
+            pipeline.SheetRow("32417.docx", self.PERMIT, status, "多數票"), {})
         assert row[1] == self.PERMIT          # B 欄：許可證照常有值
         assert row[4:7] == ["", "", ""]       # E~G：機構名稱／地址／電話留空
-
-    def test_dict_row_keeps_permit_and_blanks_agency_cols(self, roster_unavailable):
-        row = self._row({
-            "source_docx": "32417.docx",
-            "final_value": self.PERMIT,
-            "reason": "人工補值",
-        })
-        assert row[1] == self.PERMIT
-        assert row[4:7] == ["", "", ""]
 
     def test_agency_cols_are_blank_when_roster_unavailable(self, roster_unavailable):
         """E~G 的降級路徑本身：查不到就是三個空字串，不是拋錯。"""

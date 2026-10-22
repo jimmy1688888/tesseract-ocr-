@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from permit_patterns import permit_in_text
+from sheet_row import SheetRow, SheetStatus
 from submission_decision import CONF_NOVOTE_RESCUE_MAX
 
 if TYPE_CHECKING:
@@ -28,38 +29,36 @@ __all__ = ["VerificationLevel", "VerifiedResult", "run_vision_items",
 
 def run_vision_items(items: list[VisionQueueItem],
                      read_text: Callable[[str], str]
-                     ) -> tuple[list[dict], list[dict], list[dict]]:
+                     ) -> tuple[list[SheetRow], list[SheetRow], list[SheetRow]]:
     """送 Vision 那一步:每一筆都分到 (自動寫入, 人工審查, 反查救援) 其中**一處**,絕不丟掉。
 
     read_text 是 Vision client:「截圖路徑 → 全文」(正式流程是 pipeline.vision_text,
     測試換假的)。取號依截圖所屬的 ROI(item.hit_roi),與 Tesseract 同一個函式。
     雙引擎完全一致才自動寫入;其餘進人工審查(交叉比對見 verify_vision_result)。
+    反查救援那組是種子列(B 欄是 Tesseract 候選值),救援後由 pipeline 換成新的列。
     """
-    auto: list[dict] = []        # 雙引擎一致(CONFIRMED) → 自動寫
-    review: list[dict] = []      # 任何不一致 → 人工審查
-    rescue: list[dict] = []      # 單一判讀低信心:略過 ROI Vision,改走次頁電話反查
+    auto: list[SheetRow] = []    # 雙引擎一致(CONFIRMED) → 自動寫
+    review: list[SheetRow] = []  # 任何不一致 → 人工審查
+    rescue: list[SheetRow] = []  # 單一判讀低信心:略過 ROI Vision,改走次頁電話反查
     for item in items:
         # 單一判讀且 conf 過低(ROI 位置品質差)→ 不再掃同一位置,直接改走契約次頁
         # 台仲電話反查救援(比照全無命中);那格 ROI Vision 額度省下來。
         if item.no_vote_rescue:
-            rescue.append({
-                "source_docx":     item.source_docx,
-                "candidate_value": item.candidate_value,   # 種子:電話查無時保留原候選值
-                "reason": (
-                    f"[單一判讀低信心 conf={item.candidate_conf:.1f}<{CONF_NOVOTE_RESCUE_MAX},"
-                    f"略過 ROI Vision 改走次頁電話反查] {item.reason}"
-                ),
-            })
+            rescue.append(SheetRow(
+                item.source_docx,
+                item.candidate_value,   # 種子:電話查無時保留原候選值
+                SheetStatus.MANUAL_REVIEW,
+                f"[單一判讀低信心 conf={item.candidate_conf:.1f}<{CONF_NOVOTE_RESCUE_MAX},"
+                f"略過 ROI Vision 改走次頁電話反查] {item.reason}",
+            ))
             continue
         # 截圖不在:舊做法 continue,整份 docx 從 Sheets 消失(#39)。改進人工審查,
         # 比照 Vision 沒讀到值:B 欄留 Tesseract 候選值、理由只講事實。
         if not item.img_path or not Path(item.img_path).exists():
             logger.warning(f"  ⚠ 找不到圖檔：{item.img_path}（{item.source_docx}）→ 人工審查")
-            review.append({
-                "source_docx":     item.source_docx,
-                "candidate_value": item.candidate_value,
-                "reason":          f"[送Vision原因] {item.reason} ／ 截圖檔不在,未送 Vision",
-            })
+            review.append(SheetRow(
+                item.source_docx, item.candidate_value, SheetStatus.MANUAL_REVIEW,
+                f"[送Vision原因] {item.reason} ／ 截圖檔不在,未送 Vision"))
             continue
         vision_value = permit_in_text(read_text(item.img_path), item.hit_roi)
         verified = verify_vision_result(
@@ -73,12 +72,13 @@ def run_vision_items(items: list[VisionQueueItem],
             f"  vision={vision_value!r}"
             f"  → {verified.level.value}(keyin={verified.should_keyin})"
         )
-        row = {
-            "source_docx":     item.source_docx,
-            "candidate_value": verified.final_value,
-            "reason":          f"[送Vision原因] {item.reason} ／ [Vision結果] {verified.rationale}",
-        }
-        (auto if verified.should_keyin else review).append(row)
+        reason = f"[送Vision原因] {item.reason} ／ [Vision結果] {verified.rationale}"
+        if verified.should_keyin:
+            auto.append(SheetRow(item.source_docx, verified.final_value,
+                                 SheetStatus.KEYED_IN, reason))
+        else:
+            review.append(SheetRow(item.source_docx, verified.final_value,
+                                   SheetStatus.MANUAL_REVIEW, reason))
     return auto, review, rescue
 
 

@@ -77,13 +77,13 @@ class TestOneRowPerItem:
             [_item(tmp_path)], read_text=lambda p: vision_text)
         rows = {"auto": auto, "review": review}[where]
         assert len(rows) == 1 and len(auto) + len(review) + len(rescue) == 1
-        assert rows[0]["candidate_value"] == b
+        assert rows[0].permit == b
 
     def test_vision_only_when_tesseract_had_nothing(self, tmp_path):
         auto, review, _ = run_vision_items(
             [_item(tmp_path, value="")],
             read_text=lambda p: "No. Izin 1234")
-        assert auto == [] and review[0]["candidate_value"] == "1234"
+        assert auto == [] and review[0].permit == "1234"
 
     def test_every_item_gets_exactly_one_row(self, tmp_path):
         items = [_item(tmp_path, value="1234"),
@@ -93,7 +93,7 @@ class TestOneRowPerItem:
         auto, review, rescue = run_vision_items(
             items, read_text=lambda p: "No. Izin 1234")
         assert len(auto) + len(review) + len(rescue) == len(items)
-        assert sorted(r["source_docx"] for r in auto + review + rescue) == ["a.docx"] * 4
+        assert sorted(r.source_docx for r in auto + review + rescue) == ["a.docx"] * 4
 
     def test_roi_decides_the_pattern(self, tmp_path):
         """同一段 Vision 文字,下半部截圖取得出、上半部截圖取不出(依 ROI 選 pattern)。"""
@@ -125,6 +125,6 @@ class TestRealVisionReplay:
             items, read_text=lambda p: texts[Path(p).name])
 
         assert review == [] and rescue == []
-        got = {Path(r["source_docx"]).stem: r["candidate_value"] for r in auto}
+        got = {Path(r.source_docx).stem: r.permit for r in auto}
         assert got == {stem: rs.checked_permit(stem) for stem in got}
         assert len(got) == len(texts)

@@ -25,6 +25,7 @@ import google_clients
 import pipeline as P
 from batch import Batch
 from employer_result import DOUBT_KEY, EMPLOYER_COLUMNS
+from sheet_row import SheetRow, SheetStatus
 from submission_decision import Destination, decide
 
 NO_IMAGES_REASON = "docx 無可讀的內嵌圖(word/media 底下沒有 png/jpg/bmp/tif/gif)"
@@ -151,7 +152,7 @@ class TestDirectManualReview:
 
         q = P.build_vision_queue(csv_path)
         assert (q.vision, q.rescue, q.keyin) == ([], [], [])
-        assert q.direct_review == [{"source_docx": p.name, "reason": reason}]
+        assert q.direct_review == [SheetRow(p.name, "", SheetStatus.MANUAL_REVIEW, reason)]
 
 
 # ─── 不變式:一批 N 份 → matches.csv 恰好 N 份、送審決策恰好 N 個 ─────────
@@ -167,8 +168,7 @@ def test_every_docx_in_the_batch_is_accounted_for(mol_hit, monkeypatch, tmp_path
     names = sorted(p.name for p in docs)
     assert sorted({r["source_docx"] for r in _csv_rows(csv_path)}) == names
     q = P.build_vision_queue(csv_path)
-    decided = ([i.source_docx for i in q.vision + q.keyin]
-               + [d["source_docx"] for d in q.rescue + q.direct_review])
+    decided = [r.source_docx for r in q.vision + q.keyin + q.rescue + q.direct_review]
     assert sorted(decided) == names
 
 
@@ -195,9 +195,9 @@ def world(monkeypatch, tmp_path):
         calls["vision"].extend(items)
         return [], [], []
 
-    def fake_rescue(batch, items, value_key="final_value"):
-        calls["rescue"].extend(items)
-        return 0
+    def fake_rescue(batch, rows):
+        calls["rescue"].extend(rows)
+        return rows
 
     real_collect = P.collect_employer_fields
 

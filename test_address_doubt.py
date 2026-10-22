@@ -265,9 +265,9 @@ class TestSheetWiring:
 
     def _row(self, docx, result):
         import pipeline
+        from sheet_row import SheetRow, SheetStatus
         return pipeline._row_to_sheet_values(
-            {"source_docx": docx, "final_value": "2340"},
-            pipeline.SheetStatus.KEYED_IN, {docx: result})
+            SheetRow(docx, "2340", SheetStatus.KEYED_IN, ""), {docx: result})
 
     def test_row_is_fifteen_columns(self):
         assert len(self._row("a.docx", _result())) == 15
@@ -298,8 +298,9 @@ class TestSheetWiring:
 
     def test_unknown_docx_gives_empty_doubt_not_crash(self):
         import pipeline
+        from sheet_row import SheetRow, SheetStatus
         row = pipeline._row_to_sheet_values(
-            {"source_docx": "never-seen.docx"}, pipeline.SheetStatus.MANUAL_REVIEW, {})
+            SheetRow("never-seen.docx", "", SheetStatus.MANUAL_REVIEW, ""), {})
         assert len(row) == 15 and row[self.L] == ""
 
 

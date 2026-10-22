@@ -158,25 +158,15 @@ def decisions_snapshot_path() -> Path:
 
 
 def _default_decisions(csv_path: Path) -> dict[str, list[dict[str, str]]]:
-    """現行送審程式 → 快照的形狀。#40 重構時只換這一層。"""
+    """現行送審程式 → 快照的形狀。#40 重構時只換這一層。
+
+    讀送審決策本身(pipeline.read_decisions),不讀佇列:#12 之後直接 key-in 在佇列裡
+    已是寫 Sheets 的列,不帶被選的那張圖。
+    """
     import pipeline
-    q = pipeline.build_vision_queue(csv_path)
-    vision, manual, keyin, direct = q.vision, q.rescue, q.keyin, q.direct_review
-    out: dict[str, list[dict[str, str]]] = {}
-
-    def add(docx, dest, value, image):
-        out.setdefault(docx, []).append({"去向": dest, "候選值": value, "圖": image})
-
-    for i in keyin:
-        add(i.source_docx, "直接key-in", i.candidate_value, i.image_name)
-    for i in vision:
-        add(i.source_docx, "反查救援" if i.no_vote_rescue else "送Vision",
-            i.candidate_value, i.image_name)
-    for d in manual:                      # 全無命中:主流程一律交反查救援
-        add(d["source_docx"], "反查救援", "", "")
-    for d in direct:                      # docx 讀不到圖(#47)
-        add(d["source_docx"], "直接人工審查", "", "")
-    return out
+    return {d.source_docx: [{"去向": d.destination.value, "候選值": d.candidate_value,
+                             "圖": d.image_name}]
+            for d in pipeline.read_decisions(csv_path)}
 
 
 def current_decisions(decide: Callable[[Path], dict] | None = None) -> dict[str, list[dict[str, str]]]:

@@ -15,6 +15,7 @@ import employer_extract
 import google_clients
 import pipeline
 from batch import Batch
+from sheet_row import SheetRow, SheetStatus
 
 
 class TestFromDir:
@@ -139,23 +140,21 @@ class TestRescueOpensTheBatchFile:
         real.write_bytes(b"real")
         return real
 
-    def _items(self):
-        return [{"source_docx": "32417.docx", "final_value": "", "reason": "全無命中"}]
+    def _seed(self):
+        return [SheetRow("32417.docx", "", SheetStatus.MANUAL_REVIEW, "全無命中")]
 
     def test_opens_the_file_given_by_path(self, opened, elsewhere):
-        items = self._items()
-        n = pipeline.rescue_manual_review_via_agency_phone(
-            Batch.from_file(elsewhere), items)
+        [row] = pipeline.rescue_manual_review_via_agency_phone(
+            Batch.from_file(elsewhere), self._seed())
         assert opened == [elsewhere]
-        assert n == 1
-        assert items[0]["final_value"] == "2340"
+        assert row.permit == "2340"
 
     def test_rescues_even_when_docs_has_no_such_file(self, opened, elsewhere):
         """修好前:./docs 沒有同名檔就靜默跳過。"""
         (elsewhere.parent.parent / "docs" / "32417.docx").unlink()
-        items = self._items()
-        assert pipeline.rescue_manual_review_via_agency_phone(
-            Batch.from_file(elsewhere), items) == 1
+        [row] = pipeline.rescue_manual_review_via_agency_phone(
+            Batch.from_file(elsewhere), self._seed())
+        assert row.permit == "2340"
         assert opened == [elsewhere]
 
 

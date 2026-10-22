@@ -10,6 +10,7 @@ D 欄只陳述事實,比照 Vision 沒讀到值(FORMAT_INVALID)的既有做法�
 import pytest
 
 from pipeline import VisionQueueItem
+from sheet_row import SheetStatus
 from vision_verification import run_vision_items
 
 
@@ -32,9 +33,9 @@ def test_missing_crop_goes_to_manual_review_not_nowhere(tmp_path, img_path):
     assert auto == [] and rescue == []
     assert len(review) == 1
     row = review[0]
-    assert row["source_docx"] == "a.docx" and row["candidate_value"] == "1234"
-    assert "截圖檔不在,未送 Vision" in row["reason"]
-    assert "permit部分命中無多數" in row["reason"]           # 送 Vision 的原因照樣留著
+    assert (row.source_docx, row.permit, row.status) == ("a.docx", "1234", SheetStatus.MANUAL_REVIEW)
+    assert "截圖檔不在,未送 Vision" in row.reason
+    assert "permit部分命中無多數" in row.reason           # 送 Vision 的原因照樣留著
 
 
 def test_existing_crop_still_goes_through_vision(tmp_path):
@@ -42,7 +43,8 @@ def test_existing_crop_still_goes_through_vision(tmp_path):
     crop.write_bytes(b"x")
     auto, review, rescue = run_vision_items(
         [_item(str(crop))], read_text=lambda p: "No. Izin: 1234")
-    assert [r["candidate_value"] for r in auto] == ["1234"] and review == [] and rescue == []
+    assert [(r.permit, r.status) for r in auto] == [("1234", SheetStatus.KEYED_IN)]
+    assert review == [] and rescue == []
 
 
 def test_low_conf_single_read_goes_to_rescue_without_vision(tmp_path):
@@ -51,4 +53,5 @@ def test_low_conf_single_read_goes_to_rescue_without_vision(tmp_path):
         [_item("", no_vote_rescue=True, candidate_conf=40.0)],
         read_text=lambda p: calls.append(p) or "")
     assert calls == [] and auto == [] and review == []
-    assert len(rescue) == 1 and rescue[0]["candidate_value"] == "1234"
+    assert len(rescue) == 1
+    assert (rescue[0].permit, rescue[0].status) == ("1234", SheetStatus.MANUAL_REVIEW)

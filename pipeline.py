@@ -84,6 +84,8 @@ from permit_lookup import PermitLookup
 # 一批:這次要處理哪些 docx(完整路徑)。只是設定,結果不放進去(ADR-0009)。
 from batch import Batch
 from employer_result import EMPLOYER_COLUMNS, EmployerExtraction, ExtractionStatus
+# 寫進 Sheets 的一列(A~D),結果在哪一步確定就在哪一步建好(#12)。
+from sheet_row import SheetRow, SheetStatus
 
 # docx 內嵌圖與圖序只有一份,與 employer_extract 共用(#5)。
 import docx_images
@@ -132,7 +134,7 @@ TESS_LANG  = "ind+eng"
 # 會讀哪些內嵌圖(副檔名集合)與圖序在 docx_images.py。
 
 # Google Sheets：試算表 ID 與工作表名稱在 google_clients.py。
-# 每列寫入 15 欄：A=source_docx, B=final_value(許可證), C=status, D=reason,
+# 每列寫入 15 欄：A=source_docx, B=許可證, C=status, D=reason(A~D 即 SheetRow),
 #              E=機構名稱, F=機構地址, G=電話（E~G 由 permit_lookup 查名冊補上）,
 #              H=雇主名稱_中, I=雇主名稱_英, J=雇主地址_中(標準), K=雇主地址_中(OCR),
 #              L=雇主地址_英(標準), M=雇主地址_英(OCR), N=郵遞區號, O=雇主電話
@@ -146,7 +148,7 @@ TESS_LANG  = "ind+eng"
 # decide_result 使用。
 from submission_decision import (  # noqa: E402
     CONF_KEY_IN, CONF_MOL_VOTE_MIN, CONF_NOVOTE_RESCUE_MAX, CONF_VOTE_MIN,
-    Destination, decide, is_permit_vote)
+    Decision, Destination, decide, is_permit_vote)
 
 # ─── prefilter ────────────────────────────────────────────────────────────
 SMALL_DOCX_THRESHOLD = 3   # 圖片數 ≤ 此值 → "small"
@@ -226,16 +228,10 @@ class ResultStatus(str, Enum):
     UNREADABLE     = "unreadable"       # 打不開(不是有效的 zip,或壓縮資料損壞)
 
 
-class SheetStatus(str, Enum):
-    """寫入 Google Sheets 時的 status 欄值。"""
-    KEYED_IN      = "keyed-in"
-    MANUAL_REVIEW = "manual_review"
-
-
 @dataclass
 class VisionQueueItem:
-    """vision_submit 階段產生的工作項目。
-    direct_keyin=True 表示信心足夠，直接寫 Sheets；False 則送 Google Vision 再決定。
+    """送 Vision(或單一判讀低信心、改走反查救援)的工作項目。直接 key-in 的不經過這裡,
+    在送審決策就建好 SheetRow。
 
     candidate_conf:候選值對應的 Tesseract 信心分數。後續 verify_vision_result
     會帶進 rationale 供人工審查參考(差 1 字元時不再用它自動挑值)。
@@ -245,7 +241,6 @@ class VisionQueueItem:
     img_path: str
     candidate_value: str
     reason: str
-    direct_keyin: bool = False
     candidate_conf: float = 0.0
     # 非多數票且低信心的「單一判讀」(small mol 單一命中 / large permit 部分命中,
     # 且 conf < CONF_NOVOTE_RESCUE_MAX)。conf 太低代表該 ROI 位置本身品質不佳,
@@ -961,9 +956,19 @@ class SubmissionQueue(NamedTuple):
     """一批的送審決策依去向分好(build_vision_queue 的回傳)。每份 docx 恰好在其中一處。"""
     vision: list[VisionQueueItem]   # 送 Google Vision;反查救援的「單一判讀低信心」也在這
                                     # (no_vote_rescue=True,主流程略過 ROI Vision、改走次頁反查)
-    rescue: list[dict]              # 全無命中,要走反查救援:{"source_docx", "reason"}
-    keyin: list[VisionQueueItem]    # 直接 key-in(direct_keyin=True)
-    direct_review: list[dict]       # docx 讀不到圖,直接人工審查(不送 Vision、不反查),格式同 rescue
+    rescue: list[SheetRow]          # 全無命中,要走反查救援的種子列(B 欄空)
+    keyin: list[SheetRow]           # 直接 key-in:結果已定,列已建好
+    direct_review: list[SheetRow]   # docx 讀不到圖,直接人工審查(不送 Vision、不反查)
+
+
+def read_decisions(csv_path: Path) -> list[Decision]:
+    """讀取 matches.csv,每份 docx 一個送審決策(依檔名排序)。"""
+    groups: dict[str, list[ScanResult]] = defaultdict(list)
+    with open(csv_path, encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            sr = ScanResult.from_csv_row(row)
+            groups[sr.source_docx].append(sr)
+    return [decide(rows) for _name, rows in sorted(groups.items())]
 
 
 def build_vision_queue(csv_path: Path) -> SubmissionQueue:
@@ -973,39 +978,35 @@ def build_vision_queue(csv_path: Path) -> SubmissionQueue:
 
     一份 docx 只有一個決定(一份契約只有一個許可證,Sheets 上只有一列)。
     """
-    groups: dict[str, list[ScanResult]] = defaultdict(list)
-    with open(csv_path, encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
-            sr = ScanResult.from_csv_row(row)
-            groups[sr.source_docx].append(sr)
+    vision_items:  list[VisionQueueItem] = []
+    keyin_rows:    list[SheetRow]        = []
+    manual_review: list[SheetRow]        = []
+    direct_review: list[SheetRow]        = []
 
-    vision_items: list[VisionQueueItem] = []
-    keyin_items:  list[VisionQueueItem] = []
-    manual_review: list[dict]           = []
-    direct_review: list[dict]           = []
-
-    for docx_name, rows in sorted(groups.items()):
-        d = decide(rows)
+    for d in read_decisions(csv_path):
+        docx_name = d.source_docx
+        if d.destination is Destination.直接KEYIN:
+            keyin_rows.append(SheetRow(d.source_docx, d.candidate_value,
+                                       SheetStatus.KEYED_IN, d.reason))
+            continue
         if d.destination is Destination.直接人工審查:
-            direct_review.append({"source_docx": docx_name, "reason": d.reason})
+            direct_review.append(SheetRow(docx_name, "", SheetStatus.MANUAL_REVIEW, d.reason))
             continue
         if d.destination is Destination.反查救援 and not d.image_name:
-            manual_review.append({"source_docx": docx_name, "reason": d.reason})
+            manual_review.append(SheetRow(docx_name, "", SheetStatus.MANUAL_REVIEW, d.reason))
             continue
-        item = VisionQueueItem(
+        vision_items.append(VisionQueueItem(
             source_docx     = d.source_docx,
             image_name      = d.image_name,
             img_path        = d.img_path,
             candidate_value = d.candidate_value,
             candidate_conf  = d.candidate_conf,
             reason          = d.reason,
-            direct_keyin    = d.destination is Destination.直接KEYIN,
             no_vote_rescue  = d.destination is Destination.反查救援,
             hit_roi         = d.hit_roi,
-        )
-        (keyin_items if item.direct_keyin else vision_items).append(item)
+        ))
 
-    return SubmissionQueue(vision_items, manual_review, keyin_items, direct_review)
+    return SubmissionQueue(vision_items, manual_review, keyin_rows, direct_review)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1075,7 +1076,6 @@ def _sheets_append_atomic(values: list[list[str]]) -> None:
     ).execute()
 
 
-# 一筆要寫入 Sheets 的資料原型，可由 dict 或 VisionQueueItem 轉成。
 def _agency_cols(permit_value: str) -> list[str]:
     """依許可證查名冊,回傳 [機構名稱, 機構地址, 電話];查無或無值 → 三個空字串。"""
     pl = _permit_lookup()
@@ -1198,16 +1198,16 @@ def write_doubt_report(batch: Batch, employer_by_docx: dict[str, EmployerExtract
 
 
 def rescue_manual_review_via_agency_phone(
-        batch: Batch, items: list[dict], value_key: str = "final_value") -> int:
+        batch: Batch, rows: list[SheetRow]) -> list[SheetRow]:
     """仲介反查救援:整頁 OCR 契約次一頁(1 次 Vision),以『台灣仲介』欄位標籤
     錨定區塊(台仲在左在右皆可,靠標籤非位置),取其「電話／名稱／地址」反查名冊
-    回推許可證,覆寫回 items[value_key] / reason;_agency_cols 會據許可證補 E~G。
-    回傳成功救回筆數(不含多家待人工者)。
+    回推許可證。列進、列出:回傳與 rows 同序的新列(B 欄換成救回的許可證、D 欄接上
+    反查管道),不改傳入的列;_agency_cols 會據許可證補 E~G。
 
     兩種呼叫情境共用:
-      - 全無命中(value_key="final_value"):原本 B 欄空,救回填入許可證。
-      - 非多數票低信心單一判讀(value_key="candidate_value"):ROI 品質差,
-        略過 ROI Vision 直接反查;命中則覆寫原候選值(填 B)。
+      - 全無命中:種子列 B 欄空,救回填入許可證。
+      - 非多數票低信心單一判讀:ROI 品質差,略過 ROI Vision 直接反查;種子列 B 欄是
+        Tesseract 候選值,命中則換成救回的許可證,救不回就留著。
 
     反查優先序(結果一律 manual_review、D 欄註明管道供人工核對):
       ① 電話精確唯一命中 → 最可靠,直接填 B。
@@ -1215,23 +1215,25 @@ def rescue_manual_review_via_agency_phone(
       ③ (後備)名稱、地址各比名冊相似度,取相似度(CONF)高者填 B。
       ④ 電話多家、且前綴/名稱/地址皆救不回 → 不填 B,列出各家供人工擇一。
     名冊/Vision 缺失時安靜跳過,不影響主流程。
-    要開的 docx 跟 batch 查完整路徑(items 只帶檔名),見 Batch.path_of。
+    要開的 docx 跟 batch 查完整路徑(列只帶檔名),見 Batch.path_of。
     同一 docx 的次頁只送一次 Vision(block_cache),多列共用不重複計費。"""
     pl = _permit_lookup()
-    if pl is None or not items:
-        return 0
+    if pl is None or not rows:
+        return list(rows)
     try:
         from employer_extract import agency_block_from_next_page
         client = google_clients.vision_client()
     except Exception as e:
         logger.warning(f"  ⚠ 電話反查救援不可用(略過):{e!r}")
-        return 0
+        return list(rows)
+    out: list[SheetRow] = []
     rescued = 0
     block_cache: dict[str, dict] = {}   # source_docx → {phones,name,address}(避免重複送 Vision)
-    for item in items:
-        docx_name = item["source_docx"]
+    for row in rows:
+        docx_name = row.source_docx
         docx_path = batch.path_of(docx_name)
         if docx_path is None:
+            out.append(row)
             continue
         if docx_name in block_cache:
             block = block_cache[docx_name]
@@ -1258,14 +1260,13 @@ def rescue_manual_review_via_agency_phone(
         # ① 電話精確唯一命中 → 填 B(最可靠管道)
         if phone_best and phone_best[0] == "single":
             info, ph = phone_best[1], phone_best[2]
-            item[value_key] = info["許可證"]
-            item["reason"] = (
-                f"{item['reason']}；[電話反查救回] 次頁台仲電話 {ph} → "
-                f"許可證 {info['許可證']}／{info['機構名稱']}(仍請人工核對)"
-            )
+            row = replace(row, permit=info["許可證"], reason=(
+                f"{row.reason}；[電話反查救回] 次頁台仲電話 {ph} → "
+                f"許可證 {info['許可證']}／{info['機構名稱']}(仍請人工核對)"))
             logger.info(f"  ↻ {docx_name} 電話反查救回:{ph} → "
                         f"{info['許可證']}／{info['機構名稱']}")
             rescued += 1
+            out.append(row)
             continue
 
         # ② 電話『前綴』唯一命中(OCR 少 1~2 碼容錯;比通用後段名稱可靠,故排在名稱前)
@@ -1277,14 +1278,13 @@ def rescue_manual_review_via_agency_phone(
                 break
         if prefix_hit:
             info, ph = prefix_hit
-            item[value_key] = info["許可證"]
-            item["reason"] = (
-                f"{item['reason']}；[電話前綴反查救回·電話OCR可能少碼] 次頁台仲電話 {ph} "
-                f"前綴唯一命中 → 許可證 {info['許可證']}／{info['機構名稱']}(仍請人工核對)"
-            )
+            row = replace(row, permit=info["許可證"], reason=(
+                f"{row.reason}；[電話前綴反查救回·電話OCR可能少碼] 次頁台仲電話 {ph} "
+                f"前綴唯一命中 → 許可證 {info['許可證']}／{info['機構名稱']}(仍請人工核對)"))
             logger.info(f"  ↻ {docx_name} 電話前綴反查救回:{ph} → "
                         f"{info['許可證']}／{info['機構名稱']}")
             rescued += 1
+            out.append(row)
             continue
 
         # ③ 電話後備:名稱、地址各與名冊比相似度,取「相似度(CONF)高者」填 B
@@ -1293,77 +1293,52 @@ def rescue_manual_review_via_agency_phone(
         picks = [(c, lbl) for c, lbl in ((cand_n, "名稱"), (cand_a, "地址")) if c]
         if picks:
             best_c, via = max(picks, key=lambda x: x[0]["_ratio"])
-            item[value_key] = best_c["許可證"]
-            item["reason"] = (
-                f"{item['reason']}；[{via}反查救回·電話無唯一命中] 次頁台仲{via} → "
+            row = replace(row, permit=best_c["許可證"], reason=(
+                f"{row.reason}；[{via}反查救回·電話無唯一命中] 次頁台仲{via} → "
                 f"許可證 {best_c['許可證']}／{best_c['機構名稱']}"
-                f"(名冊相似度 {best_c['_ratio']},仍請人工核對)"
-            )
+                f"(名冊相似度 {best_c['_ratio']},仍請人工核對)"))
             logger.info(f"  ↻ {docx_name} {via}反查救回:相似度 {best_c['_ratio']} → "
                         f"{best_c['許可證']}／{best_c['機構名稱']}")
             rescued += 1
+            out.append(row)
             continue
 
         # ④ 電話多家(模糊)且前綴/名稱/地址都救不回 → 列出台仲供人工擇一,不填 B
         if phone_best and phone_best[0] == "ambig":
             matches, ph = phone_best[1], phone_best[2]
             cand = "、".join(f"{m['許可證']}／{m['機構名稱']}" for m in matches)
-            item["reason"] = (
-                f"{item['reason']}；[電話反查·需人工擇一] 台仲電話 {ph} 命中"
-                f"{len(matches)} 家:{cand}"
-            )
+            row = replace(row, reason=(
+                f"{row.reason}；[電話反查·需人工擇一] 台仲電話 {ph} 命中"
+                f"{len(matches)} 家:{cand}"))
             logger.info(f"  ⚠ {docx_name} 電話 {ph} 命中 {len(matches)} 家台仲,"
                         f"列出供人工擇一:{cand}")
-    return rescued
-
-
-def _employer_cols(r, employer_by_docx: dict[str, EmployerExtraction]) -> list[str]:
-    """依 EMPLOYER_COLUMNS 取雇主 8 欄:row 自帶的 key 優先,否則查雇主擷取結果。"""
-    if isinstance(r, dict):
-        docx = r.get("source_docx", "")
-    else:
-        docx = getattr(r, "source_docx", "")
-    result = employer_by_docx.get(docx)
-    out = []
-    for _col, k in EMPLOYER_COLUMNS:
-        own = r.get(k, "") if isinstance(r, dict) else ""
-        out.append(str(own or (result.cell(k) if result else "") or ""))
+        out.append(row)
+    logger.info(f"  反查救回 {rescued}/{len(rows)} 筆(填許可證+機構欄)")
     return out
 
 
-def _row_to_sheet_values(r, status: SheetStatus,
+def _employer_cols(docx: str, employer_by_docx: dict[str, EmployerExtraction]) -> list[str]:
+    """依 EMPLOYER_COLUMNS 取雇主 8 欄;這份 docx 沒有雇主擷取結果就全空。"""
+    result = employer_by_docx.get(docx)
+    return [result.cell(k) if result else "" for _col, k in EMPLOYER_COLUMNS]
+
+
+def _row_to_sheet_values(row: SheetRow,
                          employer_by_docx: dict[str, EmployerExtraction]) -> list[str]:
-    """把一筆紀錄轉成 Sheets 的一列（15 欄：A~D 識別/決策、E~G 機構、H~O 雇主）。
+    """把一列轉成 Sheets 的十五欄(A~D 即 SheetRow、E~G 機構、H~O 雇主)。十五欄的對應只在這裡。
 
-    支援 dict（manual 用）與 VisionQueueItem。E~G 欄由 B 欄的許可證值查名冊補上；
-    H~O 為雇主欄位，依 source_docx 查 collect_employer_fields() 回傳的 employer_by_docx
-    （見 _employer_cols），未擷取或失敗則留空。其中 L 欄不是資料而是疑慮標示，
-    說明中文標準地址（J）為何留空（見 ADR-0003）。
+    E~G 欄由 B 欄的許可證值查名冊補上;H~O 為雇主欄位,依 source_docx 查
+    collect_employer_fields() 回傳的 employer_by_docx,未擷取或失敗則留空。其中 L 欄不是
+    資料而是疑慮標示,說明中文標準地址(J)為何留空(見 ADR-0003)。
     """
-    if isinstance(r, VisionQueueItem):
-        value = r.candidate_value
-        base = [r.source_docx, value, status.value, r.reason]
-    else:
-        # dict 形式（main 內動態組裝的 vision_keyin / manual_rows）
-        value = r.get("final_value") or r.get("candidate_value", "")
-        base = [
-            r.get("source_docx", ""),
-            value,
-            status.value,
-            r.get("reason") or r.get("note", ""),
-        ]
-    return base + _agency_cols(value) + _employer_cols(r, employer_by_docx)
+    return ([row.source_docx, row.permit, row.status.value, row.reason]
+            + _agency_cols(row.permit) + _employer_cols(row.source_docx, employer_by_docx))
 
 
-def write_sheets_batched(row_groups: list[tuple[list, SheetStatus]],
+def write_sheets_batched(rows: list[SheetRow],
                          employer_by_docx: dict[str, EmployerExtraction]) -> int:
     """
-    一次性把多組列 atomic 寫入 Google Sheets。
-
-    參數：
-      row_groups：[(rows, status), ...]（同一 status 的列為一組；與「一批」無關）
-        rows 可以是 dict list 或 VisionQueueItem list；
-        status 為 SheetStatus 列舉值（keyed-in / manual_review）。
+    一次性把所有列 atomic 寫入 Google Sheets(依 rows 的順序;status 在列上)。
 
     特性：
       1. 合併成一次 API 呼叫 → 中途網路失敗時不會出現「半成功」狀態。
@@ -1373,11 +1348,7 @@ def write_sheets_batched(row_groups: list[tuple[list, SheetStatus]],
 
     回傳實際寫入 Sheets 的列數。
     """
-    values: list[list[str]] = []
-
-    for rows, status in row_groups:
-        for r in rows:
-            values.append(_row_to_sheet_values(r, status, employer_by_docx))
+    values = [_row_to_sheet_values(r, employer_by_docx) for r in rows]
 
     if not values:
         logger.info("  （此次無新資料需寫入 Sheets）")
@@ -1875,9 +1846,9 @@ def main(opts: argparse.Namespace) -> None:
     # ── 步驟 3：vision_submit 分流 ─────────────────────────────────────────
     logger.info("── 步驟 3：vision_submit 分流 ──")
     queue = build_vision_queue(csv_path)
-    vision_items, manual_review, keyin_items = queue.vision, queue.rescue, queue.keyin
+    vision_items, manual_review, keyin_rows = queue.vision, queue.rescue, queue.keyin
     direct_review = queue.direct_review
-    logger.info(f"  直接 key-in：{len(keyin_items)} 筆")
+    logger.info(f"  直接 key-in：{len(keyin_rows)} 筆")
     logger.info(f"  送 Vision  ：{len(vision_items)} 筆")
     logger.info(f"  人工審查   ：{len(manual_review)} 件")
     logger.info(f"  直接人工審查(讀不到圖):{len(direct_review)} 件")
@@ -1914,33 +1885,23 @@ def main(opts: argparse.Namespace) -> None:
     # D 欄註明,供人工快速核對。
     if manual_review:
         logger.info("── 步驟 4b 前置②：全無命中 → 次頁仲介電話反查名冊 ──")
-        n_rescued = rescue_manual_review_via_agency_phone(batch, manual_review)
-        logger.info(f"  電話反查救回 {n_rescued}/{len(manual_review)} 筆(填許可證+機構欄)")
+        manual_review = rescue_manual_review_via_agency_phone(batch, manual_review)
 
     # ── 步驟 4b 前置③：非多數票低信心單一判讀救援（比照全無命中,覆寫填 B）──
     # 這些列在步驟 4a 已「略過 ROI Vision」,此處才首次送次頁 Vision 反查名冊;
-    # 唯一命中 → 覆寫 candidate_value(B)、_agency_cols 補 E~G,仍標 manual_review。
+    # 唯一命中 → B 欄換成救回的許可證、_agency_cols 補 E~G,仍標 manual_review。
     if novote_rescue:
         logger.info("── 步驟 4b 前置③：非多數票低信心 → 次頁仲介電話反查名冊(覆寫填 B)──")
-        n_nv = rescue_manual_review_via_agency_phone(batch, novote_rescue, value_key="candidate_value")
-        logger.info(f"  單一判讀電話反查救回 {n_nv}/{len(novote_rescue)} 筆")
+        novote_rescue = rescue_manual_review_via_agency_phone(batch, novote_rescue)
 
     logger.info("── 步驟 4b：合併批次寫入 Google Sheets（atomic）──")
-    auto_keyin_rows = keyin_items + vision_auto_keyin   # VisionQueueItem + dict 混合,_row_to_sheet_values 兼容
-    review_rows = vision_review_rows + novote_rescue + [
-        # 電話反查救回的許可證放 candidate_value,_agency_cols 會據此補 E~G。
-        {"source_docx": d["source_docx"],
-         "candidate_value": d.get("final_value", ""),
-         "reason": d["reason"]}
-        for d in manual_review
-    ] + direct_review      # 讀不到圖:B 空,D 是事實;E~G 跟著空
-    written = write_sheets_batched([
-        (auto_keyin_rows, SheetStatus.KEYED_IN),
-        (review_rows,     SheetStatus.MANUAL_REVIEW),
-    ], employer_by_docx)
+    auto_keyin_rows = keyin_rows + vision_auto_keyin
+    # 讀不到圖(direct_review):B 空,D 是事實;E~G 跟著空
+    review_rows = vision_review_rows + novote_rescue + manual_review + direct_review
+    written = write_sheets_batched(auto_keyin_rows + review_rows, employer_by_docx)
     logger.info(
         f"  本次寫入彙總:auto_keyin={len(auto_keyin_rows)} 筆"
-        f"(其中 Tesseract 直接 {len(keyin_items)} 筆 + Vision 確認 {len(vision_auto_keyin)} 筆) "
+        f"(其中 Tesseract 直接 {len(keyin_rows)} 筆 + Vision 確認 {len(vision_auto_keyin)} 筆) "
         f"/ manual_review={len(review_rows)} 筆"
         f"(其中 Vision 交叉比對失敗 {len(vision_review_rows)} 筆 "
         f"+ 單一判讀電話反查 {len(novote_rescue)} 筆 + 全無命中 {len(manual_review)} 件 "
@@ -1952,7 +1913,7 @@ def main(opts: argparse.Namespace) -> None:
     if review_rows:
         logger.info(f"── 人工審查清單(共 {len(review_rows)} 件,reason 欄已標註原因)：")
         for row in review_rows:
-            logger.info(f"    {row['source_docx']}: {row['reason']}")
+            logger.info(f"    {row.source_docx}: {row.reason}")
 
     logger.info("── 全部完成 ──")
 

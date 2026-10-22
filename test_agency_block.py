@@ -132,6 +132,7 @@ class TestRescueReasonUsesStandardForm:
         import pipeline
         from batch import Batch
         from permit_lookup import PermitLookup
+        from sheet_row import SheetRow, SheetStatus
 
         roster = PermitLookup([{"許可證": "2340", "機構名稱": "測試仲介", "機構地址": "地址",
                                 "電話": "(02)2727-6999#12", "廢止許可日期": "", "終止營業日期": ""}])
@@ -141,9 +142,9 @@ class TestRescueReasonUsesStandardForm:
                             lambda path, client=None: ["電話:02-2727-6999,傳真:02-2727-6000"])
         docx = tmp_path / "32417.docx"
         docx.write_bytes(b"x")
-        items = [{"source_docx": "32417.docx", "final_value": "", "reason": "全無命中"}]
+        seed = [SheetRow("32417.docx", "", SheetStatus.MANUAL_REVIEW, "全無命中")]
 
-        assert pipeline.rescue_manual_review_via_agency_phone(Batch.from_file(docx), items) == 1
-        assert items[0]["final_value"] == "2340"
-        assert "台仲電話 0227276999 " in items[0]["reason"]
-        assert "02-2727-6999" not in items[0]["reason"]
+        [row] = pipeline.rescue_manual_review_via_agency_phone(Batch.from_file(docx), seed)
+        assert row.permit == "2340"
+        assert "台仲電話 0227276999 " in row.reason
+        assert "02-2727-6999" not in row.reason

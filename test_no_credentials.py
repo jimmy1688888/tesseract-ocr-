@@ -56,7 +56,5 @@ def test_employer_fields_abort_the_run(tmp_path):
 
 def test_agency_rescue_degrades_to_nothing_rescued(tmp_path, monkeypatch):
     monkeypatch.setattr(P, "_permit_lookup", lambda: object())   # 名冊在,才走得到 client
-    rows = [{"source_docx": "a.docx", "final_value": "", "reason": "全無命中"}]
-    before = [dict(r) for r in rows]
-    assert P.rescue_manual_review_via_agency_phone(Batch.from_dir(tmp_path), rows) == 0
-    assert rows == before
+    rows = [P.SheetRow("a.docx", "", P.SheetStatus.MANUAL_REVIEW, "全無命中")]
+    assert P.rescue_manual_review_via_agency_phone(Batch.from_dir(tmp_path), rows) == rows
