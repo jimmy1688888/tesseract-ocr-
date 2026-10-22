@@ -264,8 +264,9 @@ def _fetch_text(content: bytes) -> str:
 
 def _prepare(raw: bytes) -> bytes:
     """與正式流程同樣的送 Vision 前處理:ROI 裁切 → 去紅章。"""
-    from employer_extract import EMPLOYER_ROI, crop_fraction, deink_red_stamp
-    return deink_red_stamp(crop_fraction(raw, EMPLOYER_ROI))
+    from employer_extract import EMPLOYER_ROI
+    from pixels import crop_png, deink_red_stamp
+    return deink_red_stamp(crop_png(raw, EMPLOYER_ROI))
 
 
 def _score_pages(docx: Path) -> list[tuple[int, str, bytes]]:

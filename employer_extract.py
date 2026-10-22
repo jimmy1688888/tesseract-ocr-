@@ -10,21 +10,20 @@
 - 紅章常蓋在名稱上 → 名稱信心較低,呼叫端應標人工複核。
 - **去紅章前處理(選項 A)**:送 Vision 前先 deink_red_stamp() 抽紅色通道並抹白
   明顯紅印章像素,讓黑字保留、印章變淡,提升被章尾污染的名稱/地址辨識率。
+  像素處理都在 pixels.py,與許可證掃描共用同一份(#16)。
 """
 from __future__ import annotations
 
 import logging
 import re
 from dataclasses import replace
-from io import BytesIO
 from typing import NamedTuple
 
-import numpy as np
-from PIL import Image, ImageOps
-
-# docx 內嵌圖與圖序只有一份,與 pipeline 共用(#5);兩側不互相 import。
+# docx 內嵌圖與圖序只有一份,與 pipeline 共用(#5);像素前處理也是(#16)。
+# 兩側不互相 import。
 from contract_template import COMPANY_WORDS, Template, contract_template
 from docx_images import image_sort_key, read_images
+from pixels import NEXT_PAGE_DEINK, crop, crop_png, deink_red_stamp, open_upright, preprocess, to_png
 from employer_result import (VALUE_KEYS, WHOLE, Doubt, EmployerExtraction, EmployerValues,
                              ExtractionStatus, Source)
 from tw_phone import phones_in
@@ -186,17 +185,6 @@ def _balanced(s: str, op: str, cl: str) -> bool:
     return depth == 0
 
 
-def crop_fraction(image_bytes: bytes, roi: tuple = EMPLOYER_ROI) -> bytes:
-    """依相對比例 roi=(x1,y1,x2,y2) 裁切影像,回傳 PNG bytes。先做 EXIF 方向校正。"""
-    img = ImageOps.exif_transpose(Image.open(BytesIO(image_bytes)).convert("RGB"))
-    w, h = img.size
-    x1, y1, x2, y2 = roi
-    crop = img.crop((int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)))
-    buf = BytesIO()
-    crop.save(buf, format="PNG")
-    return buf.getvalue()
-
-
 def _ensure_tesseract() -> None:
     """確保 pytesseract 指向 tesseract.exe(與 pipeline 相同路徑),未設則補上。"""
     import os
@@ -212,9 +200,7 @@ def _tesseract_top_text(image_bytes: bytes, top_frac: float = 0.35) -> str:
     """對影像上緣區塊跑輕量 Tesseract(供契約頁辨識用,不呼叫 Vision 省成本)。"""
     import pytesseract
     _ensure_tesseract()
-    img = ImageOps.exif_transpose(Image.open(BytesIO(image_bytes)).convert("RGB"))
-    w, h = img.size
-    top = img.crop((0, 0, w, int(h * top_frac)))
+    top = crop(open_upright(image_bytes), (0.0, 0.0, 1.0, top_frac))
     return pytesseract.image_to_string(top, lang="ind+eng", config="--psm 3")
 
 
@@ -341,39 +327,6 @@ def _best_scored_page(scored: list[tuple[int, str, bytes]]
                       ) -> tuple[int, str, bytes] | None:
     """在 _scored_pages() 結果中取最高分頁;同分取自然排序在前者(max 的預設行為)。"""
     return max(scored, key=lambda t: t[0]) if scored else None
-
-
-def deink_red_stamp(image_bytes: bytes, *, whiten_thresh: int = 45,
-                    min_red: int = 120, contrast: tuple[int, int] = (2, 98)) -> bytes:
-    """去紅章前處理:抽紅色通道 + 抹白明顯紅印章像素,回傳 PNG bytes 供 Vision 使用。
-
-    原理(紅印章 R 高、G/B 低;黑字三通道皆低;白紙三通道皆高):
-      1. 以紅色通道為底 → 紅印章與白紙皆偏亮、黑字維持暗,印章自然變淡。
-      2. 抹白遮罩:同時滿足「明顯偏紅(R - max(G,B) > whiten_thresh)」與
-         「夠亮(R > min_red)」的像素設為 255。只清掉蓋在白底上的印章與章尾,
-         不動壓在黑字上的暗紅像素(那類 R 偏低,避免把字筆畫一起抹掉)。
-      3. 百分位對比拉伸 → 黑字更黑、背景更白,利於 Vision 二值化。
-
-    參數皆可調;whiten_thresh 越小抹得越積極,min_red 越高越保護暗處筆畫。
-    """
-    img = Image.open(BytesIO(image_bytes)).convert("RGB")
-    img = ImageOps.exif_transpose(img)          # 與 pipeline 一致的方向校正
-    rgb = np.array(img).astype(np.int16)
-    R, G, B = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
-
-    gray = R.astype(np.uint8).copy()            # 紅通道為底
-    red_mask = ((R - np.maximum(G, B)) > whiten_thresh) & (R > min_red)
-    gray[red_mask] = 255                        # 白底上的紅印章/章尾抹白
-
-    lo, hi = contrast
-    low, high = np.percentile(gray, lo), np.percentile(gray, hi)
-    if high > low:
-        gray = np.clip((gray.astype(np.float32) - low) * 255.0 / (high - low),
-                       0, 255).astype(np.uint8)
-
-    buf = BytesIO()
-    Image.fromarray(gray).save(buf, format="PNG")
-    return buf.getvalue()
 
 
 def extract_employer_fields(text: str) -> EmployerExtraction:
@@ -863,7 +816,7 @@ def extract_employer(img_path: str, client=None, deink: bool = True,
     with open(img_path, "rb") as f:
         content = f.read()
     if roi:
-        content = crop_fraction(content, roi)
+        content = crop_png(content, roi)
     if deink:
         content = deink_red_stamp(content)
     text = vision_full_text(content, client=client)
@@ -901,18 +854,6 @@ _ID_LINE = re.compile(
     r"\bTelp(?:on|epon)?\b|\+62", re.I)
 
 
-def _deink_next_page_png(image_bytes: bytes) -> bytes:
-    """次頁去紅章前處理(比照 scan 的『紅通道_2x_中值3』):取紅色通道使紅章呈白、
-    黑字保留,再 2x 放大+對比拉伸+中值去雜,讓被章蓋/交錯的台仲字更清晰。
-    回傳 PNG bytes 供 Vision;preprocess 於 pipeline,延遲 import 避免循環。"""
-    from pipeline import preprocess
-    cfg = {"channel": "R", "scale": 2, "median": 3, "contrast": (2, 98), "psm": 3}
-    img = preprocess(image_bytes, cfg)
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-
-
 def _is_agency_label_line(line: str, pat: re.Pattern) -> bool:
     """是否為「仲介欄位標籤」行(表格欄名),而非內文 prose 誤配。
     真標籤短(甲/乙欄名,如『台灣仲介公司(Agency Taiwan):』),prose 是長句、以句號結尾
@@ -941,8 +882,9 @@ def _agency_block_lines(docx_path: str, client=None) -> list[str]:
     ci = [n for _s, n, _b in scored].index(best[1])
     if ci + 1 >= len(scored):
         return []                          # 契約頁是最後一張,無次頁
-    # 去紅章前處理後整頁送 Vision(仍只 1 次;台仲可能在右半,不裁切)。
-    png = _deink_next_page_png(scored[ci + 1][2])
+    # 次頁前處理後整頁送 Vision(仍只 1 次;台仲可能在右半,不裁切)。
+    # 設定與契約頁不同(放大+中值、不抹白),理由見 pixels.NEXT_PAGE_DEINK。
+    png = to_png(preprocess(scored[ci + 1][2], NEXT_PAGE_DEINK))
     lines = [l.strip() for l in vision_full_text(png, client=client)
              .splitlines() if l.strip()]
 
@@ -1084,7 +1026,7 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
 
     content = raw
     if roi:
-        content = crop_fraction(content, roi)
+        content = crop_png(content, roi)
     crop_name = ""
     if crop_dir:
         d = Path(crop_dir)
@@ -1152,7 +1094,7 @@ def _ab_compare(img_path: str, dump: str = "", roi: tuple | None = EMPLOYER_ROI)
 
     with open(img_path, "rb") as f:
         raw = f.read()
-    base = crop_fraction(raw, roi) if roi else raw   # 兩邊都套 ROI,單獨看 deink 效果
+    base = crop_png(raw, roi) if roi else raw   # 兩邊都套 ROI,單獨看 deink 效果
 
     if dump:
         with open(dump, "wb") as f:

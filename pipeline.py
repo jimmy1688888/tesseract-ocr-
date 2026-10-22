@@ -60,12 +60,9 @@ import zlib
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, asdict, replace
 from enum import Enum
-from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
-import numpy as np
-from PIL import Image, ImageFilter, ImageOps
 import pytesseract
 from pytesseract import Output
 
@@ -90,6 +87,8 @@ from employer_result import EMPLOYER_COLUMNS, EmployerExtraction, ExtractionStat
 
 # docx 內嵌圖與圖序只有一份,與 employer_extract 共用(#5)。
 import docx_images
+# 像素前處理(轉正、裁切、前處理)也只有一份,與 employer_extract 共用(#16)。
+from pixels import crop, open_upright, preprocess
 
 if TYPE_CHECKING:   # 只給型別標註看;執行期在 preflight 的函式裡才 import(見該段說明)
     from gcp_identity.checks import CheckResult
@@ -557,41 +556,6 @@ def has_permit_vote(rows: list[ScanResult]) -> bool:
     return any(is_permit_vote(r) for r in rows)
 
 
-def auto_rotate(img: Image.Image) -> Image.Image:
-    return ImageOps.exif_transpose(img)
-
-
-def crop_roi(img: Image.Image, roi: tuple) -> Image.Image:
-    w, h = img.size
-    x1, y1, x2, y2 = roi
-    return img.crop((int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)))
-
-
-def preprocess(image_bytes: bytes, cfg: dict) -> Image.Image:
-    img = Image.open(BytesIO(image_bytes)).convert("RGB")
-    img = auto_rotate(img)
-    if "roi" in cfg:
-        img = crop_roi(img, cfg["roi"])
-    rgb = np.array(img)
-    ch = cfg["channel"]
-    arr = rgb[:, :, 0] if ch == "R" else np.mean(rgb, axis=2).astype(np.uint8)
-    pil = Image.fromarray(arr)
-    scale = cfg.get("scale", 1)
-    if scale > 1:
-        pil = pil.resize((pil.width * scale, pil.height * scale), Image.Resampling.LANCZOS)
-    lo, hi = cfg.get("contrast", (2, 98))
-    a = np.array(pil)
-    low, high = np.percentile(a, lo), np.percentile(a, hi)
-    if high > low:
-        a = np.clip((a - low) * 255.0 / (high - low), 0, 255).astype(np.uint8)
-    pil = Image.fromarray(a)
-    if cfg.get("median", 0) > 0:
-        pil = pil.filter(ImageFilter.MedianFilter(size=cfg["median"]))
-    if cfg.get("sharpen", False):
-        pil = pil.filter(ImageFilter.SHARPEN).filter(ImageFilter.SHARPEN)
-    return pil
-
-
 def build_tess_config(cfg: dict) -> str:
     parts = [f"--psm {cfg.get('psm', 3)}"]
     if "whitelist" in cfg and cfg["whitelist"]:
@@ -671,11 +635,11 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
         result.mol_conf     = avg_conf
         result.mol_from_vote = True
         result.hit_roi      = "mol"
-        raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
+        raw_img = open_upright(image_bytes)
         crop_dir = out_dir / "mol_crops"
         crop_dir.mkdir(parents=True, exist_ok=True)
         crop_path = crop_dir / f"{stem}.png"
-        crop_roi(raw_img, roi_coords).save(crop_path)
+        crop(raw_img, roi_coords).save(crop_path)
         result.mol_crop = str(crop_path)
         logger.info(
             f"  ★ mol 多數票：{mol_vote}  avg_conf={avg_conf}"
@@ -702,17 +666,17 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
             result.hit_config = cfg["name"]
             result.hit_roi   = "mol"
             if raw_img is None:
-                raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
+                raw_img = open_upright(image_bytes)
             crop_dir = out_dir / "mol_crops"
             crop_dir.mkdir(parents=True, exist_ok=True)
             crop_path = crop_dir / f"{stem}.png"
-            crop_roi(raw_img, roi_coords).save(crop_path)
+            crop(raw_img, roi_coords).save(crop_path)
             result.mol_crop = str(crop_path)
             if conf < CONF_KEY_IN:
                 low_dir = out_dir / "low_conf_crops"
                 low_dir.mkdir(parents=True, exist_ok=True)
                 low_path = low_dir / f"{stem}_mol_conf{int(conf)}.png"
-                crop_roi(raw_img, roi_coords).save(low_path)
+                crop(raw_img, roi_coords).save(low_path)
                 result.low_conf = str(low_path)
                 logger.info(f"  ⚠ 低信心 {conf} < {CONF_KEY_IN}：{low_path.name}")
             logger.debug(f"  ★ mol/{cfg['name']}  conf={conf}  mol={mol!r}")
@@ -761,11 +725,11 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
                 result.mol_from_vote = True
                 result.hit_roi       = "mol"
                 if raw_img is None:
-                    raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
+                    raw_img = open_upright(image_bytes)
                 crop_dir = out_dir / "mol_crops"
                 crop_dir.mkdir(parents=True, exist_ok=True)
                 crop_path = crop_dir / f"{stem}.png"
-                crop_roi(raw_img, roi_coords).save(crop_path)
+                crop(raw_img, roi_coords).save(crop_path)
                 result.mol_crop = str(crop_path)
                 any_hit = True
                 fields_found.add(field)
@@ -813,20 +777,20 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
                 roi_hit = True
                 fields_found.add(field)
                 if raw_img is None:
-                    raw_img = auto_rotate(Image.open(BytesIO(image_bytes)).convert("RGB"))
+                    raw_img = open_upright(image_bytes)
                 # 寫對應欄位的 crop（mol_crop 或 permit_crop）
                 crop_attr = f"{field}_crop"   # "mol_crop" or "permit_crop"
                 if not getattr(result, crop_attr, ""):
                     crop_dir = out_dir / f"{field}_crops"
                     crop_dir.mkdir(parents=True, exist_ok=True)
                     crop_path = crop_dir / f"{stem}.png"
-                    crop_roi(raw_img, roi_coords).save(crop_path)
+                    crop(raw_img, roi_coords).save(crop_path)
                     setattr(result, crop_attr, str(crop_path))
                 if conf < CONF_KEY_IN and not result.low_conf:
                     low_dir = out_dir / "low_conf_crops"
                     low_dir.mkdir(parents=True, exist_ok=True)
                     low_path = low_dir / f"{stem}_{roi_name}_conf{int(conf)}.png"
-                    crop_roi(raw_img, roi_coords).save(low_path)
+                    crop(raw_img, roi_coords).save(low_path)
                     result.low_conf = str(low_path)
                     logger.info(f"  ⚠ 低信心 {conf} < {CONF_KEY_IN}：{low_path.name}")
                 logger.debug(f"  ★ {roi_name}/{cfg['name']}  conf={conf}  id={id_!r} mol={mol!r}")
@@ -1071,6 +1035,7 @@ def vision_text(img_path: str) -> str:
 
     Vision API 屬讀取操作(idempotent),重試安全。連線錯誤或 5xx/429 會自動重試;
     4xx 其他錯誤(403/404 等)直接拋出,不會浪費時間重試。
+    拿不到憑證也直接拋出、整批中止(不降級),見 test_no_credentials.py。
     """
     client = google_clients.vision_client()
     with open(img_path, "rb") as f:
@@ -1140,6 +1105,8 @@ def collect_employer_fields(batch: Batch) -> dict[str, EmployerExtraction]:
     檔名 {docx主檔名}_{圖檔名},供人工複查。
     任何單檔失敗只記 warning、該檔 H~O 留空,絕不中斷主流程;
     employer_extract 或其相依(address_db/AllData.json)缺失時整段安靜跳過。
+    例外:拿不到憑證(建不起 Vision client)不降級,往上拋讓整批中止 ——
+    與許可證判讀同一個決定,見 test_no_credentials.py。
 
     Vision 全文在這裡就存檔(write_employer_texts),不放進回傳值:它只供離線重放,
     下游沒有任何一步要讀它,而回傳的欄位每組一列都會查一次。疑慮報表則要讀回傳
