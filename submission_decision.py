@@ -3,8 +3,8 @@
 
 去向四選一:直接 key-in／送 Vision／反查救援／直接人工審查。人工審查通常不是去向,
 是送 Vision 或反查救援之後的結果;只有 docx 本身讀不到圖時直接人工審查(#47)——
-沒有圖,Vision 與反查救援都無從做起。以 docx 為單位(一份契約只有一個許可證,Sheets 上只有一列);舊做法
-逐圖決定,同一份 docx 會進佇列多次。
+沒有圖,Vision 與反查救援都無從做起。以 docx 為單位(一份契約只有一個許可證,
+Sheets 上只有一列);舊做法逐圖決定,同一份 docx 會進佇列多次。
 
 多數票判斷與各信心門檻只記在這裡:停止擴掃(ADR-0005)與規則 A2 用同一個
 is_permit_vote —— 兩者不一致時,分層掃描會在 A2 不採用的值上停下來。
@@ -39,7 +39,7 @@ _PERMIT_PARTIAL = "permit_partial"
 # docx 本身讀不到圖(#47)→ Sheets D 欄。只講事實。
 _NO_IMAGE_REASONS = {
     "no_images":       "docx 無可讀的內嵌圖(word/media 底下沒有 png/jpg/bmp/tif/gif)",
-    "unreadable_docx": "docx 無法開啟(不是有效的 docx 檔)",
+    "unreadable":      "docx 無法開啟(不是有效的 docx 檔)",
 }
 
 
@@ -94,8 +94,10 @@ def _decision(r: ScanResult, dest: Destination, value: str, conf: float,
                     _crop_roi(r), reason)
 
 
-def _no_hit(rows: list[ScanResult], reason: str) -> Decision:
-    return Decision(rows[0].source_docx, Destination.反查救援, "", 0.0, "", "", "", reason)
+def _no_hit(rows: list[ScanResult], reason: str,
+            dest: Destination = Destination.反查救援) -> Decision:
+    """沒有任何讀值可送的決定:沒有候選值、沒有截圖。"""
+    return Decision(rows[0].source_docx, dest, "", 0.0, "", "", "", reason)
 
 
 def _earliest(rows):
@@ -104,10 +106,9 @@ def _earliest(rows):
 
 def decide(rows: list[ScanResult]) -> Decision:
     """一份 docx 的所有掃描結果 → 一個送審決策。"""
-    # 比 ==,不查 dict:str Enum 的 hash 跟著成員名,不是值
-    why = next((w for st, w in _NO_IMAGE_REASONS.items() if rows[0].status == st), None)
+    why = _NO_IMAGE_REASONS.get(rows[0].status.value)
     if why:
-        return Decision(rows[0].source_docx, Destination.直接人工審查, "", 0.0, "", "", "", why)
+        return _no_hit(rows, why, Destination.直接人工審查)
     if rows[0].docx_class == "large":
         return _decide_large(rows)
     return _decide_small(rows)

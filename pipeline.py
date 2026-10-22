@@ -56,12 +56,13 @@ import logging
 import argparse
 import functools
 import zipfile
+import zlib
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, asdict, replace
 from enum import Enum
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
 import numpy as np
 from PIL import Image, ImageFilter, ImageOps
@@ -223,7 +224,7 @@ class ResultStatus(str, Enum):
     PERMIT_PARTIAL = "permit_partial"   # permit 有部分命中但無多數票
     # docx 本身讀不到圖(#47):沒有可掃的東西,佔位列是它在 matches.csv 的唯一代表
     NO_IMAGES      = "no_images"        # 0 張可讀內嵌圖(沒有 word/media,或只有 .emf 之類)
-    UNREADABLE     = "unreadable_docx"  # 打不開(不是有效的 zip)
+    UNREADABLE     = "unreadable"       # 打不開(不是有效的 zip,或壓縮資料損壞)
 
 
 class SheetStatus(str, Enum):
@@ -495,14 +496,26 @@ def classify_by_count(image_count: int) -> str:
 
 
 def read_docx_images(docx_path: Path) -> list[tuple[str, bytes]] | None:
-    """docx 的內嵌圖;打不開(不是有效的 zip)回傳 None,不拋。
+    """docx 的內嵌圖;打不開回傳 None,不拋。
 
     一份壞檔不能讓整批中斷(#47):它照樣要在 matches.csv 與 Sheets 各有一列。
+    「打不開」= 不是有效的 zip(BadZipFile,含 CRC 錯),或目錄完好、壓縮資料損壞
+    (zlib.error,讀到那張圖才炸)。檔案被鎖、權限不足不算 —— 那不是「不是有效的
+    docx 檔」,照舊拋出。
     """
     try:
         return docx_images.read_images(docx_path)
-    except zipfile.BadZipFile:
+    except (zipfile.BadZipFile, zlib.error):
         return None
+
+
+def unscannable(images: list[tuple[str, bytes]] | None) -> tuple[ResultStatus, str] | None:
+    """read_docx_images 的結果沒東西可掃 → (狀態, 給人看的一句);有圖回傳 None。"""
+    if images is None:
+        return ResultStatus.UNREADABLE, "docx 無法開啟"
+    if not images:
+        return ResultStatus.NO_IMAGES, "docx 沒有可讀的內嵌圖"
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -981,15 +994,19 @@ def aggregate_small_docx(results: list[ScanResult]) -> list[ScanResult]:
 # ⑦ 送審決策（每份 docx 一個決定，見 submission_decision）
 # ═══════════════════════════════════════════════════════════════════════════
 
-def build_vision_queue(csv_path: Path) -> tuple[
-        list[VisionQueueItem], list[dict], list[VisionQueueItem], list[dict]]:
+class SubmissionQueue(NamedTuple):
+    """一批的送審決策依去向分好(build_vision_queue 的回傳)。每份 docx 恰好在其中一處。"""
+    vision: list[VisionQueueItem]   # 送 Google Vision;反查救援的「單一判讀低信心」也在這
+                                    # (no_vote_rescue=True,主流程略過 ROI Vision、改走次頁反查)
+    rescue: list[dict]              # 全無命中,要走反查救援:{"source_docx", "reason"}
+    keyin: list[VisionQueueItem]    # 直接 key-in(direct_keyin=True)
+    direct_review: list[dict]       # docx 讀不到圖,直接人工審查(不送 Vision、不反查),格式同 rescue
+
+
+def build_vision_queue(csv_path: Path) -> SubmissionQueue:
     """
-    讀取 matches.csv,每份 docx 做一個送審決策(submission_decision.decide),分成四類回傳:
-      vision_items  : 送 Google Vision 的 VisionQueueItem;反查救援的「單一判讀低信心」也在這
-                      (no_vote_rescue=True,主流程略過 ROI Vision、改走次頁反查)
-      manual_review : 全無命中(要走反查救援),每筆為 {"source_docx": ..., "reason": ...}
-      keyin_items   : 直接 key-in 的 VisionQueueItem(direct_keyin=True)
-      direct_review : docx 讀不到圖、直接人工審查(不送 Vision、不反查),格式同 manual_review
+    讀取 matches.csv,每份 docx 做一個送審決策(submission_decision.decide),依去向分好
+    回傳(見 SubmissionQueue)。
 
     一份 docx 只有一個決定(一份契約只有一個許可證,Sheets 上只有一列)。
     """
@@ -1025,7 +1042,7 @@ def build_vision_queue(csv_path: Path) -> tuple[
         )
         (keyin_items if item.direct_keyin else vision_items).append(item)
 
-    return vision_items, manual_review, keyin_items, direct_review
+    return SubmissionQueue(vision_items, manual_review, keyin_items, direct_review)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1553,15 +1570,11 @@ def run_scan(batch: Batch, image_filter: str = "",
             all_images = read_docx_images(docx_path)
             # 讀不到圖:沒東西可掃,寫一列佔位列(比照 large 全無命中),送審決策
             # 直接人工審查。沒有這列,它在 matches.csv 與 Sheets 上都不存在(#47)。
-            if not all_images:
+            nothing = unscannable(all_images)
+            if nothing:
                 placeholder = _empty_result(docx_path.name, "", "")
                 placeholder.manual_review = True
-                if all_images is None:
-                    placeholder.status = ResultStatus.UNREADABLE
-                    placeholder.note   = "docx 無法開啟"
-                else:
-                    placeholder.status = ResultStatus.NO_IMAGES
-                    placeholder.note   = "docx 無可讀的內嵌圖"
+                placeholder.status, placeholder.note = nothing
                 writer.writerow(placeholder.to_csv_row())
                 logger.warning(f"  ⚠ {docx_path.name} {placeholder.note} → 直接人工審查")
                 continue
@@ -1902,8 +1915,9 @@ def _image_filter_miss(docx_files: list[Path], image: str) -> str | None:
     """--image 在哪份 docx 對不到圖就說,連同那份有哪些圖檔名;全對得到回傳 None。"""
     for dp in docx_files:
         imgs = read_docx_images(dp)
-        if imgs is None:
-            return f"找不到圖檔 {image!r}({dp.name} 無法開啟)"
+        nothing = unscannable(imgs)
+        if nothing:
+            return f"找不到圖檔 {image!r}({dp.name}:{nothing[1]})"
         names = [n for n, _ in imgs]
         if image not in names:
             return f"找不到圖檔 {image!r}({dp.name} 內含:{names})"
@@ -1938,10 +1952,9 @@ def main(opts: argparse.Namespace) -> None:
     logger.info("── 步驟 1：prefilter 分類 ──")
     for dp in docx_files:
         imgs = read_docx_images(dp)
-        if imgs is None:
-            logger.info(f"  {dp.name}: 無法開啟 → 直接人工審查")
-        elif not imgs:
-            logger.info(f"  {dp.name}: 0 張可讀圖 → 直接人工審查")
+        nothing = unscannable(imgs)
+        if nothing:
+            logger.info(f"  {dp.name}: {nothing[1]} → 直接人工審查")
         else:
             logger.info(f"  {dp.name}: {len(imgs)} 張 → {classify_by_count(len(imgs))}")
 
@@ -1961,7 +1974,9 @@ def main(opts: argparse.Namespace) -> None:
 
     # ── 步驟 3：vision_submit 分流 ─────────────────────────────────────────
     logger.info("── 步驟 3：vision_submit 分流 ──")
-    vision_items, manual_review, keyin_items, direct_review = build_vision_queue(csv_path)
+    queue = build_vision_queue(csv_path)
+    vision_items, manual_review, keyin_items = queue.vision, queue.rescue, queue.keyin
+    direct_review = queue.direct_review
     logger.info(f"  直接 key-in：{len(keyin_items)} 筆")
     logger.info(f"  送 Vision  ：{len(vision_items)} 筆")
     logger.info(f"  人工審查   ：{len(manual_review)} 件")
@@ -2072,6 +2087,9 @@ def _parse_args() -> argparse.Namespace:
         valid_rois = list(ROI_REGIONS.keys())
         if opts.roi not in valid_rois:
             parser.error(f"--roi 必須為 {valid_rois}，收到 {opts.roi!r}")
+    # --image 只在單檔除錯用(#47):整批帶 --image,任何一份沒那張圖就整批不跑
+    if opts.image and not opts.file:
+        parser.error("--image 只能配合 --file 使用")
     return opts
 
 

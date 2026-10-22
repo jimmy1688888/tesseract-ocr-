@@ -63,6 +63,20 @@ def not_zip(d: Path) -> Path:
     return p
 
 
+def corrupt_zip(d: Path) -> Path:
+    """zip 目錄完好、壓縮資料壞掉:打得開,讀圖那一刻才炸(zlib.error,不是 BadZipFile)。"""
+    p = d / "corrupt.docx"
+    with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("word/document.xml", "<w:document/>")
+        z.writestr("word/media/image1.png", _png() * 50)
+    raw = bytearray(p.read_bytes())
+    start = raw.index(b"word/media/image1.png") + len("word/media/image1.png")
+    for i in range(start + 10, start + 60):
+        raw[i] ^= 0xFF
+    p.write_bytes(bytes(raw))
+    return p
+
+
 def good_small(d: Path) -> Path:
     return _docx(d / "good.docx", {"image1.png": _png(), "image2.png": _png()})
 
@@ -71,6 +85,7 @@ BAD = [
     pytest.param(no_media, NO_IMAGES_REASON, P.ResultStatus.NO_IMAGES, id="no_media"),
     pytest.param(emf_only, NO_IMAGES_REASON, P.ResultStatus.NO_IMAGES, id="emf_only"),
     pytest.param(not_zip, UNREADABLE_REASON, P.ResultStatus.UNREADABLE, id="not_zip"),
+    pytest.param(corrupt_zip, UNREADABLE_REASON, P.ResultStatus.UNREADABLE, id="corrupt_zip"),
 ]
 
 
@@ -134,9 +149,9 @@ class TestDirectManualReview:
         p = make(tmp_path)
         csv_path = P.run_scan(Batch((p,), source=tmp_path, output_dir=tmp_path))
 
-        vision, rescue, keyin, direct = P.build_vision_queue(csv_path)
-        assert (vision, rescue, keyin) == ([], [], [])
-        assert direct == [{"source_docx": p.name, "reason": reason}]
+        q = P.build_vision_queue(csv_path)
+        assert (q.vision, q.rescue, q.keyin) == ([], [], [])
+        assert q.direct_review == [{"source_docx": p.name, "reason": reason}]
 
 
 # ─── 不變式:一批 N 份 → matches.csv 恰好 N 份、送審決策恰好 N 個 ─────────
@@ -145,15 +160,15 @@ def test_every_docx_in_the_batch_is_accounted_for(mol_hit, monkeypatch, tmp_path
     large = _docx(tmp_path / "large.docx", {f"image{n}.png": _png() for n in range(1, 8)})
     monkeypatch.setattr(P, "scan_image_large", lambda *a, **k: None)   # large 全無命中
     docs = (no_media(tmp_path), emf_only(tmp_path), not_zip(tmp_path),
-            good_small(tmp_path), large)
+            corrupt_zip(tmp_path), good_small(tmp_path), large)
 
     csv_path = P.run_scan(Batch(docs, source=tmp_path, output_dir=tmp_path / "out"))
 
     names = sorted(p.name for p in docs)
     assert sorted({r["source_docx"] for r in _csv_rows(csv_path)}) == names
-    vision, rescue, keyin, direct = P.build_vision_queue(csv_path)
-    decided = ([i.source_docx for i in vision + keyin]
-               + [d["source_docx"] for d in rescue + direct])
+    q = P.build_vision_queue(csv_path)
+    decided = ([i.source_docx for i in q.vision + q.keyin]
+               + [d["source_docx"] for d in q.rescue + q.direct_review])
     assert sorted(decided) == names
 
 
@@ -236,15 +251,37 @@ class TestMainWritesOneRowEach:
 
 class TestImageFilterMiss:
 
-    def test_stops_before_employer_and_sheets(self, world, caplog, monkeypatch, tmp_path):
+    @pytest.fixture(autouse=True)
+    def _restore_root_level(self, monkeypatch):
+        # 單檔模式下 main 會把 root logger 調成 DEBUG;讓 monkeypatch 在測試後還原
         monkeypatch.setattr(logging.getLogger(), "level", logging.getLogger().level)
-        f = good_small(tmp_path)
 
+    def _run(self, caplog, f, image):
         with caplog.at_level(logging.ERROR, logger=P.logger.name):
-            P.main(_opts(file=str(f), image="image9.png"))
+            P.main(_opts(file=str(f), image=image))
+        return " ".join(r.message for r in caplog.records if r.levelno >= logging.ERROR)
+
+    def test_stops_before_employer_and_sheets(self, world, caplog, tmp_path):
+        msg = self._run(caplog, good_small(tmp_path), "image9.png")
 
         assert world["employer"] == 0
         assert world["sheets"] == []
-        msg = " ".join(r.message for r in caplog.records if r.levelno >= logging.ERROR)
         assert "image9.png" in msg
         assert "image1.png" in msg and "image2.png" in msg
+
+    @pytest.mark.parametrize("make, says", [
+        (not_zip, "無法開啟"),
+        (emf_only, "沒有可讀的內嵌圖"),
+    ])
+    def test_docx_without_readable_images_says_so(self, make, says, world, caplog, tmp_path):
+        msg = self._run(caplog, make(tmp_path), "image1.png")
+
+        assert world["employer"] == 0
+        assert world["sheets"] == []
+        assert says in msg
+
+    def test_image_needs_file(self, monkeypatch):
+        """--image 只在 --file 單檔除錯用;整批帶 --image 是指令打錯,不讓它開跑。"""
+        monkeypatch.setattr("sys.argv", ["pipeline.py", "--image", "image2.png"])
+        with pytest.raises(SystemExit):
+            P._parse_args()

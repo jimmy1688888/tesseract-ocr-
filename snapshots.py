@@ -160,7 +160,8 @@ def decisions_snapshot_path() -> Path:
 def _default_decisions(csv_path: Path) -> dict[str, list[dict[str, str]]]:
     """現行送審程式 → 快照的形狀。#40 重構時只換這一層。"""
     import pipeline
-    vision, manual, keyin, direct = pipeline.build_vision_queue(csv_path)
+    q = pipeline.build_vision_queue(csv_path)
+    vision, manual, keyin, direct = q.vision, q.rescue, q.keyin, q.direct_review
     out: dict[str, list[dict[str, str]]] = {}
 
     def add(docx, dest, value, image):
