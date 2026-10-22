@@ -1197,23 +1197,82 @@ def write_doubt_report(batch: Batch, employer_by_docx: dict[str, EmployerExtract
     return len(rows)
 
 
+@dataclass(frozen=True)
+class AgencyPick:
+    """反查救援從名冊挑一家的結果。
+
+    permit:救回的許可證;電話多家要人工擇一、或救不回時為空。
+    note  :接在 D 欄理由後面的反查管道說明;救不回時為空。
+    """
+    permit: str = ""
+    note: str = ""
+
+
+def pick_agency(block: dict, roster) -> AgencyPick:
+    """次頁台仲區塊({phones, name, address})→ 名冊挑一家。純函式:不開檔、不打 Vision。
+
+    roster 要有 agencies_by_phone / agencies_by_phone_prefix / best_by_name /
+    best_by_address(PermitLookup)。反查優先序(結果一律 manual_review、D 欄註明管道
+    供人工核對):
+      ① 電話精確唯一命中 → 最可靠,直接填 B。
+      ② 電話前綴唯一命中(OCR 少 1~2 碼容錯)→ 填 B;比通用後段名稱可靠,故排名稱前。
+      ③ (後備)名稱、地址各比名冊相似度,取相似度(CONF)高者填 B。
+      ④ 電話多家、且前綴/名稱/地址皆救不回 → 不填 B,列出各家供人工擇一。
+    """
+    # ── 電話反查(最可靠):唯一命中優先,多家暫記待人工 ──
+    ambiguous = None    # (matches, ph):第一支命中多家的電話
+    for ph in block["phones"]:
+        matches = roster.agencies_by_phone(ph)
+        if len(matches) == 1:
+            # ① 電話精確唯一命中
+            info = matches[0]
+            return AgencyPick(info["許可證"], (
+                f"[電話反查救回] 次頁台仲電話 {ph} → "
+                f"許可證 {info['許可證']}／{info['機構名稱']}(仍請人工核對)"))
+        if matches and ambiguous is None:
+            ambiguous = (matches, ph)
+
+    # ② 電話『前綴』唯一命中(OCR 少 1~2 碼容錯;比通用後段名稱可靠,故排在名稱前)
+    for ph in block["phones"]:
+        mp = roster.agencies_by_phone_prefix(ph)
+        if len(mp) == 1:
+            info = mp[0]
+            return AgencyPick(info["許可證"], (
+                f"[電話前綴反查救回·電話OCR可能少碼] 次頁台仲電話 {ph} "
+                f"前綴唯一命中 → 許可證 {info['許可證']}／{info['機構名稱']}(仍請人工核對)"))
+
+    # ③ 電話後備:名稱、地址各與名冊比相似度,取「相似度(CONF)高者」填 B
+    cand_n = roster.best_by_name(block["name"]) if block.get("name") else None
+    cand_a = roster.best_by_address(block["address"]) if block.get("address") else None
+    picks = [(c, lbl) for c, lbl in ((cand_n, "名稱"), (cand_a, "地址")) if c]
+    if picks:
+        best_c, via = max(picks, key=lambda x: x[0]["_ratio"])
+        return AgencyPick(best_c["許可證"], (
+            f"[{via}反查救回·電話無唯一命中] 次頁台仲{via} → "
+            f"許可證 {best_c['許可證']}／{best_c['機構名稱']}"
+            f"(名冊相似度 {best_c['_ratio']},仍請人工核對)"))
+
+    # ④ 電話多家(模糊)且前綴/名稱/地址都救不回 → 列出台仲供人工擇一,不填 B
+    if ambiguous:
+        matches, ph = ambiguous
+        cand = "、".join(f"{m['許可證']}／{m['機構名稱']}" for m in matches)
+        return AgencyPick("", f"[電話反查·需人工擇一] 台仲電話 {ph} 命中{len(matches)} 家:{cand}")
+    return AgencyPick()
+
+
 def rescue_manual_review_via_agency_phone(
         batch: Batch, rows: list[SheetRow]) -> list[SheetRow]:
     """仲介反查救援:整頁 OCR 契約次一頁(1 次 Vision),以『台灣仲介』欄位標籤
     錨定區塊(台仲在左在右皆可,靠標籤非位置),取其「電話／名稱／地址」反查名冊
-    回推許可證。列進、列出:回傳與 rows 同序的新列(B 欄換成救回的許可證、D 欄接上
-    反查管道),不改傳入的列;_agency_cols 會據許可證補 E~G。
+    回推許可證(挑哪一家見 pick_agency)。列進、列出:回傳與 rows 同序的列 —— 救回
+    或要人工擇一的換成新列(B 欄換成救回的許可證、D 欄接上反查管道),救不回的原列
+    照回;不改傳入的列。_agency_cols 會據許可證補 E~G。
 
     兩種呼叫情境共用:
       - 全無命中:種子列 B 欄空,救回填入許可證。
       - 非多數票低信心單一判讀:ROI 品質差,略過 ROI Vision 直接反查;種子列 B 欄是
         Tesseract 候選值,命中則換成救回的許可證,救不回就留著。
 
-    反查優先序(結果一律 manual_review、D 欄註明管道供人工核對):
-      ① 電話精確唯一命中 → 最可靠,直接填 B。
-      ② 電話前綴唯一命中(OCR 少 1~2 碼容錯)→ 填 B;比通用後段名稱可靠,故排名稱前。
-      ③ (後備)名稱、地址各比名冊相似度,取相似度(CONF)高者填 B。
-      ④ 電話多家、且前綴/名稱/地址皆救不回 → 不填 B,列出各家供人工擇一。
     名冊/Vision 缺失時安靜跳過,不影響主流程。
     要開的 docx 跟 batch 查完整路徑(列只帶檔名),見 Batch.path_of。
     同一 docx 的次頁只送一次 Vision(block_cache),多列共用不重複計費。"""
@@ -1235,83 +1294,20 @@ def rescue_manual_review_via_agency_phone(
         if docx_path is None:
             out.append(row)
             continue
-        if docx_name in block_cache:
-            block = block_cache[docx_name]
-        else:
+        if docx_name not in block_cache:
             try:
-                block = agency_block_from_next_page(str(docx_path), client=client)
+                block_cache[docx_name] = agency_block_from_next_page(str(docx_path), client=client)
             except Exception as e:
                 logger.warning(f"  ⚠ {docx_name} 次頁仲介區塊擷取失敗:{e!r}")
-                block = {"phones": [], "name": "", "address": ""}
-            block_cache[docx_name] = block
-
-        # ── 電話反查(最可靠):唯一命中優先,多家暫記待人工 ──
-        phone_best = None   # ("single", info, ph) 或 ("ambig", matches, ph)
-        for ph in block["phones"]:
-            matches = pl.agencies_by_phone(ph)
-            if not matches:
-                continue
-            if len(matches) == 1:
-                phone_best = ("single", matches[0], ph)
-                break
-            elif phone_best is None:
-                phone_best = ("ambig", matches, ph)
-
-        # ① 電話精確唯一命中 → 填 B(最可靠管道)
-        if phone_best and phone_best[0] == "single":
-            info, ph = phone_best[1], phone_best[2]
-            row = replace(row, permit=info["許可證"], reason=(
-                f"{row.reason}；[電話反查救回] 次頁台仲電話 {ph} → "
-                f"許可證 {info['許可證']}／{info['機構名稱']}(仍請人工核對)"))
-            logger.info(f"  ↻ {docx_name} 電話反查救回:{ph} → "
-                        f"{info['許可證']}／{info['機構名稱']}")
+                block_cache[docx_name] = {"phones": [], "name": "", "address": ""}
+        pick = pick_agency(block_cache[docx_name], pl)
+        if pick.permit:
             rescued += 1
-            out.append(row)
-            continue
-
-        # ② 電話『前綴』唯一命中(OCR 少 1~2 碼容錯;比通用後段名稱可靠,故排在名稱前)
-        prefix_hit = None
-        for ph in block["phones"]:
-            mp = pl.agencies_by_phone_prefix(ph)
-            if len(mp) == 1:
-                prefix_hit = (mp[0], ph)
-                break
-        if prefix_hit:
-            info, ph = prefix_hit
-            row = replace(row, permit=info["許可證"], reason=(
-                f"{row.reason}；[電話前綴反查救回·電話OCR可能少碼] 次頁台仲電話 {ph} "
-                f"前綴唯一命中 → 許可證 {info['許可證']}／{info['機構名稱']}(仍請人工核對)"))
-            logger.info(f"  ↻ {docx_name} 電話前綴反查救回:{ph} → "
-                        f"{info['許可證']}／{info['機構名稱']}")
-            rescued += 1
-            out.append(row)
-            continue
-
-        # ③ 電話後備:名稱、地址各與名冊比相似度,取「相似度(CONF)高者」填 B
-        cand_n = pl.best_by_name(block["name"]) if block.get("name") else None
-        cand_a = pl.best_by_address(block["address"]) if block.get("address") else None
-        picks = [(c, lbl) for c, lbl in ((cand_n, "名稱"), (cand_a, "地址")) if c]
-        if picks:
-            best_c, via = max(picks, key=lambda x: x[0]["_ratio"])
-            row = replace(row, permit=best_c["許可證"], reason=(
-                f"{row.reason}；[{via}反查救回·電話無唯一命中] 次頁台仲{via} → "
-                f"許可證 {best_c['許可證']}／{best_c['機構名稱']}"
-                f"(名冊相似度 {best_c['_ratio']},仍請人工核對)"))
-            logger.info(f"  ↻ {docx_name} {via}反查救回:相似度 {best_c['_ratio']} → "
-                        f"{best_c['許可證']}／{best_c['機構名稱']}")
-            rescued += 1
-            out.append(row)
-            continue
-
-        # ④ 電話多家(模糊)且前綴/名稱/地址都救不回 → 列出台仲供人工擇一,不填 B
-        if phone_best and phone_best[0] == "ambig":
-            matches, ph = phone_best[1], phone_best[2]
-            cand = "、".join(f"{m['許可證']}／{m['機構名稱']}" for m in matches)
-            row = replace(row, reason=(
-                f"{row.reason}；[電話反查·需人工擇一] 台仲電話 {ph} 命中"
-                f"{len(matches)} 家:{cand}"))
-            logger.info(f"  ⚠ {docx_name} 電話 {ph} 命中 {len(matches)} 家台仲,"
-                        f"列出供人工擇一:{cand}")
+            row = replace(row, permit=pick.permit, reason=f"{row.reason}；{pick.note}")
+            logger.info(f"  ↻ {docx_name} {pick.note}")
+        elif pick.note:
+            row = replace(row, reason=f"{row.reason}；{pick.note}")
+            logger.info(f"  ⚠ {docx_name} {pick.note}")
         out.append(row)
     logger.info(f"  反查救回 {rescued}/{len(rows)} 筆(填許可證+機構欄)")
     return out
