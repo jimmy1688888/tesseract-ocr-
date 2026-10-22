@@ -2,7 +2,7 @@
 """像素前處理:轉正、相對比例裁切、通道/放大/對比/去雜、去紅章(見 CONTEXT.md「去紅章」)。
 
 三個呼叫端共用同一個 preprocess,差異只在設定值:
-  - 許可證掃描(pipeline,送 Tesseract):SCAN_CONFIGS / FALLBACK_CONFIGS 那幾組
+  - 許可證掃描(permit_reading,送 Tesseract):SCAN_CONFIGS / FALLBACK_CONFIGS 那幾組
   - 契約頁(employer_extract,送 Vision):CONTRACT_PAGE_DEINK
   - 契約次頁(employer_extract,送 Vision 找台仲):NEXT_PAGE_DEINK
 以前是三份實作(其中一份從 pipeline 延遲 import),彼此的關係沒有寫在任何地方;

@@ -8,6 +8,7 @@
 那份 docx 就悄悄脫離人工審查,不拋錯、不少欄。
 """
 import csv
+from functools import partial
 
 import pytest
 
@@ -21,30 +22,26 @@ def _csv_rows(path):
         return list(csv.DictReader(f))
 
 
-def _no_ocr_hits(monkeypatch):
-    """small 的 mol 掃描每一組設定都讀不到東西。"""
-    monkeypatch.setattr(P, "_collect_mol_votes", lambda data: [])
-    monkeypatch.setattr(P, "preprocess", lambda data, cfg: None)
-    monkeypatch.setattr(P, "ocr_with_conf", lambda img, lang, cfg: ("", 0.0))
+def _no_ocr_hits(image_bytes, cfg, roi):
+    """small 的 mol 掃描每一組設定都讀不到東西(注入的假 OCR)。"""
+    return "", 0.0
 
 
 class TestFlagIsSetWithReasonInNote:
 
-    def test_small_image_without_mol(self, monkeypatch, tmp_path):
-        _no_ocr_hits(monkeypatch)
-
-        r, _ = P.scan_image_mol_only("a.docx", "image1.png", b"")
+    def test_small_image_without_mol(self):
+        r, _ = P.scan_image_mol_only("a.docx", "image1.png", b"", ocr=_no_ocr_hits)
 
         assert r.manual_review is True
         assert "mol 無值" in r.note
 
     def test_small_docx_without_any_hit_reaches_csv(self, monkeypatch, tmp_path):
         """寫到 CSV 時理由是整份的「small:無命中」(每張都讀不到 mol 的總結),旗標保留。"""
-        _no_ocr_hits(monkeypatch)
         monkeypatch.setattr(P.docx_images, "read_images",
                             lambda p: [("image1.png", b""), ("image2.png", b"")])
 
-        P.run_scan(Batch((tmp_path / "a.docx",), source=tmp_path, output_dir=tmp_path))
+        P.run_scan(Batch((tmp_path / "a.docx",), source=tmp_path, output_dir=tmp_path),
+                   read_small=partial(P.scan_image_mol_only, ocr=_no_ocr_hits))
 
         rows = _csv_rows(tmp_path / "matches.csv")
         assert len(rows) == 2
@@ -56,10 +53,9 @@ class TestFlagIsSetWithReasonInNote:
     def test_large_docx_without_any_hit(self, monkeypatch, tmp_path):
         monkeypatch.setattr(P.docx_images, "read_images",
                             lambda p: [(f"image{n}.jpeg", b"") for n in range(1, 8)])
-        monkeypatch.setattr(P, "scan_image_large", lambda *a, **k: None)
-        monkeypatch.setattr(P, "decide_result", lambda r: r)
 
-        P.run_scan(Batch((tmp_path / "a.docx",), source=tmp_path, output_dir=tmp_path))
+        P.run_scan(Batch((tmp_path / "a.docx",), source=tmp_path, output_dir=tmp_path),
+                   read_large=lambda *a, **k: None)
 
         [row] = _csv_rows(tmp_path / "matches.csv")
         r = P.ScanResult.from_csv_row(row)

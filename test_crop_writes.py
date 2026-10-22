@@ -21,13 +21,16 @@ from batch import Batch
 ROI_NAME = {v: k for k, v in P.ROI_REGIONS.items()}
 
 
+class FakeOcr(dict):
+    """注入的假 OCR:依 (ROI 名稱, 設定名稱) 查表回 (文字, 信心);查不到就是什麼都沒讀到。"""
+
+    def __call__(self, image_bytes, cfg, roi):
+        return self.get((ROI_NAME[roi], cfg["name"]), ("", 0.0))
+
+
 @pytest.fixture
-def ocr(monkeypatch):
-    """假 OCR:依 (ROI, 設定名稱) 查表回 (文字, 信心);查不到就是什麼都沒讀到。"""
-    table: dict[tuple[str, str], tuple[str, float]] = {}
-    monkeypatch.setattr(P, "preprocess", lambda data, cfg: (ROI_NAME[cfg["roi"]], cfg["name"]))
-    monkeypatch.setattr(P, "ocr_with_conf", lambda img, lang, tess: table.get(img, ("", 0.0)))
-    return table
+def ocr():
+    return FakeOcr()
 
 
 def _every_config(table, roi, text, conf, configs=None):
@@ -41,7 +44,7 @@ class TestScanWritesNothing:
         monkeypatch.chdir(tmp_path)
         _every_config(ocr, "permit_upper", "No. Izin: 1234", 40.0)
 
-        result, crops = P.scan_image_large("32503.docx", "image5.jpeg", b"not an image")
+        result, crops = P.scan_image_large("32503.docx", "image5.jpeg", b"not an image", ocr=ocr)
 
         assert crops == [
             P.Crop("permit_crop", Path("permit_crops/32503_image5.png"),
@@ -54,14 +57,14 @@ class TestScanWritesNothing:
 
     def test_large_high_confidence_writes_no_low_conf_crop(self, ocr):
         _every_config(ocr, "permit_upper", "No. Izin: 1234", 80.0)
-        _, crops = P.scan_image_large("a.docx", "image5.jpeg", b"")
+        _, crops = P.scan_image_large("a.docx", "image5.jpeg", b"", ocr=ocr)
         assert [c.field for c in crops] == ["permit_crop"]
 
     def test_large_mol_vote_and_permit(self, ocr):
         _every_config(ocr, "mol", "MOL 1234", 70.0, P.PERMIT_VOTE_CONFIGS)
         _every_config(ocr, "permit_lower", "No. Izin 1234", 30.0)
 
-        _, crops = P.scan_image_large("a.docx", "image2.jpeg", b"")
+        _, crops = P.scan_image_large("a.docx", "image2.jpeg", b"", ocr=ocr)
 
         assert [(c.field, str(c.path)) for c in crops] == [
             ("mol_crop", str(Path("mol_crops/a_image2.png"))),
@@ -75,7 +78,7 @@ class TestScanWritesNothing:
         _every_config(ocr, "mol", "MOL 1234", 40.0, not_voting)   # 單一判讀,不成多數票
         _every_config(ocr, "permit_upper", "No. Izin: 1234", 30.0)
 
-        _, crops = P.scan_image_large("a.docx", "image2.jpeg", b"")
+        _, crops = P.scan_image_large("a.docx", "image2.jpeg", b"", ocr=ocr)
 
         assert [c.path.name for c in crops if c.field == "low_conf"] == [
             "a_image2_mol_conf40.png"]
@@ -84,7 +87,7 @@ class TestScanWritesNothing:
         monkeypatch.chdir(tmp_path)
         _every_config(ocr, "mol", "MOL 1234", 70.0, P.PERMIT_VOTE_CONFIGS)
 
-        result, crops = P.scan_image_mol_only("a.docx", "image2.png", b"")
+        result, crops = P.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
 
         assert result.mol_from_vote and result.mol == "1234"
         assert crops == [P.Crop("mol_crop", Path("mol_crops/a_image2.png"),
@@ -94,7 +97,7 @@ class TestScanWritesNothing:
     def test_small_single_read_low_confidence(self, ocr):
         ocr[("mol", P.FALLBACK_CONFIGS[0]["name"])] = ("MOL 1234", 40.4)
 
-        result, crops = P.scan_image_mol_only("a.docx", "image2.png", b"")
+        result, crops = P.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
 
         assert (result.mol, result.mol_from_vote) == ("1234", False)
         assert [str(c.path) for c in crops] == [
@@ -103,7 +106,7 @@ class TestScanWritesNothing:
         ]
 
     def test_small_nothing_read(self, ocr):
-        result, crops = P.scan_image_mol_only("a.docx", "image2.png", b"")
+        result, crops = P.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
         assert crops == []
         assert result.manual_review
 
@@ -130,10 +133,10 @@ class TestRunScanWrites:
                 P.Crop("permit_crop", Path("permit_crops/32503_image5.png"), roi),
                 P.Crop("low_conf", Path("low_conf_crops/32503_image5_permit_upper_conf40.png"), roi),
             ])
-        monkeypatch.setattr(P, "scan_image_large", large)
         out = tmp_path / "out"
 
-        P.run_scan(Batch((tmp_path / "32503.docx",), source=tmp_path, output_dir=out))
+        P.run_scan(Batch((tmp_path / "32503.docx",), source=tmp_path, output_dir=out),
+                   read_large=large)
 
         [row] = csv.DictReader(open(out / "matches.csv", encoding="utf-8-sig"))
         assert row["permit_crop"] == str(out / "permit_crops" / "32503_image5.png")

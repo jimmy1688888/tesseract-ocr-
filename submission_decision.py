@@ -9,8 +9,9 @@ Sheets 上只有一列);舊做法逐圖決定,同一份 docx 會進佇列多次�
 多數票判斷與各信心門檻只記在這裡:停止擴掃(ADR-0005)與規則 A2 用同一個
 is_permit_vote —— 兩者不一致時,分層掃描會在 A2 不採用的值上停下來。
 
-輸入是 pipeline 的 ScanResult(單張圖的讀值整理,decide_result 已寫好 final_value、
-vision_review、note);這裡只讀屬性,不 import pipeline,免得循環匯入。
+輸入是 permit_reading 的 ScanResult(單張圖的讀值整理,decide_result 已寫好 final_value、
+vision_review、note);這裡只讀屬性。permit_reading 反過來 import 這裡的門檻與
+is_permit_vote,所以只在型別標註時 import 它,免得循環匯入。
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from typing import TYPE_CHECKING
 from docx_images import image_sort_key
 
 if TYPE_CHECKING:
-    from pipeline import ScanResult
+    from permit_reading import ScanResult
 
 # 信心門檻
 CONF_KEY_IN       = 55   # 高於此值直接 key-in;低於則送 Google Vision
