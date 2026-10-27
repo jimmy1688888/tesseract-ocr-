@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>架構檢視 — LinaOCR 2026-10-22</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+<style>
+  .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #f8fafc; }
+  .shallow { border: 1px dashed #94a3b8; }
+  .leak { color: #dc2626; }
+  .seam { border-left: 3px dashed #64748b; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900 font-sans">
+<main class="max-w-5xl mx-auto px-4 sm:px-6 py-12 space-y-12">
+
+<header class="space-y-3">
+  <h1 class="text-3xl font-bold">架構檢視 — LinaOCR(tesseract-ocr-)</h1>
+  <p class="text-slate-600">2026-10-22 · #47、#43、#48、#49、#6、#16、#22、#8~#10、#12、#13、#17~#20 之後 · 熱點:pipeline.py、employer_extract.py、permit_reading.py、送審決策、反查救援</p>
+  <div class="flex flex-wrap gap-4 text-sm text-slate-600">
+    <span><span class="inline-block w-4 h-3 border border-slate-400 align-middle"></span> module</span>
+    <span><span class="inline-block w-4 h-0 border-t-2 border-dashed border-slate-500 align-middle"></span> seam</span>
+    <span><span class="leak font-bold">→</span> 洩漏</span>
+    <span><span class="inline-block w-4 h-3 deep align-middle"></span> deep module</span>
+  </div>
+  <p class="text-sm text-slate-500">不重複已列過、未 grill 的候選(2~5、B、C、G、J~L、N、O、P、S、T);它們的現況在最後一節。U~AA 是新的。</p>
+</header>
+
+<section id="candidates" class="space-y-10">
+
+<!-- U -->
+<article id="U" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">U. 反查救援是一個去向、一條路</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-100 text-emerald-800">Strong</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100">in-process</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">pipeline.py:170-188(VisionQueueItem)、325-347(build_vision_queue)、1209-1222(main 兩次救援) · vision_verification.py:19-22、46-54 · submission_decision.py:55-63(Decision)</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">BEFORE:同一個去向,兩條路</p>
+      <pre class="mermaid">
+flowchart LR
+  D[送審決策<br/>反查救援] -->|無截圖| R1[rescue 清單]
+  D -->|有截圖| Q[VisionQueueItem<br/>no_vote_rescue=True]
+  Q --> V[Vision 這一步]
+  V -.原樣彈出,不打 Vision.-> R2[novote_rescue 清單]
+  R1 --> M1[main 救援 ①]
+  R2 --> M2[main 救援 ②]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class Q,V leak
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">AFTER:去向決定路</p>
+      <pre class="mermaid">
+flowchart LR
+  D[送審決策] -->|送Vision| V[Vision 這一步]
+  D -->|反查救援<br/>種子=候選值或空| R[反查救援<br/>一次]
+  classDef deep fill:#0f172a,color:#f8fafc;
+  class R deep
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem</b>:「單一判讀低信心」已被送審決策判成反查救援,卻包成 <code>VisionQueueItem</code> 送進 Vision 這一步,再在迴圈第一行原樣彈出;<code>VisionQueueItem</code> 幾乎逐欄抄 <code>Decision</code>。</p>
+  <p><b>Solution</b>:反查救援的種子列在送審決策之後直接建好(有沒有候選值都一樣),Vision 這一步只收送 Vision 的;<code>no_vote_rescue</code> 與那段理由前綴回到建種子列的地方。</p>
+  <ul class="list-disc pl-6 text-sm">
+    <li>locality:一個去向一處處理</li>
+    <li>main 的救援呼叫兩次 → 一次</li>
+    <li>vision_verification 不再為型別 import pipeline</li>
+    <li>刪 <code>no_vote_rescue</code> 旗標</li>
+  </ul>
+  <p class="text-sm rounded bg-amber-50 border border-amber-200 p-2">D 欄的理由前綴「略過 ROI Vision 改走次頁電話反查」是目前寫進 Sheets 的字;搬家時要逐字保留,或當成行為票改措辭。與候選 P 相鄰(都在送審決策的下游)。</p>
+</article>
+
+<!-- V -->
+<article id="V" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">V. Google Vision 一個 port、重試只一套</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-100 text-emerald-800">Strong</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100">true external</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">pipeline.py:191-256(with_retry、_is_retryable_google_error)、359-387(vision_text) · employer_extract.py:827-837(vision_full_text) · pipeline.py:637-641(反查救援吞例外)</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">BEFORE:兩支 adapter,錯誤模式相反</p>
+      <div class="grid grid-cols-2 gap-2 text-xs">
+        <div class="border border-slate-300 rounded p-2 space-y-1">
+          <p class="uppercase tracking-wider font-semibold">vision_text</p>
+          <p>text_detection</p>
+          <p class="text-emerald-700">with_retry ×4</p>
+          <p>API 錯 → 回 ""</p>
+          <p class="text-slate-500">許可證截圖</p>
+        </div>
+        <div class="border border-red-300 rounded p-2 space-y-1">
+          <p class="uppercase tracking-wider font-semibold">vision_full_text</p>
+          <p>document_text_detection</p>
+          <p class="leak">不重試</p>
+          <p>API 錯 → raise</p>
+          <p class="text-slate-500">契約頁、切結書頁、次頁</p>
+        </div>
+      </div>
+      <p class="text-xs leak mt-2">次頁一次 503 → 反查救援吞成空區塊 → 「救不回」,看不出是 API 失誤</p>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">AFTER:一個 port</p>
+      <div class="deep rounded p-3 text-xs space-y-1">
+        <p class="uppercase tracking-wider font-semibold">Vision 全文 (bytes, 模式) → 全文</p>
+        <p class="text-slate-300">重試 · 可重試錯誤分類 · API 錯誤怎麼回報:只在這裡</p>
+      </div>
+      <div class="grid grid-cols-3 gap-2 text-xs mt-2">
+        <div class="border rounded p-1 text-center">許可證驗證</div>
+        <div class="border rounded p-1 text-center">雇主擷取</div>
+        <div class="border rounded p-1 text-center">反查救援</div>
+      </div>
+      <p class="text-xs text-slate-500 mt-2">adapter:Google(正式)、假的(測試)—— 兩個 adapter,真 seam</p>
+    </div>
+  </div>
+  <p><b>Problem</b>:同一個外部依賴有兩支 adapter,重試與錯誤處理各一套;<code>with_retry</code> 住在 pipeline,雇主側不 import pipeline 就用不到。</p>
+  <p><b>Solution</b>:Vision 全文成為一個 module(port + Google adapter),重試與錯誤回報在裡面;兩種偵測模式是參數,不是兩支函式。</p>
+  <ul class="list-disc pl-6 text-sm">
+    <li>locality:暫時性錯誤只處理一次</li>
+    <li>救援的「API 失誤」看得見</li>
+    <li>測試注入一支假 adapter</li>
+    <li>with_retry 離開 pipeline</li>
+  </ul>
+  <p class="text-sm rounded bg-amber-50 border border-amber-200 p-2">讓雇主側也重試、或讓 API 錯誤不再被吞成「救不回」都會改變行為 —— 拆成結構票(port)+ 行為票(統一錯誤模式)。拿不到憑證整批中止是使用者 2026-10-22 定的(ADR-0012),不在這裡改。與暫緩的 #21(with_retry 時間 seam)同一塊。</p>
+</article>
+
+<!-- W -->
+<article id="W" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">W. 「一份 docx → 它在 matches.csv 的列」只在一處</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-100 text-emerald-800">Strong</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100">in-process</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">pipeline.py:745-891(run_scan,147 行)、777-781 / 840-850 / 858-863(三種佔位列)、792-799(--image 對不到就 continue)、1112-1122(_image_filter_miss)、1152-1157(main 再讀一次 docx、再分類一次)</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">BEFORE:規則散在 run_scan 迴圈裡</p>
+      <div class="space-y-1 text-xs">
+        <div class="h-8 border-l-4 border-slate-300 pl-2 flex items-center">讀不到圖 → 佔位列 ①</div>
+        <div class="h-8 border-l-4 border-slate-300 pl-2 flex items-center">--image 對不到 → <span class="leak ml-1">沒有列</span>(靠 main 先擋)</div>
+        <div class="h-8 border-l-4 border-slate-300 pl-2 flex items-center">large 全無命中 → 佔位列 ②、擴掃過標 2</div>
+        <div class="h-8 border-l-4 border-slate-300 pl-2 flex items-center">small → aggregate → 佔位列 ③</div>
+        <div class="h-8 border-l-4 border-slate-300 pl-2 flex items-center">8 個計數器 · 存複查原圖 · 寫 CSV · log</div>
+      </div>
+      <p class="text-xs text-slate-500 mt-2">一份 docx 讀三次:main 印 log、main 檢查 --image、run_scan</p>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">AFTER</p>
+      <div class="deep rounded p-3 text-xs space-y-1">
+        <p class="uppercase tracking-wider font-semibold">(圖, 選項, 讀圖) → 這份 docx 的掃描結果</p>
+        <p class="text-slate-300">分類 · 分層 · 三種佔位列 · scan_tier · 「至少一列」的保證</p>
+      </div>
+      <div class="seam mt-2 pl-2 text-xs text-slate-600">run_scan 只剩:讀 docx、寫裁切圖與複查圖、寫 CSV、計數</div>
+    </div>
+  </div>
+  <p><b>Problem</b>:#47 的「一份 docx 一列」靠三個出口各自造佔位列,--image 的洞靠 main 先擋;擴掃決策已在 <code>read_large_docx</code>,但它的佔位列(標 2)還在 run_scan。測試要寫 CSV 再讀回來才驗得到。</p>
+  <p><b>Solution</b>:一個純函式把一份 docx 的圖變成它的 <code>ScanResult</code> 列(含佔位列),run_scan 只做 I/O。</p>
+  <ul class="list-disc pl-6 text-sm">
+    <li>locality:「一份一列」一處保證</li>
+    <li>test_tiered_scan 不必讀回 CSV</li>
+    <li>docx 只讀一次</li>
+    <li>run_scan 147 行 → I/O 迴圈</li>
+  </ul>
+  <p class="text-sm rounded bg-amber-50 border border-amber-200 p-2">與候選 C(matches.csv 成為一個 module)同一輪最划算:W 管「哪些列」,C 管「列怎麼落地、怎麼讀回」。</p>
+</article>
+
+<!-- X -->
+<article id="X" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">X. 雇主擷取的 OCR 由參數注入(比照 #19)</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-100 text-emerald-800">Strong</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100">ports &amp; adapters</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">employer_extract.py:185-219(Tesseract 認頁、路徑又設一次)、662-680(切結書頁)、827(Vision)、1014(extract_employer_from_docx) · test_not_extracted / test_pledge_rescue / test_contract_page / test_employer_result(36 處 monkeypatch)</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">BEFORE:測試改模組全域</p>
+      <pre class="mermaid">
+flowchart TB
+  T[測試] -.setattr.-> A[_scored_pages]
+  T -.setattr.-> B[_page_marks]
+  T -.setattr.-> C[_tesseract_top_text]
+  T -.setattr.-> D[deink_red_stamp]
+  T -.setattr.-> E[vision_full_text]
+  T -.setattr.-> F[rescue_name_from_pledge]
+  X[extract_employer_from_docx] --> A & B & C & D & E & F
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class A,B,C,D,E,F leak
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">AFTER</p>
+      <pre class="mermaid">
+flowchart TB
+  T[測試] -->|假 認頁 OCR<br/>假 Vision| X
+  P[pipeline] -->|Tesseract<br/>Google Vision| X
+  X[雇主擷取<br/>docx 圖 → 雇主擷取結果]
+  classDef deep fill:#0f172a,color:#f8fafc;
+  class X deep
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem</b>:認頁的 Tesseract 與取值的 Vision 寫死在模組裡,只有 Vision 開了半個 <code>client=</code>;四個測試檔靠 36 處 monkeypatch 碰到流程,那是 monkeypatch 縫,不是 seam。</p>
+  <p><b>Solution</b>:與 <code>permit_reading</code> 同一招 —— 認頁 OCR 與 Vision 全文從參數進來,預設真的 adapter;測試傳假的。</p>
+  <ul class="list-disc pl-6 text-sm">
+    <li>interface 就是測試面</li>
+    <li>36 處 monkeypatch 消失</li>
+    <li>tesseract 路徑只設一次</li>
+    <li>leverage:與 V 共用 Vision port</li>
+  </ul>
+  <p class="text-sm rounded bg-amber-50 border border-amber-200 p-2">做 V 之後再做 X,Vision 那支 adapter 直接用 V 的 port。回歸網:H~O 快照(15 份)+ 契約頁核對值。</p>
+</article>
+
+<!-- Y -->
+<article id="Y" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">Y. 地址疑慮在地址庫判,不跨 seam 讀私有符號</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-100 text-emerald-800">Strong</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100">in-process</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">employer_extract.py:732(import _match_city_area_en)、773-794(解讀 normalize_address 的 13 鍵 dict)、800(import _ROAD_RE、_ROAD_SEG_RE) · address_db.py:486-489、529(英文錨定已算過一次)</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">BEFORE:疑慮規則一半在對面</p>
+      <div class="grid grid-cols-2 gap-0 text-xs">
+        <div class="border border-slate-300 rounded-l p-2 space-y-1">
+          <p class="uppercase tracking-wider font-semibold">雇主擷取</p>
+          <p>_address_doubt</p>
+          <p>_city_mismatch_doubt <span class="leak">(再錨定一次英文)</span></p>
+          <p>_has_road_pattern</p>
+          <p class="leak">r["city_tier"] &lt;= 2 · r["district"]</p>
+        </div>
+        <div class="border border-slate-300 rounded-r p-2 space-y-1">
+          <p class="uppercase tracking-wider font-semibold">地址庫</p>
+          <p>normalize_address → dict</p>
+          <p class="leak">_match_city_area_en ←</p>
+          <p class="leak">_ROAD_RE · _ROAD_SEG_RE ←</p>
+        </div>
+      </div>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">AFTER</p>
+      <div class="deep rounded p-3 text-xs space-y-1">
+        <p class="uppercase tracking-wider font-semibold">地址庫:(中文 OCR, 英文 OCR) → 標準地址 + 留空原因 + 疑慮</p>
+        <p class="text-slate-300">縣市層級多可信 · 縣市中英不符 · 路名樣式 · 只錨定一次</p>
+      </div>
+      <div class="seam mt-2 pl-2 text-xs text-slate-600">雇主擷取只把結果放進「地址_中(標準)/郵遞區號/疑慮」</div>
+    </div>
+  </div>
+  <p><b>Problem</b>:「這個地址可不可信」的規則有一半寫在雇主擷取,靠三個私有 import 與 dict 鍵名讀地址庫內部;英文錨定算兩次,縣市層級的門檻寫在兩處。</p>
+  <p><b>Solution</b>:地址的疑慮與留空原因由地址庫回傳成有形狀的值;雇主擷取不再知道 <code>city_tier</code>。</p>
+  <ul class="list-disc pl-6 text-sm">
+    <li>locality:地址規則一處</li>
+    <li>私有 import ×3 消失</li>
+    <li>英文錨定只跑一次</li>
+    <li>test_address_doubt 直接測地址庫</li>
+  </ul>
+  <p class="text-sm rounded bg-amber-50 border border-amber-200 p-2">順著 ADR-0001(地址庫擁有台灣文字正規化)與 ADR-0003(留空時寫明原因);與候選 G(地址庫成為可注入的值)同一個 module,同輪看。CONTEXT 還缺「縣市中英不符」「地址標籤優先」詞條,grill 時一起補。</p>
+</article>
+
+<!-- Z -->
+<article id="Z" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">Z. 次頁台仲區塊錨定成為純函式</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-amber-100 text-amber-800">Worth exploring</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100">in-process</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">employer_extract.py:885-922(_agency_block_lines)、840-992 · test_agency_block.py:141 · test_contract_page.py:139</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">BEFORE:一個函式五件事</p>
+      <div class="space-y-1 text-xs">
+        <div class="h-7 border-l-4 border-slate-300 pl-2 flex items-center">選頁(契約頁的下一張)</div>
+        <div class="h-7 border-l-4 border-slate-300 pl-2 flex items-center">前處理</div>
+        <div class="h-7 border-l-4 border-slate-300 pl-2 flex items-center">Vision</div>
+        <div class="h-7 border-l-4 border-red-300 pl-2 flex items-center leak">行錨定:嚴格標籤 → 殘缺標籤 → 終點 → ≤2 行放寬到乙方(零文字測試)</div>
+      </div>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">AFTER:比照 #10 的 locate_employer_block</p>
+      <div class="deep rounded p-3 text-xs">
+        <p class="uppercase tracking-wider font-semibold">locate_agency_block(lines) → 台仲區塊</p>
+      </div>
+      <p class="text-xs text-slate-500 mt-2">I/O(選頁、Vision)留在外面</p>
+    </div>
+  </div>
+  <p><b>Problem</b>:反查救援的命中與否取決於行錨定的四級回退,但測試只驗小工具 <code>_is_agency_label_line</code>,整段不是被 patch 掉就是只拿來數快取次數。</p>
+  <p><b>Solution</b>:像雇主區塊那樣切出 lines 進、區塊出的純函式,規則用文字直接測。</p>
+  <ul class="list-disc pl-6 text-sm">
+    <li>放寬規則有文字測試</li>
+    <li>與 S(搬出雇主擷取)同刀</li>
+  </ul>
+</article>
+
+<!-- AA -->
+<article id="AA" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">AA. 切結書頁備援在組裝時提供名稱,不在結果上動手術</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-amber-100 text-amber-800">Worth exploring</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100">in-process</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">employer_extract.py:622(return "未擷取到中文名")、742(_NAME_MISSING 同一句)、1082(重算 _name_doubt)、1085-1090(old.index 原位替換)</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">BEFORE</p>
+      <pre class="mermaid">
+flowchart LR
+  E[extract_employer_fields] --> R[雇主擷取結果<br/>疑慮含「未擷取到中文名」]
+  R --> S[切結書頁備援]
+  S -.找哨兵字串、原位替換.-> R2[改過的結果]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class S leak
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3">
+      <p class="text-xs font-semibold text-slate-500 mb-2">AFTER</p>
+      <pre class="mermaid">
+flowchart LR
+  C[契約頁名稱] --> E[組裝雇主擷取結果]
+  P[切結書頁名稱<br/>第二來源] --> E
+  E --> R[一次組好]
+  classDef deep fill:#0f172a,color:#f8fafc;
+  class E deep
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem</b>:同一句「未擷取到中文名」寫兩份,只改一處救援就從「替換」變「附加」,L 欄同時出現兩句、不報錯;救回的名字也沒過 <code>_balance_brackets</code>。</p>
+  <p><b>Solution</b>:組裝時接受第二個名稱來源,疑慮一次寫對。</p>
+  <ul class="list-disc pl-6 text-sm">
+    <li>哨兵字串消失</li>
+    <li>名稱規則對兩個來源一致</li>
+  </ul>
+  <p class="text-sm rounded bg-amber-50 border border-amber-200 p-2">救回的名字補上括號平衡會改變輸出 —— 那半是行為票(ADR-0006 的範圍)。</p>
+</article>
+
+</section>
+
+<section class="space-y-3">
+  <h2 class="text-2xl font-bold">小事(不成候選)</h2>
+  <ul class="list-disc pl-6 text-sm space-y-1">
+    <li><b>送審決策另抄一份狀態字串</b>:<code>submission_decision.py:36-44</code> 的 <code>_LARGE_NO_HIT</code> 等、<code>_NO_IMAGE_REASONS</code> 寫死副檔名(與 <code>docx_images.IMAGE_EXTENSIONS</code> 兩份)、<code>pipeline.unscannable</code> 又一種措辭。起因是 permit_reading ↔ submission_decision 的 import 方向;做候選 P 時一起解</li>
+    <li><b>名冊的「有效」旗標沒人讀</b>:<code>permit_lookup.py:128</code> 算了,<code>lookup</code> 照回已廢止機構、E~G 照寫;反查索引卻只收有效的。要不要在 E~G 標示屬行為問題,先問使用者</li>
+    <li><b>FORMAT_INVALID 在正式流程到不了</b>:<code>permit_in_text</code> 只回合格式的值或空,<code>vision_verification.py:121</code> 的格式檢查與 <code>test_verify.py:259/269</code> 測的是死路</li>
+    <li><b>#17~#20 review 留下的</b>:pipeline 約 25 個 re-export(含私有 <code>_empty_result</code>)、<code>Crop.field</code> 字串 + setattr、<code>stopped_at_tier1</code>/<code>expanded</code> 兩個 bool 表三態 —— 做 W 時一起收</li>
+    <li><b>契約頁評分的 0.35 與 EMPLOYER_ROI 的 0.35 沒綁在一起</b>(<code>employer_extract.py:94</code>、<code>:196</code>)—— 補進候選 J</li>
+  </ul>
+</section>
+
+<section class="space-y-3">
+  <h2 class="text-2xl font-bold">舊候選現況(對程式碼核過)</h2>
+  <div class="overflow-x-auto">
+  <table class="text-sm w-full border border-slate-200 bg-white">
+    <thead class="bg-slate-100"><tr><th class="p-2 text-left">候選</th><th class="p-2 text-left">現況</th></tr></thead>
+    <tbody>
+      <tr class="border-t"><td class="p-2">2 Sheets 目的地</td><td class="p-2">仍成立(pipeline.py:401-415 原始 Resource;403/404 在 preflight)</td></tr>
+      <tr class="border-t"><td class="p-2">3 反查決策梯進名冊查表器</td><td class="p-2">變了:#13 成為純函式 <code>pick_agency</code>,仍住 pipeline</td></tr>
+      <tr class="border-t"><td class="p-2">4 main 交出結果</td><td class="p-2">仍成立(<code>-&gt; None</code>,三處裸 return,結束碼 0);端對端測試要 patch 8 個名字</td></tr>
+      <tr class="border-t"><td class="p-2">5 路名補充檔對稱</td><td class="p-2">仍成立</td></tr>
+      <tr class="border-t"><td class="p-2">B 頁面地圖</td><td class="p-2">仍成立(雇主退 image2、反查直接 [])</td></tr>
+      <tr class="border-t"><td class="p-2">C matches.csv module</td><td class="p-2">仍成立,更明顯:測試自拼 DictWriter 6 處;未知 status 仍安靜當 OK;snapshots 為 read_decisions import 整個 pipeline</td></tr>
+      <tr class="border-t"><td class="p-2">G 地址庫可注入</td><td class="p-2">仍成立;另 snapshots 讀私有 <code>_DB_PATH</code></td></tr>
+      <tr class="border-t"><td class="p-2">J 契約頁配方只一份</td><td class="p-2">仍成立,多一個獨立的 0.35</td></tr>
+      <tr class="border-t"><td class="p-2">K 名冊三態全域</td><td class="p-2">仍成立(測試 patch 9 次)</td></tr>
+      <tr class="border-t"><td class="p-2">L preflight 搬出</td><td class="p-2">仍成立(約 230 行)</td></tr>
+      <tr class="border-t"><td class="p-2">N 樣板字彙</td><td class="p-2">仍成立</td></tr>
+      <tr class="border-t"><td class="p-2">O 各樣板規則散落</td><td class="p-2">仍成立</td></tr>
+      <tr class="border-t"><td class="p-2">P 送審決策只吃讀值</td><td class="p-2">仍成立(<code>_decide_large</code> 讀 vision_review/note;small winner 兩處)</td></tr>
+      <tr class="border-t"><td class="p-2">S 次頁台仲搬出</td><td class="p-2">一半解:#16 已修循環 import;區塊仍在 employer_extract(見 Z)</td></tr>
+      <tr class="border-t"><td class="p-2">T Vision 全文素材</td><td class="p-2">仍成立(三種格式);切結書頁與次頁的全文用完即丟,兩條救援無法離線重放</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="top-recommendation" class="rounded-xl deep p-6 space-y-2">
+  <h2 class="text-2xl font-bold">首推:<a href="#U" class="underline">U. 反查救援是一個去向、一條路</a></h2>
+  <p class="text-slate-200">純 in-process、手術面小、送審快照(36 份)與十五欄基準網已就位;它也讓 main 少一次救援、vision_verification 不再為型別 import pipeline,是之後做 P、W、候選 4 的前置。次推 <a href="#V" class="underline">V</a>(有真實的失敗模式:救援把 API 失誤吞成「救不回」),再接 X。</p>
+</section>
+
+</main>
+</body>
+</html>
