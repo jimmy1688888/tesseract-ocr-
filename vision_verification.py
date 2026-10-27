@@ -2,8 +2,7 @@
 """Vision 驗證:一個「送 Vision」的送審決策 → 一列 Sheets 結果,絕不回空(#41)。
 
 Vision client(截圖 → 全文)放在 seam 後,由呼叫端傳入;取號與 Tesseract 共用
-permit_patterns,依截圖所屬的 ROI 選 pattern。這裡不 import pipeline(循環匯入),
-VisionQueueItem 只讀屬性。
+permit_patterns,依截圖所屬的 ROI 選 pattern。
 """
 from __future__ import annotations
 
@@ -12,14 +11,11 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import Callable
 
 from permit_patterns import permit_in_text
 from sheet_row import SheetRow, SheetStatus
-from submission_decision import CONF_NOVOTE_RESCUE_MAX
-
-if TYPE_CHECKING:
-    from pipeline import VisionQueueItem
+from submission_decision import Decision
 
 logger = logging.getLogger(__name__)
 
@@ -27,31 +23,19 @@ __all__ = ["VerificationLevel", "VerifiedResult", "run_vision_items",
            "verify_vision_result"]
 
 
-def run_vision_items(items: list[VisionQueueItem],
+def run_vision_items(items: list[Decision],
                      read_text: Callable[[str], str]
-                     ) -> tuple[list[SheetRow], list[SheetRow], list[SheetRow]]:
-    """送 Vision 那一步:每一筆都分到 (自動寫入, 人工審查, 反查救援) 其中**一處**,絕不丟掉。
+                     ) -> tuple[list[SheetRow], list[SheetRow]]:
+    """送 Vision 那一步:每一個送 Vision 的決定都分到 (自動寫入, 人工審查) 其中**一處**,
+    絕不丟掉。
 
     read_text 是 Vision client:「截圖路徑 → 全文」(正式流程是 pipeline.vision_text,
     測試換假的)。取號依截圖所屬的 ROI(item.hit_roi),與 Tesseract 同一個函式。
     雙引擎完全一致才自動寫入;其餘進人工審查(交叉比對見 verify_vision_result)。
-    反查救援那組是種子列(B 欄是 Tesseract 候選值),救援後由 pipeline 換成新的列。
     """
     auto: list[SheetRow] = []    # 雙引擎一致(CONFIRMED) → 自動寫
     review: list[SheetRow] = []  # 任何不一致 → 人工審查
-    rescue: list[SheetRow] = []  # 單一判讀低信心:略過 ROI Vision,改走次頁電話反查
     for item in items:
-        # 單一判讀且 conf 過低(ROI 位置品質差)→ 不再掃同一位置,直接改走契約次頁
-        # 台仲電話反查救援(比照全無命中);那格 ROI Vision 額度省下來。
-        if item.no_vote_rescue:
-            rescue.append(SheetRow(
-                item.source_docx,
-                item.candidate_value,   # 種子:電話查無時保留原候選值
-                SheetStatus.MANUAL_REVIEW,
-                f"[單一判讀低信心 conf={item.candidate_conf:.1f}<{CONF_NOVOTE_RESCUE_MAX},"
-                f"略過 ROI Vision 改走次頁電話反查] {item.reason}",
-            ))
-            continue
         # 截圖不在:舊做法 continue,整份 docx 從 Sheets 消失(#39)。改進人工審查,
         # 比照 Vision 沒讀到值:B 欄留 Tesseract 候選值、理由只講事實。
         if not item.img_path or not Path(item.img_path).exists():
@@ -79,7 +63,7 @@ def run_vision_items(items: list[VisionQueueItem],
         else:
             review.append(SheetRow(item.source_docx, verified.final_value,
                                    SheetStatus.MANUAL_REVIEW, reason))
-    return auto, review, rescue
+    return auto, review
 
 
 # ═══════════════════════════════════════════════════════════════════════════

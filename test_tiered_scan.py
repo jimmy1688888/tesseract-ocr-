@@ -119,7 +119,7 @@ class TestHasPermitVote:
         """幾個設定各讀出不同的值、湊不出多數 —— r.id 有值但不算讀到。
 
         若讓它擋掉擴掃,送審決策的規則A2 不會採用這個值,反而掉進
-        規則B 並以 no_vote_rescue 把整份推去走台仲反查,而真正的多數票可能
+        規則B(低信心時)把整份推去走反查救援,而真正的多數票可能
         就在還沒掃的那幾張圖上。這是分層最危險的一條路徑。
         """
         r = P.ScanResult(source_docx="a.docx", image_name="image5.jpeg",

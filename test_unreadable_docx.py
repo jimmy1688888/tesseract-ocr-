@@ -196,7 +196,7 @@ def world(monkeypatch, tmp_path):
 
     def fake_vision(items, read_text):
         calls["vision"].extend(items)
-        return [], [], []
+        return [], []
 
     def fake_rescue(batch, rows):
         calls["rescue"].extend(rows)

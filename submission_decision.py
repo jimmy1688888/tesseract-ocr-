@@ -95,6 +95,14 @@ def _decision(r: ScanResult, dest: Destination, value: str, conf: float,
                     _crop_roi(r), reason)
 
 
+def _low_conf_rescue(r: ScanResult, value: str, conf: float, reason: str) -> Decision:
+    """單一判讀低信心:不送 Vision(再掃同一個 ROI 位置意義不大),改走反查救援;
+    候選值當種子(救不回就留著)。理由寫明略過了 Vision —— 這段會進 Sheets D 欄。"""
+    return _decision(r, Destination.反查救援, value, conf,
+                     f"[單一判讀低信心 conf={conf:.1f}<{CONF_NOVOTE_RESCUE_MAX},"
+                     f"略過 ROI Vision 改走次頁電話反查] {reason}")
+
+
 def _no_hit(rows: list[ScanResult], reason: str,
             dest: Destination = Destination.反查救援) -> Decision:
     """沒有任何讀值可送的決定:沒有候選值、沒有截圖。"""
@@ -158,7 +166,7 @@ def _decide_large(rows: list[ScanResult]) -> Decision:
         r, v, c, why = _pick(cands)
         why = why + _others(cands, r)
         if r.status == _PERMIT_PARTIAL and c < CONF_NOVOTE_RESCUE_MAX:
-            return _decision(r, Destination.反查救援, v, c, why)
+            return _low_conf_rescue(r, v, c, why)
         return _decision(r, Destination.送VISION, v, c, why)
 
     # 沒有需覆核的列:信心最高的讀值直接 key-in
@@ -187,7 +195,7 @@ def _decide_small(rows: list[ScanResult]) -> Decision:
                          f"{CONF_MOL_VOTE_MIN},需人工確認")
     why = f"small:mol非多數票(單一判讀 conf={c:.1f}),需人工複核"
     if c < CONF_NOVOTE_RESCUE_MAX:
-        return _decision(r, Destination.反查救援, v, c, why)
+        return _low_conf_rescue(r, v, c, why)
     return _decision(r, Destination.送VISION, v, c, why)
 
 

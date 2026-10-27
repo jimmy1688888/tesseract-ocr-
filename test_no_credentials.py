@@ -41,10 +41,10 @@ def no_credentials():
 def test_permit_reading_aborts_the_run(tmp_path):
     crop = tmp_path / "crop.png"
     crop.write_bytes(b"x")
-    item = P.VisionQueueItem(source_docx="a.docx", image_name="image5.jpeg",
-                             img_path=str(crop), reason="permit部分命中無多數",
-                             hit_roi="permit_lower", candidate_value="1234",
-                             candidate_conf=60.0)
+    item = P.Decision(source_docx="a.docx", destination=P.Destination.送VISION,
+                      image_name="image5.jpeg", img_path=str(crop),
+                      reason="permit部分命中無多數", hit_roi="permit_lower",
+                      candidate_value="1234", candidate_conf=60.0)
     with pytest.raises(NoCredentials):
         run_vision_items([item], read_text=P.vision_text)
 

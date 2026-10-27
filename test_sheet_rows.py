@@ -77,6 +77,12 @@ BLOCKS = {
 }
 
 
+KEYED, REVIEW = "keyed-in", "manual_review"
+# 送審決策寫的理由(#50 之前由 Vision 這一步補前綴);這段會原樣進 D 欄
+NOVOTE = "[單一判讀低信心 conf=30.0<50,略過 ROI Vision 改走次頁電話反查] permit部分命中無多數"
+NOHIT = "large:全無命中"
+
+
 def _decision(name, dest, value="", conf=0.0, image="", crop="", roi="", reason=""):
     return Decision(source_docx=name, destination=dest, candidate_value=value,
                     candidate_conf=conf, image_name=image, img_path=crop, hit_roi=roi,
@@ -103,8 +109,8 @@ def world(monkeypatch, tmp_path):
                   "permit_upper", "large:讀值信心不足"),
         _decision("v_nocrop.docx", V, "4444", 40.0, "image5.jpeg",
                   str(tmp_path / "gone.png"), "permit_upper", "large:讀值信心不足"),
-        _decision("nv_phone.docx", R, "9999", 30.0, "image5.jpeg", reason="permit部分命中無多數"),
-        _decision("nv_miss.docx", R, "9999", 30.0, "image5.jpeg", reason="permit部分命中無多數"),
+        _decision("nv_phone.docx", R, "9999", 30.0, "image5.jpeg", reason=NOVOTE),
+        _decision("nv_miss.docx", R, "9999", 30.0, "image5.jpeg", reason=NOVOTE),
         *[_decision(n, R, reason="large:全無命中") for n in
           ("nh_phone.docx", "nh_prefix.docx", "nh_name.docx", "nh_addr.docx",
            "nh_ambig.docx", "nh_ambig_name.docx", "nh_none.docx")],
@@ -157,11 +163,9 @@ def _row(docx, permit, status, reason, employer=("",) * 8):
     return [docx, permit, status, reason, *_agency_cols(permit), *employer]
 
 
-KEYED, REVIEW = "keyed-in", "manual_review"
-NOVOTE = "[單一判讀低信心 conf=30.0<50,略過 ROI Vision 改走次頁電話反查] permit部分命中無多數"
-NOHIT = "large:全無命中"
-
 # #12 之前的程式寫出的十五欄(快照,不是核對值),逐格(順序也是:key-in 組在前、人工審查組在後)。
+# #50:反查救援只走一條路 —— 單一判讀低信心(nv_*)與全無命中(nh_*)合成一張清單、依檔名排,
+# 兩列 nv_* 因此挪到 nh_* 之後;每一格不變。
 BEFORE_12 = [
     _row("k.docx", "1111", KEYED, "large:permit多數票",
          ("王小明", "WANG XIAO MING", "某市某路1號", "某市某路1號", "",
@@ -173,9 +177,6 @@ BEFORE_12 = [
          "差異 4 字元,兩引擎不一致,需人工確認"),
     _row("v_nocrop.docx", "4444", REVIEW,
          "[送Vision原因] large:讀值信心不足 ／ 截圖檔不在,未送 Vision"),
-    _row("nv_miss.docx", "9999", REVIEW, NOVOTE),
-    _row("nv_phone.docx", "1111", REVIEW,
-         f"{NOVOTE}；[電話反查救回] 次頁台仲電話 0211111111 → 許可證 1111／甲仲介(仍請人工核對)"),
     _row("nh_addr.docx", "3333", REVIEW,
          f"{NOHIT}；[地址反查救回·電話無唯一命中] 次頁台仲地址 → 許可證 3333／丙仲介"
          f"(名冊相似度 0.95,仍請人工核對)"),
@@ -193,6 +194,9 @@ BEFORE_12 = [
     _row("nh_prefix.docx", "2222", REVIEW,
          f"{NOHIT}；[電話前綴反查救回·電話OCR可能少碼] 次頁台仲電話 022222222 "
          f"前綴唯一命中 → 許可證 2222／乙仲介(仍請人工核對)"),
+    _row("nv_miss.docx", "9999", REVIEW, NOVOTE),
+    _row("nv_phone.docx", "1111", REVIEW,
+         f"{NOVOTE}；[電話反查救回] 次頁台仲電話 0211111111 → 許可證 1111／甲仲介(仍請人工核對)"),
     _row("dr.docx", "", REVIEW, "docx 無法開啟(不是有效的 docx 檔)"),
 ]
 

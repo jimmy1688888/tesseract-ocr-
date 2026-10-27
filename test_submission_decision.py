@@ -111,6 +111,12 @@ class TestLarge:
         d = decide([_permit("image5.jpeg", "1234", CONF_NOVOTE_RESCUE_MAX - 1, partial=True)])
         assert d.destination is Destination.反查救援 and d.candidate_value == "1234"
 
+    def test_single_partial_low_conf_reason_says_it_skipped_vision(self):
+        """D 欄理由(#50 之前由 Vision 這一步補前綴;措辭逐字保留)。"""
+        d = decide([_permit("image5.jpeg", "1234", 49, partial=True)])
+        assert d.reason == ("[單一判讀低信心 conf=49.0<50,略過 ROI Vision 改走次頁電話反查] "
+                            "permit部分命中無多數")
+
     def test_high_conf_without_review_is_keyin(self):
         d = decide([_permit("image5.jpeg", "1234", 90, review=False)])
         assert d.destination is Destination.直接KEYIN
@@ -174,6 +180,8 @@ class TestSmall:
     def test_single_read_low_conf_is_rescue(self):
         d = decide([self._small("image1.png", "1234", 40)])
         assert d.destination is Destination.反查救援 and d.candidate_value == "1234"
+        assert d.reason == ("[單一判讀低信心 conf=40.0<50,略過 ROI Vision 改走次頁電話反查] "
+                            "small:mol非多數票(單一判讀 conf=40.0),需人工複核")
 
     def test_otherwise_vision_on_the_best_read_without_needing_flags(self):
         """不靠 vision_review 旗標(舊的防禦性退路就是為了旗標漏設而存在)。"""

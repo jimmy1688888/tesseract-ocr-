@@ -291,7 +291,7 @@ def has_permit_vote(rows: list[ScanResult]) -> bool:
                         mol 信心是 37 與 28,拿這種值擋掉擴掃等於用雜訊做決策。
       PERMIT_PARTIAL    幾個設定各讀出不同的值、湊不出多數。r.id 雖有值,但
                         送審決策的規則A2 不會採用它,反而會掉進規則B
-                        並以 no_vote_rescue 把整份推去走台仲反查 —— 而真正的
+                        (低信心時)把整份推去走反查救援 —— 而真正的
                         多數票可能就在還沒掃的那幾張圖上(見 ADR-0005)。
     """
     return any(is_permit_vote(r) for r in rows)

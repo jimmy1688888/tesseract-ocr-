@@ -144,7 +144,7 @@ INPUT_DIR  = Path("./docs")
 # 送審決策的門檻只記一份,在 submission_decision(#40);這裡沿用同名供掃描與
 # decide_result 使用。
 from submission_decision import (  # noqa: E402
-    CONF_KEY_IN, CONF_MOL_VOTE_MIN, CONF_NOVOTE_RESCUE_MAX, CONF_VOTE_MIN,
+    CONF_KEY_IN, CONF_MOL_VOTE_MIN, CONF_VOTE_MIN,
     Decision, Destination, decide, is_permit_vote)
 
 # 一張圖的 image bytes → 一次判讀(ROI、Tesseract 設定、多數票、分層掃描、單張決策)
@@ -163,30 +163,8 @@ SMALL_DOCX_THRESHOLD = 3   # 圖片數 ≤ 此值 → "small"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ①' 共用工具：重試 decorator / 狀態 enum / queue item dataclass
+# ①' 共用工具：重試 decorator
 # ═══════════════════════════════════════════════════════════════════════════
-
-@dataclass
-class VisionQueueItem:
-    """送 Vision(或單一判讀低信心、改走反查救援)的工作項目。直接 key-in 的不經過這裡,
-    在送審決策就建好 SheetRow。
-
-    candidate_conf:候選值對應的 Tesseract 信心分數。後續 verify_vision_result
-    會帶進 rationale 供人工審查參考(差 1 字元時不再用它自動挑值)。
-    """
-    source_docx: str
-    image_name: str
-    img_path: str
-    candidate_value: str
-    reason: str
-    candidate_conf: float = 0.0
-    # 非多數票且低信心的「單一判讀」(small mol 單一命中 / large permit 部分命中,
-    # 且 conf < CONF_NOVOTE_RESCUE_MAX)。conf 太低代表該 ROI 位置本身品質不佳,
-    # 再用 Vision 掃同一個位置意義不大 → 直接改走契約次頁台仲電話反查名冊救援
-    # (略過 ROI 的 Vision 覆核,不多花那一格額度),唯一命中則覆寫填 B。
-    no_vote_rescue: bool = False
-    hit_roi: str = ""          # 截圖屬於哪個 ROI(#41:Vision 取號依此選 pattern)
-
 
 def with_retry(
     max_attempts: int = 5,
@@ -294,9 +272,8 @@ def unscannable(images: list[tuple[str, bytes]] | None) -> tuple[ResultStatus, s
 
 class SubmissionQueue(NamedTuple):
     """一批的送審決策依去向分好(build_vision_queue 的回傳)。每份 docx 恰好在其中一處。"""
-    vision: list[VisionQueueItem]   # 送 Google Vision;反查救援的「單一判讀低信心」也在這
-                                    # (no_vote_rescue=True,主流程略過 ROI Vision、改走次頁反查)
-    rescue: list[SheetRow]          # 全無命中,要走反查救援的種子列(B 欄空)
+    vision: list[Decision]          # 送 Google Vision 的決定(只有去向是送 Vision 的)
+    rescue: list[SheetRow]          # 反查救援的種子列:B 欄是候選值(單一判讀低信心)或空(全無命中)
     keyin: list[SheetRow]           # 直接 key-in:結果已定,列已建好
     direct_review: list[SheetRow]   # docx 讀不到圖,直接人工審查(不送 Vision、不反查)
 
@@ -318,10 +295,10 @@ def build_vision_queue(csv_path: Path) -> SubmissionQueue:
 
     一份 docx 只有一個決定(一份契約只有一個許可證,Sheets 上只有一列)。
     """
-    vision_items:  list[VisionQueueItem] = []
-    keyin_rows:    list[SheetRow]        = []
-    manual_review: list[SheetRow]        = []
-    direct_review: list[SheetRow]        = []
+    vision_items:  list[Decision] = []
+    keyin_rows:    list[SheetRow] = []
+    rescue_rows:   list[SheetRow] = []
+    direct_review: list[SheetRow] = []
 
     for d in read_decisions(csv_path):
         if d.destination is Destination.直接KEYIN:
@@ -331,21 +308,14 @@ def build_vision_queue(csv_path: Path) -> SubmissionQueue:
         if d.destination is Destination.直接人工審查:
             direct_review.append(SheetRow(d.source_docx, "", SheetStatus.MANUAL_REVIEW, d.reason))
             continue
-        if d.destination is Destination.反查救援 and not d.image_name:
-            manual_review.append(SheetRow(d.source_docx, "", SheetStatus.MANUAL_REVIEW, d.reason))
+        if d.destination is Destination.反查救援:
+            # 種子列:救不回就照原樣寫(B 欄是候選值或空)
+            rescue_rows.append(SheetRow(d.source_docx, d.candidate_value,
+                                        SheetStatus.MANUAL_REVIEW, d.reason))
             continue
-        vision_items.append(VisionQueueItem(
-            source_docx     = d.source_docx,
-            image_name      = d.image_name,
-            img_path        = d.img_path,
-            candidate_value = d.candidate_value,
-            candidate_conf  = d.candidate_conf,
-            reason          = d.reason,
-            no_vote_rescue  = d.destination is Destination.反查救援,
-            hit_roi         = d.hit_roi,
-        ))
+        vision_items.append(d)
 
-    return SubmissionQueue(vision_items, manual_review, keyin_rows, direct_review)
+    return SubmissionQueue(vision_items, rescue_rows, keyin_rows, direct_review)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -607,10 +577,8 @@ def rescue_manual_review_via_agency_phone(
     或要人工擇一的換成新列(B 欄換成救回的許可證、D 欄接上反查管道),救不回的原列
     照回;不改傳入的列。_agency_cols 會據許可證補 E~G。
 
-    兩種呼叫情境共用:
-      - 全無命中:種子列 B 欄空,救回填入許可證。
-      - 非多數票低信心單一判讀:ROI 品質差,略過 ROI Vision 直接反查;種子列 B 欄是
-        Tesseract 候選值,命中則換成救回的許可證,救不回就留著。
+    種子列是送審決策判成反查救援的 docx:B 欄是候選值(單一判讀低信心)或空(全無命中),
+    救回就換成救回的許可證,救不回就留著。
 
     名冊/Vision 缺失時安靜跳過,不影響主流程。
     要開的 docx 跟 batch 查完整路徑(列只帶檔名),見 Batch.path_of。
@@ -1173,11 +1141,11 @@ def main(opts: argparse.Namespace) -> None:
     # ── 步驟 3：vision_submit 分流 ─────────────────────────────────────────
     logger.info("── 步驟 3：vision_submit 分流 ──")
     queue = build_vision_queue(csv_path)
-    vision_items, manual_review, keyin_rows = queue.vision, queue.rescue, queue.keyin
+    vision_items, rescue_rows, keyin_rows = queue.vision, queue.rescue, queue.keyin
     direct_review = queue.direct_review
     logger.info(f"  直接 key-in：{len(keyin_rows)} 筆")
     logger.info(f"  送 Vision  ：{len(vision_items)} 筆")
-    logger.info(f"  人工審查   ：{len(manual_review)} 件")
+    logger.info(f"  反查救援   ：{len(rescue_rows)} 件")
     logger.info(f"  直接人工審查(讀不到圖):{len(direct_review)} 件")
 
     # ── 步驟 4a：送 Google Vision + 交叉比對 ──────────────────────────
@@ -1187,13 +1155,13 @@ def main(opts: argparse.Namespace) -> None:
     # 額外規則(LIKELY_OCR_CONFUSION):兩引擎差 1 字元時,不自動填任何值,
     # 一律標人工審查、由人工輸入(兩候選與信心寫進 reason 供參考)。
     logger.info("── 步驟 4a：Google Vision 判讀 + 交叉比對 ──")
-    vision_auto_keyin, vision_review_rows, novote_rescue = run_vision_items(
+    vision_auto_keyin, vision_review_rows = run_vision_items(
         vision_items, read_text=vision_text)
 
     # ── 步驟 4b：統一寫入 Google Sheets ────────────────────────────────────
     # 簡化為兩個 status,理由欄(reason)負責歸因:
     #   KEYED_IN      = Tesseract 直接 key-in(高信心)  +  Vision-CONFIRMED(雙引擎一致)
-    #   MANUAL_REVIEW = Vision 交叉比對失敗(各種不一致)  +  全無命中  +  讀不到圖(#47)
+    #   MANUAL_REVIEW = Vision 交叉比對失敗(各種不一致)  +  反查救援  +  讀不到圖(#47)
     #
     # 設計動機:自動 vs 人工的二分讓使用者只需依 status 篩選即可知道「哪些要看」。
     # 每列來源(Tesseract 直接 / Vision 確認 / 差 1 字元 / 僅 Vision / 無命中)
@@ -1206,32 +1174,25 @@ def main(opts: argparse.Namespace) -> None:
     employer_by_docx = collect_employer_fields(batch)
     write_doubt_report(batch, employer_by_docx)
 
-    # ── 步驟 4b 前置②：全無命中救援（次頁仲介電話 → 反查名冊 → 回推許可證）──
-    # 全無命中原本 B 欄空、只能人工;改整頁 OCR 契約次一頁(1 次 Vision)、以『台灣仲介』
-    # 標籤錨定取電話(台仲在左在右皆可),反查名冊回推許可證。救回者仍標 manual_review、
-    # D 欄註明,供人工快速核對。
-    if manual_review:
-        logger.info("── 步驟 4b 前置②：全無命中 → 次頁仲介電話反查名冊 ──")
-        manual_review = rescue_manual_review_via_agency_phone(batch, manual_review)
-
-    # ── 步驟 4b 前置③：非多數票低信心單一判讀救援（比照全無命中,覆寫填 B）──
-    # 這些列在步驟 4a 已「略過 ROI Vision」,此處才首次送次頁 Vision 反查名冊;
-    # 唯一命中 → B 欄換成救回的許可證、_agency_cols 補 E~G,仍標 manual_review。
-    if novote_rescue:
-        logger.info("── 步驟 4b 前置③：非多數票低信心 → 次頁仲介電話反查名冊(覆寫填 B)──")
-        novote_rescue = rescue_manual_review_via_agency_phone(batch, novote_rescue)
+    # ── 步驟 4b 前置②：反查救援（次頁台仲區塊 → 反查名冊 → 回推許可證）──
+    # 全無命中或單一判讀低信心:整頁 OCR 契約次一頁(1 次 Vision)、以『台灣仲介』標籤
+    # 錨定取電話／名稱／地址(台仲在左在右皆可),反查名冊回推許可證。救回者 B 欄換成
+    # 救回的許可證、_agency_cols 補 E~G,仍標 manual_review、D 欄註明,供人工快速核對。
+    if rescue_rows:
+        logger.info("── 步驟 4b 前置②：反查救援 → 次頁台仲區塊反查名冊 ──")
+        rescue_rows = rescue_manual_review_via_agency_phone(batch, rescue_rows)
 
     logger.info("── 步驟 4b：合併批次寫入 Google Sheets（atomic）──")
     auto_keyin_rows = keyin_rows + vision_auto_keyin
     # 讀不到圖(direct_review):B 空,D 是事實;E~G 跟著空
-    review_rows = vision_review_rows + novote_rescue + manual_review + direct_review
+    review_rows = vision_review_rows + rescue_rows + direct_review
     written = write_sheets_batched(auto_keyin_rows + review_rows, employer_by_docx)
     logger.info(
         f"  本次寫入彙總:auto_keyin={len(auto_keyin_rows)} 筆"
         f"(其中 Tesseract 直接 {len(keyin_rows)} 筆 + Vision 確認 {len(vision_auto_keyin)} 筆) "
         f"/ manual_review={len(review_rows)} 筆"
         f"(其中 Vision 交叉比對失敗 {len(vision_review_rows)} 筆 "
-        f"+ 單一判讀電話反查 {len(novote_rescue)} 筆 + 全無命中 {len(manual_review)} 件 "
+        f"+ 反查救援 {len(rescue_rows)} 件 "
         f"+ 讀不到圖 {len(direct_review)} 件)"
         f"(實際寫入 Sheets:{written} 筆)"
     )
