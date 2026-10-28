@@ -9,20 +9,19 @@ Sheets 上只有一列);舊做法逐圖決定,同一份 docx 會進佇列多次�
 多數票判斷與各信心門檻只記在這裡:停止擴掃(ADR-0005)與規則 A2 用同一個
 is_permit_vote —— 兩者不一致時,分層掃描會在 A2 不採用的值上停下來。
 
-輸入是 permit_reading 的 ScanResult(一張圖讀到的值、信心、是否多數票、兩 ROI
-是否互證、命中狀態);這裡只讀屬性,所有判斷在這裡做(ADR-0013)。permit_reading
-反過來 import 這裡的門檻與 is_permit_vote,所以只在型別標註時 import 它,免得循環匯入。
+輸入是 matches.csv 的列(matches_csv.ScanResult:一張圖讀到的值、信心、是否多數票、
+兩 ROI 是否互證、命中狀態);這裡只讀屬性,所有判斷在這裡做(ADR-0013)。
+read_decisions 讀一份 matches.csv、每份 docx 一個決定。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
+from pathlib import Path
 
+import matches_csv
 from docx_images import image_sort_key
-
-if TYPE_CHECKING:
-    from permit_reading import ScanResult
+from matches_csv import ResultStatus, ScanResult
 
 # 信心門檻
 CONF_KEY_IN       = 55   # 高於此值直接 key-in;低於則送 Google Vision
@@ -32,15 +31,10 @@ CONF_MOL_VOTE_MIN = 50   # small docx mol 多數票平均信心高於此值直�
 # 該 ROI 位置品質差,再用 Vision 掃同一位置意義不大 → 改走反查救援。
 CONF_NOVOTE_RESCUE_MAX = 50
 
-# ScanResult.status 的值(ResultStatus 是 str Enum,與字串相等)
-_LARGE_NO_HIT = "large_no_hit"
-_SMALL_NO_HIT = "small_no_hit"
-_PERMIT_PARTIAL = "permit_partial"
-
 # docx 本身讀不到圖(#47)→ Sheets D 欄。只講事實。
 _NO_IMAGE_REASONS = {
-    "no_images":       "docx 無可讀的內嵌圖(word/media 底下沒有 png/jpg/bmp/tif/gif)",
-    "unreadable":      "docx 無法開啟(不是有效的 docx 檔)",
+    ResultStatus.NO_IMAGES:  "docx 無可讀的內嵌圖(word/media 底下沒有 png/jpg/bmp/tif/gif)",
+    ResultStatus.UNREADABLE: "docx 無法開啟(不是有效的 docx 檔)",
 }
 
 
@@ -113,9 +107,14 @@ def _earliest(rows):
     return min(rows, key=lambda r: image_sort_key(r.image_name))
 
 
+def read_decisions(csv_path: Path) -> list[Decision]:
+    """讀一份 matches.csv,每份 docx 一個送審決策(依檔名排序)。"""
+    return [decide(rows) for rows in matches_csv.read(csv_path).values()]
+
+
 def decide(rows: list[ScanResult]) -> Decision:
     """一份 docx 的所有掃描結果 → 一個送審決策。"""
-    why = _NO_IMAGE_REASONS.get(rows[0].status.value)
+    why = _NO_IMAGE_REASONS.get(rows[0].status)
     if why:
         return _no_hit(rows, why, Destination.直接人工審查)
     if rows[0].docx_class == "large":
@@ -124,7 +123,7 @@ def decide(rows: list[ScanResult]) -> Decision:
 
 
 def _decide_large(rows: list[ScanResult]) -> Decision:
-    if all(r.status == _LARGE_NO_HIT for r in rows):
+    if all(r.status == ResultStatus.LARGE_NO_HIT for r in rows):
         return _no_hit(rows, f"large docx：全 {len(rows)} 張圖掃描無許可證命中")
 
     mol_rows = [(r, r.mol, r.mol_conf) for r in rows if r.mol]
@@ -158,7 +157,7 @@ def _decide_large(rows: list[ScanResult]) -> Decision:
     # 規則B(部分命中無多數)與規則C(讀值信心不足):合併後只選一張
     cands: list[tuple[ScanResult, str, float, str]] = []
     for r in rows:
-        if r.status == _PERMIT_PARTIAL:
+        if r.status == ResultStatus.PERMIT_PARTIAL:
             cands.append((r, r.id, r.id_conf, "permit部分命中無多數"))
         elif (why := _low_conf_reason(r)):
             v, c = _single_roi_value(r)
@@ -166,7 +165,7 @@ def _decide_large(rows: list[ScanResult]) -> Decision:
     if cands:
         r, v, c, why = _pick(cands)
         why = why + _others(cands, r)
-        if r.status == _PERMIT_PARTIAL and c < CONF_NOVOTE_RESCUE_MAX:
+        if r.status == ResultStatus.PERMIT_PARTIAL and c < CONF_NOVOTE_RESCUE_MAX:
             return _low_conf_rescue(r, v, c, why)
         return _decision(r, Destination.送VISION, v, c, why)
 
@@ -216,7 +215,7 @@ def _round_conf(conf: float) -> float:
 
 def _decide_small(rows: list[ScanResult]) -> Decision:
     hits = [r for r in rows if r.mol or r.id]
-    if not hits or all(r.status == _SMALL_NO_HIT for r in rows):
+    if not hits or all(r.status == ResultStatus.SMALL_NO_HIT for r in rows):
         return _no_hit(rows, f"small docx：mol ROI 全 {len(rows)} 張圖無命中")
     # winner:兩個 ROI 的信心取高者,同分取先出現者;多數票只算 winner 自己的
     r = max(hits, key=lambda h: max(h.mol_conf, h.id_conf))

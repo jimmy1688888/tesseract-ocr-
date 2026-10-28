@@ -9,23 +9,23 @@ False,整批安靜地改走衝突路徑——不拋錯、不少欄。
   - 每個欄位單獨設成非預設值 → 寫成 CSV 檔 → 讀回 → 要相等
     (一次只動一格,兩欄互相寫錯位置也抓得到)
   - 所有欄位同時設成非預設值 → 同上
-以後 ScanResult 新增欄位,自動被涵蓋;忘了加進 CSV_FIELDS 也會紅。
+以後 ScanResult 新增欄位,自動被涵蓋;忘了加進 FIELDS 也會紅。
 
 round-trip 抓不到「寫出端與讀回端一起改」——但那會讓磁碟上既有的 matches.csv
 讀錯,所以另外用一列磁碟格式釘住 bool 欄位的字面值。
 
-CSV 檔的寫法(CSV_FIELDS、utf-8-sig、newline="")照 pipeline 寫 matches.csv
-與 build_vision_queue 讀回的方式,讓 "✓" 這類非 ASCII 字面值真的過一次編碼。
+寫檔、讀檔都經 matches_csv(與許可證掃描、送審決策同一套),讓 "✓" 這類非 ASCII
+字面值真的過一次編碼。
 """
 
-import csv
 import dataclasses
 import typing
 from enum import Enum
 
 import pytest
 
-from pipeline import CSV_FIELDS, ResultStatus, ScanResult
+import matches_csv
+from matches_csv import FIELDS, ResultStatus, ScanResult, UnknownStatus
 
 
 _HINTS = typing.get_type_hints(ScanResult)
@@ -56,19 +56,14 @@ def _minimal_result() -> ScanResult:
 
 def _through_csv_file(r: ScanResult, tmp_path) -> ScanResult:
     path = tmp_path / "matches.csv"
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        writer.writerow(r.to_csv_row())
-    with open(path, encoding="utf-8-sig") as f:
-        rows = list(csv.DictReader(f))
-    assert len(rows) == 1
-    return ScanResult.from_csv_row(rows[0])
+    matches_csv.write(path, [r])
+    [[back]] = matches_csv.read(path).values()
+    return back
 
 
 def test_csv_fields_cover_every_scanresult_field():
-    assert sorted(CSV_FIELDS) == sorted(f.name for f in _FIELDS)
-    assert len(CSV_FIELDS) == len(set(CSV_FIELDS))
+    assert sorted(FIELDS) == sorted(f.name for f in _FIELDS)
+    assert len(FIELDS) == len(set(FIELDS))
 
 
 def test_defaults_round_trip(tmp_path):
@@ -121,7 +116,7 @@ _JUDGEMENT_COLUMNS = {"final_value", "final_conf", "vision_review"}
 
 
 def test_matches_csv_holds_readings_only():
-    assert not _JUDGEMENT_COLUMNS & set(CSV_FIELDS)
+    assert not _JUDGEMENT_COLUMNS & set(FIELDS)
     assert not _JUDGEMENT_COLUMNS & {f.name for f in dataclasses.fields(ScanResult)}
 
 
@@ -131,3 +126,51 @@ def test_old_files_with_judgement_columns_still_read():
             "id": "1234", "id_conf": "70.0"}
     old = {**base, "final_value": "1234", "final_conf": "70.0", "vision_review": "Y"}
     assert ScanResult.from_csv_row(old) == ScanResult.from_csv_row(base)
+
+
+# ─── status:不認得的值拋例外,空字串是沒有這欄的舊檔(#56) ───────────────
+
+def test_unknown_status_raises_naming_docx_and_value():
+    with pytest.raises(UnknownStatus, match=r"32503\.docx.*'vision_pending'"):
+        ScanResult.from_csv_row({"source_docx": "32503.docx", "status": "vision_pending"})
+
+
+def test_unknown_status_in_file_raises_on_read(tmp_path):
+    path = tmp_path / "matches.csv"
+    path.write_text("source_docx,image_name,docx_class,status\n"
+                    "a.docx,image5.jpeg,large,LARGE_NO_HIT\n", encoding="utf-8-sig")
+    with pytest.raises(UnknownStatus, match="a.docx"):
+        matches_csv.read(path)
+
+
+def test_empty_status_is_ok():
+    """沒有 status 欄的舊檔:當正常讀值。"""
+    assert ScanResult.from_csv_row({"source_docx": "a.docx"}).status is ResultStatus.OK
+    assert ScanResult.from_csv_row({"source_docx": "a.docx", "status": ""}).status is ResultStatus.OK
+
+
+# ─── 讀回成每份 docx 的列 ─────────────────────────────────────────────────
+
+def test_read_groups_by_docx_sorted_by_name_keeping_row_order(tmp_path):
+    def r(docx, img):
+        return ScanResult(source_docx=docx, image_name=img, docx_class="large")
+    path = tmp_path / "matches.csv"
+    matches_csv.write(path, [r("b.docx", "image6.jpeg"), r("a.docx", "image5.jpeg"),
+                             r("b.docx", "image2.jpeg")])
+
+    groups = matches_csv.read(path)
+
+    assert list(groups) == ["a.docx", "b.docx"]
+    assert [x.image_name for x in groups["b.docx"]] == ["image6.jpeg", "image2.jpeg"]
+
+
+def test_matches_csv_imports_nothing_from_the_project():
+    """leaf module:讀 matches.csv 不必載入掃描或整條流程。"""
+    import ast
+    from pathlib import Path
+    tree = ast.parse(Path(matches_csv.__file__).read_text(encoding="utf-8"))
+    imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    imported |= {n.module.split(".")[0] for n in ast.walk(tree)
+                 if isinstance(n, ast.ImportFrom) and n.module}
+    project = {p.stem for p in Path(matches_csv.__file__).parent.glob("*.py")}
+    assert not imported & project

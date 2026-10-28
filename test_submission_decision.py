@@ -11,7 +11,7 @@ CONTEXT.md「送審決策」:去向(直接 key-in／送 Vision／反查救援)�
 """
 import pytest
 
-from pipeline import ResultStatus, ScanResult
+from matches_csv import ResultStatus, ScanResult
 from submission_decision import (CONF_KEY_IN, CONF_MOL_VOTE_MIN, CONF_NOVOTE_RESCUE_MAX,
                                  CONF_VOTE_MIN, Destination, decide, is_permit_vote)
 
@@ -353,15 +353,11 @@ class TestVotePredicate:
 
 def test_queue_has_one_item_per_docx(tmp_path):
     """matches.csv 一份 docx 兩列(兩張圖都需送 Vision)→ 佇列只有一筆。"""
-    import csv
-
+    import matches_csv
     import pipeline
     p = tmp_path / "matches.csv"
-    with open(p, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=pipeline.CSV_FIELDS)
-        w.writeheader()
-        w.writerow(_permit("image5.jpeg", "1234", 52, partial=True).to_csv_row())
-        w.writerow(_permit("image6.jpeg", "1284", 60, partial=True).to_csv_row())
+    matches_csv.write(p, [_permit("image5.jpeg", "1234", 52, partial=True),
+                          _permit("image6.jpeg", "1284", 60, partial=True)])
     vision, manual, keyin, _ = pipeline.build_vision_queue(p)
     assert [(i.source_docx, i.image_name) for i in vision + keyin] == [("a.docx", "image6.jpeg")]
     assert manual == []
@@ -369,13 +365,9 @@ def test_queue_has_one_item_per_docx(tmp_path):
 
 def test_queue_items_carry_the_crop_roi(tmp_path):
     """送 Vision 的項目帶著截圖屬於哪個 ROI(#41 依此選取號 pattern)。"""
-    import csv
-
+    import matches_csv
     import pipeline
     p = tmp_path / "matches.csv"
-    with open(p, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=pipeline.CSV_FIELDS)
-        w.writeheader()
-        w.writerow(_permit("image5.jpeg", "1234", 60, partial=True).to_csv_row())
+    matches_csv.write(p, [_permit("image5.jpeg", "1234", 60, partial=True)])
     vision, manual, keyin, _ = pipeline.build_vision_queue(p)
     assert [i.hit_roi for i in vision] == ["permit_lower"]

@@ -9,7 +9,6 @@ diff 交人看過。pytest 只比對、絕不寫入,也不打任何 API。
 素材:舊 21 份的 matches.csv(samples/legacy/)與新素材在本機掃出的 matches.csv
 (samples/permit_scan/<日期>/ 最新的某日掃描)。都不進版控,不在就 skip。
 """
-import csv
 
 import pytest
 
@@ -119,7 +118,8 @@ class TestDecisionsMismatch:
         assert snap.decisions_snapshot_path().read_bytes() == before
 
 
-from pipeline import ResultStatus  # noqa: E402
+import matches_csv  # noqa: E402
+from matches_csv import ResultStatus, ScanResult  # noqa: E402
 
 LARGE_NO_HIT = ResultStatus.LARGE_NO_HIT
 PERMIT_PARTIAL = ResultStatus.PERMIT_PARTIAL
@@ -132,13 +132,8 @@ class TestDefaultDecisionsAdapter:
 
     def _csv(self, tmp_path, rows):
         """經 ScanResult 的正式序列化寫出 matches.csv(旗標的字面值不自己猜)。"""
-        import pipeline
         p = tmp_path / "matches.csv"
-        with open(p, "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=pipeline.CSV_FIELDS)
-            w.writeheader()
-            for r in rows:
-                w.writerow(pipeline.ScanResult(**r).to_csv_row())
+        matches_csv.write(p, [ScanResult(**r) for r in rows])
         return p
 
     def test_three_destinations(self, tmp_path):

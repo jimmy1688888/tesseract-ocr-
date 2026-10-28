@@ -160,13 +160,13 @@ def decisions_snapshot_path() -> Path:
 def _default_decisions(csv_path: Path) -> dict[str, list[dict[str, str]]]:
     """現行送審程式 → 快照的形狀。#40 重構時只換這一層。
 
-    讀送審決策本身(pipeline.read_decisions),不讀佇列:#12 之後直接 key-in 在佇列裡
-    已是寫 Sheets 的列,不帶被選的那張圖。
+    讀送審決策本身(submission_decision.read_decisions),不讀佇列:#12 之後直接 key-in
+    在佇列裡已是寫 Sheets 的列,不帶被選的那張圖。不載入整條流程(pipeline)。
     """
-    import pipeline
+    from submission_decision import read_decisions
     return {d.source_docx: [{"去向": d.destination.value, "候選值": d.candidate_value,
                              "圖": d.image_name, "理由": d.reason}]
-            for d in pipeline.read_decisions(csv_path)}
+            for d in read_decisions(csv_path)}
 
 
 def current_decisions(decide: Callable[[Path], dict] | None = None) -> dict[str, list[dict[str, str]]]:

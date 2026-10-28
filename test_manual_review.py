@@ -12,6 +12,7 @@ from functools import partial
 
 import pytest
 
+import matches_csv
 import pipeline as P
 from batch import Batch
 from real_samples import old_matches_csv
@@ -45,10 +46,10 @@ class TestFlagIsSetWithReasonInNote:
 
         rows = _csv_rows(tmp_path / "matches.csv")
         assert len(rows) == 2
-        for r in map(P.ScanResult.from_csv_row, rows):
+        for r in map(matches_csv.ScanResult.from_csv_row, rows):
             assert r.manual_review is True
             assert r.note == "small:無命中"
-            assert r.status == P.ResultStatus.SMALL_NO_HIT
+            assert r.status == matches_csv.ResultStatus.SMALL_NO_HIT
 
     def test_large_docx_without_any_hit(self, monkeypatch, tmp_path):
         monkeypatch.setattr(P.docx_images, "read_images",
@@ -58,7 +59,7 @@ class TestFlagIsSetWithReasonInNote:
                    read_large=lambda *a, **k: None)
 
         [row] = _csv_rows(tmp_path / "matches.csv")
-        r = P.ScanResult.from_csv_row(row)
+        r = matches_csv.ScanResult.from_csv_row(row)
         assert r.manual_review is True
         assert r.note == "large:全無命中"
 
@@ -69,7 +70,7 @@ class TestFlagIsSetWithReasonInNote:
     ("", False),
 ])
 def test_old_csv_values_read_back(on_disk, expected):
-    r = P.ScanResult.from_csv_row({"source_docx": "a.docx", "manual_review": on_disk})
+    r = matches_csv.ScanResult.from_csv_row({"source_docx": "a.docx", "manual_review": on_disk})
     assert r.manual_review is expected
 
 
@@ -83,19 +84,15 @@ def test_real_old_matches_csv(tmp_path):
     needs_review = lambda v: bool(v.strip())
     assert any(needs_review(row["manual_review"]) for row in raw), "素材裡沒有需要人工的列,驗不到東西"
 
-    results = [P.ScanResult.from_csv_row(row) for row in raw]
+    results = [matches_csv.ScanResult.from_csv_row(row) for row in raw]
     for row, r in zip(raw, results):
         assert r.manual_review is needs_review(row["manual_review"]), row["source_docx"]
 
     out = tmp_path / "matches.csv"
-    with open(out, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=P.CSV_FIELDS)
-        writer.writeheader()
-        for r in results:
-            writer.writerow(r.to_csv_row())
+    matches_csv.write(out, results)
     rewritten = _csv_rows(out)
 
-    assert [P.ScanResult.from_csv_row(row) for row in rewritten] == results
+    assert [matches_csv.ScanResult.from_csv_row(row) for row in rewritten] == results
     for old, new in zip(raw, rewritten):
         for col in old:
             if col in ("final_value", "final_conf", "vision_review"):

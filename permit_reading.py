@@ -10,13 +10,12 @@
 
 讀值不在這裡判斷:門檻、small 的 winner、要不要送 Vision 只在送審決策(ADR-0013)。
 
-送審決策(一份 docx 一個決定)在 submission_decision,吃這裡的 ScanResult。
+一張圖的讀值整理成 matches.csv 的一列(ScanResult,在 matches_csv);
+送審決策(一份 docx 一個決定)在 submission_decision。
 """
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
-from enum import Enum
 import logging
 from pathlib import Path
 from typing import Callable, NamedTuple
@@ -25,6 +24,7 @@ import pytesseract
 from pytesseract import Output
 
 import docx_images
+from matches_csv import ResultStatus, ScanResult
 from permit_patterns import RE_PERMIT_ID_LIST_LOWER, find_permits, permit_id_patterns
 from pixels import preprocess
 from submission_decision import (
@@ -90,173 +90,6 @@ PERMIT_VOTE_CONFIGS = [c for c in SCAN_CONFIGS if c["name"] in _VOTE_NAMES]
 
 
 
-class ResultStatus(str, Enum):
-    """OCR 掃描結果的狀態。供下游送審決策(submission_decision)做分派判斷。
-
-    用 enum 取代過去用 note 文字比對（例如 "large:全無命中"）的方式：
-    note 是給人看的描述，會因措辭調整而變動；status 才是給程式判斷的單一真相來源。
-    """
-    OK             = "ok"               # 正常命中，走後續決策
-    LARGE_NO_HIT   = "large_no_hit"     # large docx 全部圖片都沒命中
-    SMALL_NO_HIT   = "small_no_hit"     # small docx 全部圖片都沒命中
-    PERMIT_PARTIAL = "permit_partial"   # permit 有部分命中但無多數票
-    # docx 本身讀不到圖(#47):沒有可掃的東西,佔位列是它在 matches.csv 的唯一代表
-    NO_IMAGES      = "no_images"        # 0 張可讀內嵌圖(沒有 word/media,或只有 .emf 之類)
-    UNREADABLE     = "unreadable"       # 打不開(不是有效的 zip,或壓縮資料損壞)
-
-
-
-# ─── CSV 欄位順序（同時供寫入與讀取使用，避免兩端走樣） ───────────────────
-CSV_FIELDS = [
-    "source_docx", "image_name", "docx_class", "scan_tier",
-    "mol", "mol_layer", "mol_conf", "mol_from_vote",
-    "id",  "id_layer",  "id_conf",  "id_from_vote",
-    "cross_match",
-    "note", "manual_review", "low_conf", "hit_config", "hit_roi",
-    "mol_crop", "permit_crop",
-    "status",
-]
-
-
-@dataclass
-class ScanResult:
-    """一張圖的 OCR 掃描結果。
-
-    這個 dataclass 取代了過去用 dict 表達結果的方式，解掉三類問題：
-
-    1. 型別契約：mol_conf 過去可能是 "" / float / "67.3"（從 CSV 讀回時）三種型別，
-       下游每次都得呼叫 _to_f() 翻譯。現在它就是 float，永遠是 float。
-
-    2. 拼字防呆：r["mol_cnof"] = 80 過去會默默建立一個沒人讀的新 key 而不報錯；
-       r.mol_cnof = 80 現在會在執行時拋 AttributeError，IDE 也標紅。
-
-    3. 隱性狀態：cross_match 過去是 "✓" / ""，靠字串比對判斷真假；
-       現在是 bool，意圖明確。manual_review 過去混著
-       "Y" 與整句理由，現在也是 bool，理由寫在 note。
-
-    CSV 邊界由 to_csv_row()/from_csv_row() 處理。寫到磁碟仍是字串
-    （"Y" / "✓" / "" / "80.0"），人類看 CSV 跟以前一樣。
-    """
-    # ─── 識別欄位（必填） ─────────────────────────────────────────────────
-    source_docx: str
-    image_name: str
-    docx_class: str            # "small" / "large"
-    # 這張圖是在第幾層被掃到的:1=第一層(TIER1_IMAGES)，2=第一層沒拿到 permit
-    # 多數票後的擴掃。small 與 --full-scan 一律為 1。純觀測欄位，不參與任何決策
-    # ——它存在是為了讓「第一層命中率崩掉」這件事看得見(見 ADR-0005)。
-    scan_tier: int = 1
-
-    # ─── OCR 結果 ────────────────────────────────────────────────────────
-    mol: str = ""
-    mol_layer: int = 0
-    mol_conf: float = 0.0
-    id: str = ""
-    id_layer: int = 0
-    id_conf: float = 0.0
-
-    # ─── 讀值與掃描觀測(判斷不在這裡,在送審決策,ADR-0013) ─────────────
-    cross_match: bool = False  # mol 與 permit 兩 ROI 互證
-    note: str = ""             # 掃描當下的觀測(例如佔位列為什麼沒有讀值)
-    status: ResultStatus = ResultStatus.OK
-
-    # ─── 詮釋資料 ────────────────────────────────────────────────────────
-    manual_review: bool = False  # 要不要人工；「為什麼」寫在 note
-    low_conf: str = ""         # 低信心 crop 圖檔路徑
-    hit_config: str = ""       # 命中時用的 Tesseract config 名稱
-    hit_roi: str = ""          # 命中時的 ROI 名稱
-    mol_crop: str = ""         # mol crop 圖檔路徑
-    permit_crop: str = ""      # permit crop 圖檔路徑
-
-    # ─── 內部 flag（取代過去的 _id_from_vote） ───────────────────────────
-    id_from_vote:  bool = False
-    mol_from_vote: bool = False   # mol 值來自多數票（PERMIT_VOTE_CONFIGS 那幾組的多數票）
-
-    # ─── 序列化 ──────────────────────────────────────────────────────────
-    def to_csv_row(self) -> dict[str, str]:
-        """轉成 CSV 用的 str dict。
-
-        慣例（與重構前的 CSV 完全一致，使人類觀察 CSV 無感）：
-          - bool 欄位 → "Y" / "✓" / ""
-          - float 為 0 → ""（保留「未設定」的視覺差異）
-          - int 為 0 → ""
-          - enum  → 其 .value 字串
-        """
-        return {
-            "source_docx":   self.source_docx,
-            "image_name":    self.image_name,
-            "docx_class":    self.docx_class,
-            "scan_tier":     str(self.scan_tier),
-            "mol":           self.mol,
-            "mol_layer":     str(self.mol_layer) if self.mol_layer else "",
-            "mol_conf":      f"{self.mol_conf:.1f}" if self.mol_conf else "",
-            "mol_from_vote": "Y" if self.mol_from_vote else "",
-            "id":            self.id,
-            "id_layer":      str(self.id_layer) if self.id_layer else "",
-            "id_conf":       f"{self.id_conf:.1f}" if self.id_conf else "",
-            "id_from_vote":  "Y" if self.id_from_vote else "",
-            "cross_match":   "✓" if self.cross_match else "",
-            "note":          self.note,
-            "manual_review": "Y" if self.manual_review else "",
-            "low_conf":      self.low_conf,
-            "hit_config":    self.hit_config,
-            "hit_roi":       self.hit_roi,
-            "mol_crop":      self.mol_crop,
-            "permit_crop":   self.permit_crop,
-            "status":        self.status.value,
-        }
-
-    @classmethod
-    def from_csv_row(cls, row: dict[str, str]) -> "ScanResult":
-        """從 CSV 一列重建 ScanResult。
-
-        集中處理 str → 型別轉換，過去這段邏輯散在 _to_f / 各種讀取點。
-        現在只此一處需要關心 CSV 格式細節。
-        """
-        def to_float(s: str) -> float:
-            try:
-                return float(s) if s else 0.0
-            except ValueError:
-                return 0.0
-
-        def to_int(s: str) -> int:
-            try:
-                return int(s) if s else 0
-            except ValueError:
-                return 0
-
-        status_str = row.get("status", "")
-        try:
-            status = ResultStatus(status_str) if status_str else ResultStatus.OK
-        except ValueError:
-            status = ResultStatus.OK
-
-        return cls(
-            source_docx   = row.get("source_docx", ""),
-            image_name    = row.get("image_name", ""),
-            docx_class    = row.get("docx_class", ""),
-            # 舊 CSV 沒有這欄 → 視為第一層,不讓缺欄變成無意義的 0
-            scan_tier     = to_int(row.get("scan_tier", "")) or 1,
-            mol           = row.get("mol", ""),
-            mol_layer     = to_int(row.get("mol_layer", "")),
-            mol_conf      = to_float(row.get("mol_conf", "")),
-            mol_from_vote = (row.get("mol_from_vote", "") == "Y"),
-            id            = row.get("id", ""),
-            id_layer      = to_int(row.get("id_layer", "")),
-            id_conf       = to_float(row.get("id_conf", "")),
-            id_from_vote  = (row.get("id_from_vote", "") == "Y"),
-            cross_match   = (row.get("cross_match", "") == "✓"),
-            # ADR-0013 之前的檔還帶 final_value/final_conf/vision_review:判斷,不讀
-            note          = row.get("note", ""),
-            # 舊 CSV 除了 "Y" 還有整句理由(「mol 無值，需人工判斷」)——非空一律
-            # 算需要人工，不能讓它安靜變成 False、脫離人工審查
-            manual_review = bool(row.get("manual_review", "").strip()),
-            low_conf      = row.get("low_conf", ""),
-            hit_config    = row.get("hit_config", ""),
-            hit_roi       = row.get("hit_roi", ""),
-            mol_crop      = row.get("mol_crop", ""),
-            permit_crop   = row.get("permit_crop", ""),
-            status        = status,
-        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

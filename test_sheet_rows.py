@@ -9,13 +9,15 @@ Vision 結果 dict、novote_rescue dict),還有 main 裡一次現場翻譯;重�
 名冊、台仲區塊、許可證全部捏造。
 """
 import argparse
-import csv
 
 import pytest
 
 import employer_extract
 import google_clients
+import matches_csv
 import pipeline as P
+import submission_decision
+from matches_csv import ScanResult
 from employer_result import EmployerExtraction, EmployerValues, ExtractionStatus
 from submission_decision import Decision, Destination
 
@@ -123,11 +125,8 @@ def world(monkeypatch, tmp_path):
     def fake_scan(batch, **kw):
         path = batch.matches_csv
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8-sig", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=P.CSV_FIELDS)
-            w.writeheader()
-            for p in batch.docx_files:
-                w.writerow(P.ScanResult(source_docx=p.name, image_name="x", docx_class="large").to_csv_row())
+        matches_csv.write(path, [ScanResult(source_docx=p.name, image_name="x", docx_class="large")
+                                 for p in batch.docx_files])
         return path
 
     employer = {"k.docx": EmployerExtraction(
@@ -138,7 +137,7 @@ def world(monkeypatch, tmp_path):
 
     sheets = []
     monkeypatch.setattr(P, "run_scan", fake_scan)
-    monkeypatch.setattr(P, "decide", lambda rows: by_name[rows[0].source_docx])
+    monkeypatch.setattr(submission_decision, "decide", lambda rows: by_name[rows[0].source_docx])
     monkeypatch.setattr(P, "vision_text", lambda path: texts[path])
     monkeypatch.setattr(P, "collect_employer_fields", lambda batch: employer)
     monkeypatch.setattr(P, "_permit_lookup", lambda: FakeRoster())

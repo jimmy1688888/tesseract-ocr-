@@ -57,7 +57,6 @@ import argparse
 import functools
 import zipfile
 import zlib
-from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
@@ -144,14 +143,17 @@ INPUT_DIR  = Path("./docs")
 # 送審決策的門檻只記一份,在 submission_decision(#40);這裡只是照舊可從 pipeline 取得。
 from submission_decision import (  # noqa: E402
     CONF_KEY_IN, CONF_MOL_VOTE_MIN, CONF_VOTE_MIN,
-    Decision, Destination, decide, is_permit_vote)
+    Decision, Destination, decide, is_permit_vote, read_decisions)
+# matches.csv(許可證掃描結果)的形狀、寫、讀在 matches_csv。
+import matches_csv  # noqa: E402
+from matches_csv import ResultStatus, ScanResult  # noqa: E402
 
 # 一張圖的 image bytes → 一次判讀(ROI、Tesseract 設定、多數票、分層掃描)
 # 都在 permit_reading(#19)。這裡匯入流程用到的名字;其餘照舊可從 pipeline 取得。
 from permit_reading import (  # noqa: E402,F401
-    CSV_FIELDS, FALLBACK_CONFIGS, PERMIT_VOTE_CONFIGS, ROI_REGIONS, SCAN_CONFIGS,
+    FALLBACK_CONFIGS, PERMIT_VOTE_CONFIGS, ROI_REGIONS, SCAN_CONFIGS,
     TESS_LANG, TIER1_IMAGES, WHITELIST_LATIN, Crop, LargeDocxReading, Reading,
-    ResultStatus, ScanResult, Vote, build_tess_config,
+    Vote, build_tess_config,
     has_permit_vote, majority_vote, ocr_with_conf, read_large_docx,
     roi_field, scan_image_large, scan_image_mol_only, split_tiers, tesseract,
     _empty_result)
@@ -275,16 +277,6 @@ class SubmissionQueue(NamedTuple):
     rescue: list[SheetRow]          # 反查救援的種子列:B 欄是候選值(單一判讀低信心)或空(全無命中)
     keyin: list[SheetRow]           # 直接 key-in:結果已定,列已建好
     direct_review: list[SheetRow]   # docx 讀不到圖,直接人工審查(不送 Vision、不反查)
-
-
-def read_decisions(csv_path: Path) -> list[Decision]:
-    """讀取 matches.csv,每份 docx 一個送審決策(依檔名排序)。"""
-    groups: dict[str, list[ScanResult]] = defaultdict(list)
-    with open(csv_path, encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
-            sr = ScanResult.from_csv_row(row)
-            groups[sr.source_docx].append(sr)
-    return [decide(rows) for _name, rows in sorted(groups.items())]
 
 
 def build_vision_queue(csv_path: Path) -> SubmissionQueue:
@@ -731,9 +723,7 @@ def run_scan(batch: Batch, image_filter: str = "",
     large_docs = tier1_docs = expanded_docs = 0
     t0 = time.time()
 
-    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        writer.writeheader()
+    with matches_csv.writer(csv_path) as writer:
 
         for docx_path in batch.docx_files:
             all_images = read_docx_images(docx_path)
@@ -744,7 +734,7 @@ def run_scan(batch: Batch, image_filter: str = "",
                 placeholder = _empty_result(docx_path.name, "", "")
                 placeholder.manual_review = True
                 placeholder.status, placeholder.note = nothing
-                writer.writerow(placeholder.to_csv_row())
+                writer.write(placeholder)
                 logger.warning(f"  ⚠ {docx_path.name} {placeholder.note} → 直接人工審查")
                 continue
 
@@ -799,7 +789,7 @@ def run_scan(batch: Batch, image_filter: str = "",
                         upper_hits += 1
                     elif result.hit_roi == "permit_lower":
                         lower_hits += 1
-                    writer.writerow(result.to_csv_row())
+                    writer.write(result)
 
             large_hit_count = len(large_rows)
 
@@ -814,7 +804,7 @@ def run_scan(batch: Batch, image_filter: str = "",
                 # 代表。擴掃過就得標 2 —— 否則「大量擴掃且仍沒命中」(規則過期
                 # 最典型的表現)在 scan_tier 欄上完全看不出來。
                 fallback.scan_tier     = 2 if expanded else 1
-                writer.writerow(fallback.to_csv_row())
+                writer.write(fallback)
                 saved = _save_review_images(batch.no_hit_review_dir, docx_path,
                                             images, {2, 5, 6})
                 logger.info(
@@ -832,7 +822,7 @@ def run_scan(batch: Batch, image_filter: str = "",
                         r.status, r.note = ResultStatus.SMALL_NO_HIT, "small:無命中"
                     to_write = small_bucket
                 for result in to_write:
-                    writer.writerow(result.to_csv_row())
+                    writer.write(result)
                     logger.info(
                         f"★ {docx_path.name} / {result.image_name}"
                         f"  [small|{result.hit_roi}]"
