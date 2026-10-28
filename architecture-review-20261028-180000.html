@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>架構檢視 — LinaOCR 2026-10-28(#55~#59 之後)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+<style>
+  .seam { border-style: dashed; }
+  .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #f8fafc; }
+  .label { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900 font-sans">
+<main class="max-w-5xl mx-auto px-6 py-12 space-y-12">
+
+<header class="space-y-3">
+  <h1 class="font-serif text-3xl">架構檢視 · LinaOCR</h1>
+  <p class="text-sm text-slate-500">2026-10-28 第八次 · 範圍:#55~#59 落地後的熱點(pipeline.py 17 次、permit_reading.py 11 次 commit)· 新候選 AF~AI</p>
+  <div class="flex flex-wrap gap-4 text-xs text-slate-600">
+    <span><span class="inline-block w-4 h-3 border border-slate-500 align-middle"></span> module</span>
+    <span><span class="inline-block w-4 h-3 border border-dashed border-slate-500 align-middle"></span> seam</span>
+    <span><span class="inline-block w-4 h-0.5 bg-red-600 align-middle"></span> 洩漏</span>
+    <span><span class="inline-block w-4 h-3 deep align-middle"></span> deep module</span>
+  </div>
+</header>
+
+<section id="candidates" class="space-y-10">
+
+<!-- AF -->
+<article id="AF" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4 shadow-sm">
+  <h2 class="font-serif text-2xl">AF · 許可證掃描交出寫好的列</h2>
+  <div class="flex gap-2 text-xs">
+    <span class="rounded bg-emerald-100 text-emerald-800 px-2 py-0.5">Strong</span>
+    <span class="rounded bg-slate-100 text-slate-700 px-2 py-0.5">local-substitutable(輸出目錄 = tmp)</span>
+  </div>
+  <ul class="font-mono text-sm text-slate-600">
+    <li>permit_reading.py:210-231(CropKind、Crop、Reading)、363、581-605</li>
+    <li>pipeline.py:661-754(_write_crops、run_scan)</li>
+    <li>scan_snapshot.py:111-125(_relative)· test_crop_writes.py:106</li>
+  </ul>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><p class="label text-slate-500 mb-2">Before:一列要四個地方改才完成</p>
+<pre class="mermaid">
+flowchart TB
+  A[scan_image_*<br/>填讀值] --> R((ScanResult<br/>可變))
+  B[_read_tier<br/>補 scan_tier] --> R
+  C[_small_rows<br/>改 status/note] --> R
+  D[pipeline._write_crops<br/>CropKind → 填路徑] --> R
+  R -->|絕對路徑| M[matches.csv]
+  M -.剝前綴.-> S[scan_snapshot._relative]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class D,S leak
+</pre></div>
+    <div class="rounded-lg border border-slate-200 p-3"><p class="label text-slate-500 mb-2">After:掃描 module 交出完成的列</p>
+<pre class="mermaid">
+flowchart TB
+  I[圖的來源 · Ocr · 輸出目的地] --> P
+  subgraph P[許可證掃描 module]
+    direction TB
+    x[讀值 → 分層 → 寫列規則 → 寫裁切圖]
+  end
+  P --> L[完成的列(路徑相對輸出目錄)]
+  L --> RS[run_scan:迭代一批 + log]
+  style P fill:#0f172a,color:#f8fafc
+</pre></div>
+  </div>
+  <p><b>Problem</b>:裁切圖「寫到哪一格」跨 seam 才決定 —— CropKind 的存在理由只是告訴 pipeline 填哪個欄位;寫回的是絕對路徑,輸出目錄洩漏進 matches.csv。</p>
+  <p><b>Solution</b>:許可證掃描 module 自己完成一列(含寫裁切圖),run_scan 只剩迭代一批與 log。</p>
+  <ul class="list-disc pl-6 text-sm space-y-1">
+    <li>刪 CropKind、_write_crops:複雜度集中</li>
+    <li>locality:一列只在一個 module 成形</li>
+    <li>測試不再 patch docx_images.read_images</li>
+    <li>掃描快照不必剝路徑前綴</li>
+  </ul>
+  <div class="rounded bg-amber-50 border border-amber-200 px-3 py-2 text-sm">ADR-0013:matches.csv 只存讀值與觀測 —— 絕對路徑其實是輸出位置,不是觀測。改成相對路徑時,送審決策交給 Vision 的 <code>img_path</code> 要改由一批的輸出目錄解析(grill 要問)。</div>
+</article>
+
+<!-- AG -->
+<article id="AG" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4 shadow-sm">
+  <h2 class="font-serif text-2xl">AG · Tesseract 一個 adapter</h2>
+  <div class="flex gap-2 text-xs">
+    <span class="rounded bg-emerald-100 text-emerald-800 px-2 py-0.5">Strong</span>
+    <span class="rounded bg-slate-100 text-slate-700 px-2 py-0.5">ports &amp; adapters</span>
+  </div>
+  <ul class="font-mono text-sm text-slate-600">
+    <li>pipeline.py:94(import 副作用設 tesseract_cmd)、778-807(preflight 檢查語言包)</li>
+    <li>employer_extract.py:185-193(_ensure_tesseract,同一路徑再寫一次)</li>
+    <li>permit_reading.py:38(TESS_LANG)、136-153(tesseract、ocr_with_conf)</li>
+    <li>scan_snapshot.py:35(Ocr 型別重宣告)、180(import pipeline 只為副作用)</li>
+  </ul>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><p class="label text-slate-500 mb-2">Before:三處各握一塊</p>
+<pre class="mermaid">
+flowchart LR
+  PL[pipeline<br/>exe 路徑 · preflight] -. import 副作用 .-> PR[permit_reading<br/>語言 · image_to_data]
+  EE[employer_extract<br/>exe 路徑(再一份)] --> T[(pytesseract 全域)]
+  PL --> T
+  PR --> T
+  SS[scan_snapshot] -. import pipeline .-> PL
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class PL,SS leak
+</pre></div>
+    <div class="rounded-lg border border-slate-200 p-3"><p class="label text-slate-500 mb-2">After:一個 adapter,兩邊共用</p>
+<pre class="mermaid">
+flowchart LR
+  PR[許可證掃描] --> TA
+  EE[雇主擷取] --> TA
+  PF[preflight] --> TA
+  TA[Tesseract adapter<br/>exe · 語言 · image_to_data · 檢查]
+  style TA fill:#0f172a,color:#f8fafc
+</pre></div>
+  </div>
+  <p><b>Problem</b>:permit_reading 的預設 Ocr 自己跑不起來 —— 要「有人先 import 過 pipeline」才找得到 exe;雇主側另寫一份同樣的路徑。</p>
+  <p><b>Solution</b>:一個 Tesseract adapter 擁有 exe 位置、語言與呼叫,許可證、雇主、preflight 都經它。</p>
+  <ul class="list-disc pl-6 text-sm space-y-1">
+    <li>刪 import 副作用</li>
+    <li>leverage:一個 adapter,三個呼叫端</li>
+    <li>真 adapter + 假 Ocr:seam 成真</li>
+    <li>X(雇主 OCR 注入)的前置</li>
+  </ul>
+  <p class="text-xs text-slate-500">關聯:X(雇主擷取的 OCR 由參數注入)、L(preflight 搬出)。新的是許可證側也靠副作用。</p>
+</article>
+
+<!-- AH -->
+<article id="AH" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4 shadow-sm">
+  <h2 class="font-serif text-2xl">AH · 一次掃描的形狀:命中、small/large、ROI 身分只說一次</h2>
+  <div class="flex gap-2 text-xs">
+    <span class="rounded bg-amber-100 text-amber-800 px-2 py-0.5">Worth exploring</span>
+    <span class="rounded bg-slate-100 text-slate-700 px-2 py-0.5">in-process</span>
+  </div>
+  <ul class="font-mono text-sm text-slate-600">
+    <li>命中謂詞 mol or id:permit_reading.py:576 · pipeline.py:721 · submission_decision.py:217</li>
+    <li>ROI 名稱字串:permit_reading.py:363 CropKind(field) · pipeline.py:723-725 · submission_decision.py:80 · permit_patterns.py:82</li>
+    <li>small/large/分層:DocxScan.docx_class(字串)+ tier(TierOutcome | None)+ scan_tier(int)</li>
+  </ul>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><p class="label text-slate-500 mb-2">Before:同一個概念散在多處</p>
+      <div class="space-y-2 text-xs">
+        <div class="border-l-4 border-red-400 pl-2">「命中」× 3 份</div>
+        <div class="border-l-4 border-red-400 pl-2">"permit_upper" 字串 × 4 個 module</div>
+        <div class="border-l-4 border-red-400 pl-2">docx_class "" + tier None = 讀不到圖(兩欄表一件事)</div>
+        <div class="border-l-4 border-red-400 pl-2">TierOutcome → scan_tier 對應 × 2 處</div>
+      </div></div>
+    <div class="rounded-lg border border-slate-200 p-3"><p class="label text-slate-500 mb-2">After:一處定義,其餘引用</p>
+      <div class="deep rounded p-4 text-xs space-y-1">
+        <div>一份 docx 的種類:讀不到圖 / small / large(分層結果只屬 large)</div>
+        <div>ROI 身分:mol / permit 上半 / permit 下半</div>
+        <div>命中:一個謂詞</div>
+      </div></div>
+  </div>
+  <p><b>Problem</b>:「small 配擴掃」寫得出來;新增一個 ROI 名稱,CropKind(field) 會丟 ValueError。</p>
+  <p><b>Solution</b>:把這三個概念各收成一個型別或謂詞;small/large 補進 CONTEXT。</p>
+  <ul class="list-disc pl-6 text-sm space-y-1">
+    <li>不可能的組合無法表達</li>
+    <li>locality:ROI 改名只動一處</li>
+    <li>run_scan 的統計由掃描回報</li>
+  </ul>
+  <p class="text-xs text-slate-500">和 AF 同一批檔案;做 AF 時順收最省。</p>
+</article>
+
+<!-- AI -->
+<article id="AI" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4 shadow-sm">
+  <h2 class="font-serif text-2xl">AI · 掃描快照與送審快照接成一張網</h2>
+  <div class="flex gap-2 text-xs">
+    <span class="rounded bg-slate-200 text-slate-700 px-2 py-0.5">Speculative</span>
+    <span class="rounded bg-slate-100 text-slate-700 px-2 py-0.5">local-substitutable</span>
+  </div>
+  <ul class="font-mono text-sm text-slate-600">
+    <li>scan_snapshot.py:96-125、128-160(differences)</li>
+    <li>snapshots.py:74(_changed_cells)、160-237(_decision_changes)</li>
+    <li>real_samples.py:197-204(permit_scans:舊 21 份 + 最新某日掃描)</li>
+  </ul>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><p class="label text-slate-500 mb-2">Before:兩張網、兩組輸入</p>
+<pre class="mermaid">
+flowchart LR
+  D[15 份 docx] --> SS[掃描快照<br/>matches 29 列]
+  L[legacy 21 份 CSV] --> DS[送審快照 36 份]
+  PS[最新某日掃描 CSV] --> DS
+  SS -. 沒接上 .- DS
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class SS,DS leak
+</pre></div>
+    <div class="rounded-lg border border-slate-200 p-3"><p class="label text-slate-500 mb-2">After:同一批輸入一路守到決策</p>
+<pre class="mermaid">
+flowchart LR
+  D[15 份 docx] --> SS[掃描快照] --> DS[送審快照]
+  L[legacy 21 份] --> DS
+  style SS fill:#0f172a,color:#f8fafc
+  style DS fill:#0f172a,color:#f8fafc
+</pre></div>
+  </div>
+  <p><b>Problem</b>:差異比對三套、重錄規則兩種(加日期留存 vs 已有就拒絕);某日掃描若沒重跑,送審快照守的是舊的掃描輸出。</p>
+  <p><b>Solution</b>:送審快照的新素材改吃掃描快照錄下的 matches;快照家族共用一套差異與重錄規則。</p>
+  <ul class="list-disc pl-6 text-sm space-y-1">
+    <li>錄一次,守兩段</li>
+    <li>差異比對只一份</li>
+  </ul>
+  <p class="text-xs text-slate-500">Speculative:目前兩張網各自守得住;等某日掃描與掃描快照真的分歧再做。</p>
+</article>
+
+<!-- notes -->
+<article class="rounded-xl border border-slate-200 bg-white p-6 space-y-3 shadow-sm">
+  <h2 class="font-serif text-xl">併入既有候選 / 小事</h2>
+  <ul class="list-disc pl-6 text-sm space-y-2">
+    <li><b>AC 補證據</b>:<code>build_vision_queue(csv_path)</code> 收路徑不收決定,測分流得先寫假 matches.csv 再 patch <code>submission_decision.decide</code>(test_sheet_rows.py:125-147,一支測試 8 個替身)。pipeline 剩下重試、Google 錯誤分類、Vision/Sheets adapter、雇主彙整、反查、掃描外殼、preflight、CLI —— 是 adapter 集散地,不是一個 module(→ AC、V、2、L、K、3)。</li>
+    <li><b>小事(非票)</b>:<code>permit_reading.py:391</code> log 仍寫「標記送 Vision」—— 違反 2517577「掃描 log 不預告去向」,且 conf&lt;50 時其實走反查救援,log 是錯的;<code>has_permit_vote</code> docstring 在講規則 A2/B。</li>
+    <li><b>小事</b>:<code>permit_reading._review_images</code> 自己用 regex 解析圖序,與 <code>docx_images.image_index</code> 重複(行為對非 imageN 檔名不同,刻意照搬,收斂時要決定)。</li>
+    <li><b>小事</b>:CONTEXT 沒有 small/large 詞條,但已跨 module 當判斷鍵(AH 時補)。</li>
+    <li><b>保留不動</b>:permit_reading 把多數票、分層、scan_docx 放一起 —— 刪除測試:拆開規則會散,是合理的深度。</li>
+  </ul>
+</article>
+
+</section>
+
+<section id="top-recommendation" class="deep rounded-xl p-8 space-y-3">
+  <p class="label text-slate-400">Top recommendation</p>
+  <h2 class="font-serif text-2xl"><a href="#AF" class="underline">AF · 許可證掃描交出寫好的列</a>(順收 AH)</h2>
+  <p class="text-slate-300">剛落地、檔案還熱;掃描快照逐格逐檔守著,回歸網是全 repo 最齊的一段 —— 刪掉 CropKind 與 _write_crops 讓一列只在一個 module 成形,輸出目錄也不再洩漏進 matches.csv。V 仍是總表原定的下一個;AF 不依賴 V,可插在它前面。</p>
+</section>
+
+</main>
+</body>
+</html>
