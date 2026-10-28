@@ -110,7 +110,7 @@ CSV_FIELDS = [
     "source_docx", "image_name", "docx_class", "scan_tier",
     "mol", "mol_layer", "mol_conf", "mol_from_vote",
     "id",  "id_layer",  "id_conf",  "id_from_vote",
-    "cross_match", "final_value", "final_conf", "vision_review",
+    "cross_match",
     "note", "manual_review", "low_conf", "hit_config", "hit_roi",
     "mol_crop", "permit_crop",
     "status",
@@ -129,7 +129,7 @@ class ScanResult:
     2. 拼字防呆：r["mol_cnof"] = 80 過去會默默建立一個沒人讀的新 key 而不報錯；
        r.mol_cnof = 80 現在會在執行時拋 AttributeError，IDE 也標紅。
 
-    3. 隱性狀態：cross_match 過去是 "✓" / ""，vision_review 是 "Y" / ""，
+    3. 隱性狀態：cross_match 過去是 "✓" / ""，
        靠字串比對判斷真假。現在分別是 bool，意圖明確。manual_review 過去混著
        "Y" 與整句理由，現在也是 bool，理由寫在 note。
 
@@ -153,12 +153,9 @@ class ScanResult:
     id_layer: int = 0
     id_conf: float = 0.0
 
-    # ─── 決策結果 ────────────────────────────────────────────────────────
-    cross_match: bool = False
-    final_value: str = ""
-    final_conf: float = 0.0
-    vision_review: bool = False
-    note: str = ""
+    # ─── 讀值與掃描觀測(判斷不在這裡,在送審決策,ADR-0013) ─────────────
+    cross_match: bool = False  # mol 與 permit 兩 ROI 互證
+    note: str = ""             # 掃描當下的觀測(例如佔位列為什麼沒有讀值)
     status: ResultStatus = ResultStatus.OK
 
     # ─── 詮釋資料 ────────────────────────────────────────────────────────
@@ -197,9 +194,6 @@ class ScanResult:
             "id_conf":       f"{self.id_conf:.1f}" if self.id_conf else "",
             "id_from_vote":  "Y" if self.id_from_vote else "",
             "cross_match":   "✓" if self.cross_match else "",
-            "final_value":   self.final_value,
-            "final_conf":    f"{self.final_conf:.1f}" if self.final_conf else "",
-            "vision_review": "Y" if self.vision_review else "",
             "note":          self.note,
             "manual_review": "Y" if self.manual_review else "",
             "low_conf":      self.low_conf,
@@ -250,9 +244,7 @@ class ScanResult:
             id_conf       = to_float(row.get("id_conf", "")),
             id_from_vote  = (row.get("id_from_vote", "") == "Y"),
             cross_match   = (row.get("cross_match", "") == "✓"),
-            final_value   = row.get("final_value", ""),
-            final_conf    = to_float(row.get("final_conf", "")),
-            vision_review = (row.get("vision_review", "") == "Y"),
+            # ADR-0013 之前的檔還帶 final_value/final_conf/vision_review:判斷,不讀
             note          = row.get("note", ""),
             # 舊 CSV 除了 "Y" 還有整句理由(「mol 無值，需人工判斷」)——非空一律
             # 算需要人工，不能讓它安靜變成 False、脫離人工審查

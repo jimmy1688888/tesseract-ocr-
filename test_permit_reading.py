@@ -177,7 +177,6 @@ class TestReadLargeDocx:
         read, _ = _reader({"image5.jpeg": _vote("image5.jpeg")})
         [reading] = R.read_large_docx("a.docx", self.IMAGES, read).readings
         assert (reading.result.id, reading.result.id_conf) == ("1234", 70.0)
-        assert (reading.result.final_value, reading.result.vision_review) == ("", False)
 
 
 def test_permit_reading_does_not_import_pipeline():

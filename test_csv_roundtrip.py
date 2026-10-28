@@ -102,7 +102,6 @@ _DISK_LITERALS = {
     "mol_from_vote": "Y",
     "id_from_vote":  "Y",
     "cross_match":   "✓",
-    "vision_review": "Y",
     "manual_review": "Y",
 }
 
@@ -115,3 +114,20 @@ def test_bool_literals_match_existing_csv_files():
         assert getattr(r, name) is True, name
     written = r.to_csv_row()
     assert {k: written[k] for k in _DISK_LITERALS} == _DISK_LITERALS
+
+
+# ADR-0013:matches.csv 只存讀值;判斷(要不要送 Vision、winner、最終值)只在送審決策。
+_JUDGEMENT_COLUMNS = {"final_value", "final_conf", "vision_review"}
+
+
+def test_matches_csv_holds_readings_only():
+    assert not _JUDGEMENT_COLUMNS & set(CSV_FIELDS)
+    assert not _JUDGEMENT_COLUMNS & {f.name for f in dataclasses.fields(ScanResult)}
+
+
+def test_old_files_with_judgement_columns_still_read():
+    """ADR-0013 之前寫的 matches.csv(真實素材的某日掃描、舊 21 份)帶這三欄:讀進來忽略。"""
+    base = {"source_docx": "a.docx", "image_name": "image1.png", "docx_class": "large",
+            "id": "1234", "id_conf": "70.0"}
+    old = {**base, "final_value": "1234", "final_conf": "70.0", "vision_review": "Y"}
+    assert ScanResult.from_csv_row(old) == ScanResult.from_csv_row(base)

@@ -182,7 +182,7 @@ python pipeline.py --roi mol              # 只掃某個 ROI（mol / permit_uppe
 | 欄 | 內容 | 來源 |
 |---|---|---|
 | A | 來源 docx | |
-| B | 許可證 / final_value | OCR 投票 |
+| B | 許可證（送審決策的候選值，或 Vision 確認／救回的值）| OCR 投票 |
 | C | status（`keyed-in` 或 `manual_review`）| 決策 |
 | D | reason（歸因說明：多數票、雙引擎一致、部分命中…）| 決策 |
 | E | 機構名稱 | 許可證查名冊 |
@@ -344,7 +344,7 @@ Tesseract 掃完全部圖片後（每張圖 × 多組前處理 config × mol/per
 | A'' | mol 與 permit 都有值但**不同**（衝突） | 送 Vision | 值衝突絕不自動選邊；以 permit ROI 最早圖為候選（permit ROI 目的明確，mol 僅輔助） |
 | A2 | 僅 permit 有值，**多數票**（同值讀到 ≥2 次）且平均信心 > `CONF_VOTE_MIN`(45) | **直接 key-in** | 多組 config／上下兩 ROI 重複讀到同值，重複性本身就是第二證據；門檻可低於單次讀值的 55，因為多數票已是多重證據 |
 | B | permit 有命中但**無多數**（各次讀到的值湊不齊 2 票） | 送 Vision | 單次判讀不可信，取信心最高者當候選送驗 |
-| C | 其餘標了 vision_review 的（僅 mol 信心低、互證吻合但信心低…） | 送 Vision | 同上，單一證據不足 |
+| C | 其餘讀值信心不足的（僅 mol／僅 permit 信心低、互證吻合但信心低…；門檻只在送審決策判，matches.csv 只存讀值，見 ADR-0013） | 送 Vision | 同上，單一證據不足 |
 | D | **全部圖片無命中** | **人工審查**（不對許可證 ROI 送 Vision），但先走**仲介反查救援**（見下節） | 沒有候選值可交叉驗證，硬讀許可證只會是單引擎；改用「仲介電話（優先）／名稱／地址反查名冊」這條獨立管道回推 |
 
 **small docx**（圖片數 ≤ 3，版面固定）較簡單：mol 多數票且平均信心 >

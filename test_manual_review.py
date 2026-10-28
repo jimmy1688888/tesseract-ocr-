@@ -98,7 +98,9 @@ def test_real_old_matches_csv(tmp_path):
     assert [P.ScanResult.from_csv_row(row) for row in rewritten] == results
     for old, new in zip(raw, rewritten):
         for col in old:
-            if col == "manual_review":
+            if col in ("final_value", "final_conf", "vision_review"):
+                assert col not in new          # 判斷欄,ADR-0013 起不寫出
+            elif col == "manual_review":
                 assert needs_review(new[col]) is needs_review(old[col]), old["source_docx"]
             else:
                 assert new[col] == old[col], (old["source_docx"], col)
