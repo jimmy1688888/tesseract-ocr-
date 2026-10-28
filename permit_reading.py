@@ -7,6 +7,7 @@
 
   scan_image_large / scan_image_mol_only   一張圖 → Reading(ScanResult, crops)
   read_large_docx                           一份 large docx 的分層掃描(ADR-0005)
+
 讀值不在這裡判斷:門檻、small 的 winner、要不要送 Vision 只在送審決策(ADR-0013)。
 
 送審決策(一份 docx 一個決定)在 submission_decision,吃這裡的 ScanResult。
@@ -129,8 +130,8 @@ class ScanResult:
     2. 拼字防呆：r["mol_cnof"] = 80 過去會默默建立一個沒人讀的新 key 而不報錯；
        r.mol_cnof = 80 現在會在執行時拋 AttributeError，IDE 也標紅。
 
-    3. 隱性狀態：cross_match 過去是 "✓" / ""，
-       靠字串比對判斷真假。現在分別是 bool，意圖明確。manual_review 過去混著
+    3. 隱性狀態：cross_match 過去是 "✓" / ""，靠字串比對判斷真假；
+       現在是 bool，意圖明確。manual_review 過去混著
        "Y" 與整句理由，現在也是 bool，理由寫在 note。
 
     CSV 邊界由 to_csv_row()/from_csv_row() 處理。寫到磁碟仍是字串

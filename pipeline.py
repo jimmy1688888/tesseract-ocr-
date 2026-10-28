@@ -141,12 +141,12 @@ INPUT_DIR  = Path("./docs")
 # 要模擬哪個服務帳號、用量記到哪個 GCP 專案：見 identity.py。
 
 # 信心門檻
-# 送審決策的門檻只記一份,在 submission_decision(#40);這裡沿用同名供掃描使用。
+# 送審決策的門檻只記一份,在 submission_decision(#40);這裡只是照舊可從 pipeline 取得。
 from submission_decision import (  # noqa: E402
     CONF_KEY_IN, CONF_MOL_VOTE_MIN, CONF_VOTE_MIN,
     Decision, Destination, decide, is_permit_vote)
 
-# 一張圖的 image bytes → 一次判讀(ROI、Tesseract 設定、多數票、分層掃描、單張決策)
+# 一張圖的 image bytes → 一次判讀(ROI、Tesseract 設定、多數票、分層掃描)
 # 都在 permit_reading(#19)。這裡匯入流程用到的名字;其餘照舊可從 pipeline 取得。
 from permit_reading import (  # noqa: E402,F401
     CSV_FIELDS, FALLBACK_CONFIGS, PERMIT_VOTE_CONFIGS, ROI_REGIONS, SCAN_CONFIGS,

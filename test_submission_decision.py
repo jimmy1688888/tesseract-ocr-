@@ -276,20 +276,20 @@ class TestSmall:
 
     def test_winner_is_the_most_confident_read_of_either_roi(self):
         d = decide([self._small("image1.png", "1111", 60.0),
-                           self._small("image2.png", "2222", 55.0, id_conf=85.0),
-                           self._small("image3.png", "3333", 70.0)])
+                    self._small("image2.png", "2222", 55.0, id_conf=85.0),
+                    self._small("image3.png", "3333", 70.0)])
         assert (d.candidate_value, d.image_name, d.candidate_conf) == ("2222", "image2.png", 85.0)
 
     def test_tie_takes_the_first_read(self):
         d = decide([self._small("image1.png", "1111", 60.0, vote=True),
-                           self._small("image2.png", "2222", 60.0, vote=True)])
+                    self._small("image2.png", "2222", 60.0, vote=True)])
         assert (d.destination, d.candidate_value, d.image_name) == (
             Destination.直接KEYIN, "1111", "image1.png")
 
     def test_a_vote_that_is_not_the_winner_does_not_key_in(self):
         """多數票只算 winner 自己的;另一張低信心的多數票不會讓 winner 直接 key-in。"""
         d = decide([self._small("image1.png", "1111", 52.0, vote=True),
-                           self._small("image2.png", "2222", 60.0)])
+                    self._small("image2.png", "2222", 60.0)])
         assert (d.destination, d.candidate_value) == (Destination.送VISION, "2222")
         assert d.reason == "small:mol非多數票(單一判讀 conf=60.0),需人工複核"
 
@@ -306,7 +306,7 @@ class TestSmall:
 
     def test_no_hit_rows_beside_a_hit_do_not_matter(self):
         d = decide([_row("image1.png", cls="small"),
-                           self._small("image2.png", "1234", 70.0, vote=True)])
+                    self._small("image2.png", "1234", 70.0, vote=True)])
         assert (d.destination, d.image_name) == (Destination.直接KEYIN, "image2.png")
 
     def test_all_no_hit_counts_every_image(self):
@@ -325,9 +325,9 @@ class TestSmall:
                             "small:mol非多數票(單一判讀 conf=40.0),需人工複核")
 
     def test_otherwise_vision_on_the_best_read_without_needing_flags(self):
-        """不靠 vision_review 旗標(舊的防禦性退路就是為了旗標漏設而存在)。"""
+        """不靠掃描端的旗標(舊的防禦性退路就是為了旗標漏設而存在)。"""
         d = decide([self._small("image1.png", "1234", 50),
-                           self._small("image2.png", "1234", 52)])
+                    self._small("image2.png", "1234", 52)])
         assert d.destination is Destination.送VISION and d.image_name == "image2.png"
         assert d.img_path == "crops/image2.png_mol.png"
 
