@@ -1,0 +1,96 @@
+# -*- coding: utf-8 -*-
+"""許可證掃描的黃金基準(#55):一份 docx → 它在 matches.csv 的列與寫出的檔。
+
+重放錄好的 OCR 結果跑 run_scan(不跑 Tesseract,幾秒),matches.csv 逐格、寫出檔逐一
+與錄製當下相同。錄製方式見 golden_scan.py;素材或錄製不在就 skip。
+"""
+import pytest
+
+import golden_scan as G
+import real_samples as rs
+
+# 明確排除的欄位/資料夾:刪欄、不再寫出某類檔的票才加,並寫明是哪張票。
+EXCLUDED_COLUMNS: tuple[str, ...] = ()
+EXCLUDED_DIRS: tuple[str, ...] = ()
+
+
+@pytest.fixture(scope="module")
+def recorded():
+    if not rs.REAL_DOCX:
+        pytest.skip("沒有真實素材 samples/docs/*.docx")
+    if not G.is_recorded():
+        pytest.skip("沒有黃金基準錄製:python golden_scan.py record"
+                    "(真 Tesseract,約 30~60 分鐘,存 samples/golden_scan/)")
+    return G.load()
+
+
+def test_replay_matches_baseline(recorded, tmp_path):
+    replayer, baseline = recorded
+    assert [p.name for p in rs.REAL_DOCX] == baseline["docx"], "素材和錄製時不同,要重錄"
+
+    actual = G.scan(rs.REAL_DOCX, tmp_path, replayer)
+
+    assert G.differences(baseline, actual, excluded_columns=EXCLUDED_COLUMNS,
+                         excluded_dirs=EXCLUDED_DIRS) == []
+
+
+# ─── 不需要素材:重放與比對本身的行為 ─────────────────────────────────────
+
+CFG = {"name": "紅通道_2x_中值3"}
+ROI = (0.05, 0.04, 0.4, 0.25)
+
+
+class TestReplayer:
+
+    def test_recorded_call_replays(self):
+        calls = {G.call_key(b"img", CFG, ROI): ("MOL 1234", 80.0)}
+        assert G.Replayer(calls, {})(b"img", CFG, ROI) == ("MOL 1234", 80.0)
+
+    def test_unrecorded_call_fails_naming_the_image(self):
+        sources = {G._sha1(b"img"): "30766.docx/image2.jpeg"}
+        replayer = G.Replayer({}, sources)
+        with pytest.raises(G.UnrecordedOcrCall, match=r"30766\.docx/image2\.jpeg.*紅通道_2x_中值3"):
+            replayer(b"img", CFG, ROI)
+
+    def test_recorder_calls_through_once_per_call(self):
+        seen = []
+
+        def ocr(data, cfg, roi):
+            seen.append(data)
+            return "x", 1.0
+
+        rec = G.Recorder(ocr)
+        rec(b"a", CFG, ROI)
+        rec(b"a", CFG, ROI)
+        assert seen == [b"a"] and G.Replayer(rec.calls, {})(b"a", CFG, ROI) == ("x", 1.0)
+
+
+def _snap(rows, files):
+    return {"matches": rows, "files": files}
+
+
+class TestDifferences:
+
+    def test_same_is_empty(self):
+        s = _snap([{"source_docx": "a.docx", "id": "1"}], {"permit_crops/a.png": "h"})
+        assert G.differences(s, s) == []
+
+    def test_cell_difference_names_row_and_column(self):
+        base = _snap([{"source_docx": "a.docx", "image_name": "image5.jpeg", "scan_tier": "2"}], {})
+        act = _snap([{"source_docx": "a.docx", "image_name": "image5.jpeg", "scan_tier": "1"}], {})
+        assert G.differences(base, act) == [
+            "第 1 列(a.docx/image5.jpeg) scan_tier:基準 '2'、這次 '1'"]
+
+    def test_row_count_and_files(self):
+        base = _snap([{"id": "1"}, {"id": "2"}], {"x/a.png": "h1", "x/b.png": "h2"})
+        act = _snap([{"id": "1"}], {"x/a.png": "zz", "y/c.png": "h3"})
+        assert G.differences(base, act) == [
+            "matches.csv 列數:基準 2、這次 1",
+            "x/a.png 內容不同", "少寫了 x/b.png", "多寫了 y/c.png"]
+
+    def test_excluded_columns_and_dirs_are_not_compared(self):
+        base = _snap([{"id": "1", "low_conf": "p"}], {"low_conf_crops/a.png": "h"})
+        act = _snap([{"id": "1"}], {})
+        assert G.differences(base, act, excluded_columns=["low_conf"],
+                             excluded_dirs=["low_conf_crops"]) == []
+        assert G.differences(base, act) != []
