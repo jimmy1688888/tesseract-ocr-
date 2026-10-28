@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>架構檢視 — LinaOCR 2026-10-28</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+<style>
+  .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #f8fafc; }
+  .shallow { border: 1px dashed #94a3b8; }
+  .leak { color: #dc2626; }
+  .seam { border-left: 3px dashed #64748b; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900 font-sans">
+<main class="max-w-5xl mx-auto px-4 sm:px-6 py-12 space-y-12">
+
+<header class="space-y-3">
+  <h1 class="text-3xl font-bold">架構檢視 — LinaOCR(tesseract-ocr-)</h1>
+  <p class="text-slate-600">2026-10-28 · 候選 U(#50)、P(#51~#54、ADR-0013)之後 · 熱點:pipeline.py、submission_decision.py、permit_reading.py、vision_verification.py、snapshots.py</p>
+  <div class="flex flex-wrap gap-4 text-sm text-slate-600">
+    <span><span class="inline-block w-4 h-3 border border-slate-400 align-middle"></span> module</span>
+    <span><span class="inline-block w-4 h-0 border-t-2 border-dashed border-slate-500 align-middle"></span> seam</span>
+    <span><span class="leak font-bold">→</span> 洩漏</span>
+    <span><span class="inline-block w-4 h-3 deep align-middle"></span> deep module</span>
+  </div>
+  <p class="text-sm text-slate-500">不重複已列過、未 grill 的候選;它們的現況在最後一節。AB~AE 是新的。</p>
+</header>
+
+<section id="candidates" class="space-y-10">
+
+<!-- AB -->
+<article id="AB" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">AB. Sheets D 欄理由只有一個主人</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-100 text-emerald-800">Strong</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-700">in-process</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">submission_decision.py:37-44、95-97、各 _decision 呼叫 · vision_verification.py:45、59、verify_vision_result 的 rationale · pipeline.py:540-566(pick_agency 的 note)、613(「；」接上)、259-265(unscannable) · CONTEXT.md:112-117</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg bg-stone-100 p-4 space-y-2">
+      <p class="text-xs font-semibold text-slate-500">BEFORE:四個作者,三種分隔</p>
+      <div class="grid grid-cols-2 gap-2 text-xs">
+        <div class="shallow rounded p-2 bg-white">送審決策<br><span class="text-slate-500">「permit多數票_…」「[單一判讀低信心 …]」</span></div>
+        <div class="shallow rounded p-2 bg-white">Vision 驗證<br><span class="text-slate-500">「[送Vision原因] … ／ [Vision結果] …」</span></div>
+        <div class="shallow rounded p-2 bg-white">pick_agency<br><span class="text-slate-500">「[電話反查救回] …」</span></div>
+        <div class="shallow rounded p-2 bg-white">救援函式<br><span class="text-slate-500">「{理由}；{note}」</span></div>
+      </div>
+      <p class="text-xs leak">救不回、名冊/Vision 不可用、docx 找不到 → 原列照回,D 欄沒提反查救援;「讀不到圖」在 unscannable 與 _NO_IMAGE_REASONS 各寫一份</p>
+    </div>
+    <div class="rounded-lg bg-stone-100 p-4 space-y-2">
+      <p class="text-xs font-semibold text-slate-500">AFTER</p>
+      <div class="deep rounded p-3 text-sm">D 欄理由:(去向, 各階段的事實) → 一句話<br><span class="text-slate-300 text-xs">分隔、標籤、只陳述事實(ADR-0003 精神)都在這裡</span></div>
+      <p class="text-xs text-slate-600">送審決策、Vision 驗證、反查救援只交出「發生了什麼」,不自己拼字</p>
+    </div>
+  </div>
+  <p><b>Problem</b>:D 欄是給人審查的唯一說明,卻由四處各拼各的;CONTEXT「反查救援」說救不回時「理由寫明走過反查救援」,程式沒有做到(全無命中只寫「large docx：全 N 張圖掃描無許可證命中」)。</p>
+  <p><b>Solution</b>:D 欄文字由一個 module 從去向與各階段的事實組出來;各階段只回傳事實。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700">
+    <li>locality:措辭一處改</li>
+    <li>D 欄一張表就測得完</li>
+    <li>CONTEXT 與程式重新對齊</li>
+    <li>「讀不到圖」只一份</li>
+  </ul>
+  <div class="rounded bg-amber-50 border border-amber-200 p-3 text-sm">⚠ CONTEXT 與程式不一致是 U grill Q7 寫進的措辭 —— 先決定:改 CONTEXT(照現況),還是改程式讓 D 欄寫明「走過反查救援、救不回」(行為票)。措辭變動要先錄 D 欄快照(十五欄基準網 + 送審快照理由欄已在)。</div>
+</article>
+
+<!-- AC -->
+<article id="AC" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">AC. 從送審決策到寫進 Sheets 的列:一個 module</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-100 text-emerald-800">Strong</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-700">ports &amp; adapters</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">pipeline.py:272-317(SubmissionQueue、build_vision_queue)、1140-1200(main 步驟 3~4b)、571-618(反查救援) · vision_verification.run_vision_items · test_unreadable_docx.py:205-215(patch 6 個名字)</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg bg-stone-100 p-4">
+      <p class="text-xs font-semibold text-slate-500 mb-2">BEFORE</p>
+<pre class="mermaid">
+flowchart TB
+  Q[build_vision_queue] -->|4 個 list:Decision 與 SheetRow 混| M[main]
+  M --> V[run_vision_items]
+  M --> R[反查救援 自己抓名冊/client/次頁]
+  M -->|自己合併 auto/review、手寫摘要 log| S[write_sheets_batched]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class M,R leak
+</pre>
+    </div>
+    <div class="rounded-lg bg-stone-100 p-4">
+      <p class="text-xs font-semibold text-slate-500 mb-2">AFTER</p>
+<pre class="mermaid">
+flowchart TB
+  D[送審決策 每份一個] --> X
+  X[[送審結果:決定 → 最終的列<br/>Vision 讀取、反查救援是傳進來的 port]]
+  X -->|一串 SheetRow| M[main 只寫 Sheets]
+  classDef deep fill:#0f172a,color:#f8fafc;
+  class X deep
+</pre>
+    </div>
+  </div>
+  <p><b>Problem</b>:每個去向怎麼收尾成列散在 build_vision_queue、run_vision_items、反查救援、main 四處;main 的步驟 3~4b 只能 monkeypatch 6 個名字測,反查救援的名冊/Vision/次頁讀取都是自己伸手拿。</p>
+  <p><b>Solution</b>:一個 module 收「每份 docx 的決定 → 寫進 Sheets 的列」,Vision 讀取與次頁台仲區塊讀取從參數進來;main 只拿到一串列。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700">
+    <li>步驟 3~4b 一個介面測</li>
+    <li>monkeypatch 6 → 0</li>
+    <li>救援的 log-only 分支可測</li>
+    <li>SubmissionQueue 消失</li>
+  </ul>
+  <p class="text-sm text-slate-600">與候選 4(main 交出一次執行的結果)、3+K(反查決策梯/名冊注入)、V(Vision port)相鄰:AC 是它們共用的那一段。先 V 再 AC 可直接用 V 的 port。</p>
+</article>
+
+<!-- AD -->
+<article id="AD" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">AD. 掃描不碰送審門檻:低信心截圖與 manual_review / low_conf 兩欄</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-amber-100 text-amber-800">Worth exploring</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-700">in-process</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">permit_reading.py:29-30(import CONF_KEY_IN)、417、453、534(conf &lt; CONF_KEY_IN 存 low_conf 截圖)、458(manual_review) · pipeline.py:745、811(manual_review) · submission_decision.py:20-26(TYPE_CHECKING 迴避循環)</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg bg-stone-100 p-4 space-y-2 text-sm">
+      <p class="text-xs font-semibold text-slate-500">BEFORE</p>
+      <p>掃描:<span class="font-mono">conf <b>&lt;</b> 55</span> → 存低信心截圖、寫 low_conf 欄</p>
+      <p>送審決策:<span class="font-mono">conf <b>&lt;=</b> 55</span> → 信心不足</p>
+      <p class="leak text-xs">conf = 55 兩邊結論相反;low_conf、manual_review 兩欄只寫不讀;permit_reading ↔ submission_decision 互相 import</p>
+    </div>
+    <div class="rounded-lg bg-stone-100 p-4 space-y-2 text-sm">
+      <p class="text-xs font-semibold text-slate-500">AFTER</p>
+      <div class="deep rounded p-3">掃描只 import 停止擴掃的多數票謂詞(ADR-0005)</div>
+      <p class="text-xs text-slate-600">低信心截圖要不就由決策決定、要不就刪;兩個沒人讀的判斷欄刪掉(ADR-0013 的延伸)</p>
+    </div>
+  </div>
+  <p><b>Problem</b>:P 之後掃描端還剩一個送審門檻(存不存低信心截圖)與兩個沒人讀的「半個決定」欄,也讓兩個 module 的 import 方向仍是雙向。</p>
+  <p><b>Solution</b>:把這三樣收掉或交給送審決策,掃描只依賴多數票謂詞。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700">
+    <li>門檻真的只一份</li>
+    <li>import 方向變單向</li>
+    <li>TYPE_CHECKING 繞路消失</li>
+  </ul>
+  <div class="rounded bg-amber-50 border border-amber-200 p-3 text-sm">要先問:low_conf_crops/ 這個資料夾有沒有人在看?有就不是死欄,只是門檻放錯地方。manual_review 的去留已在 W+C 的範圍內(10/28 核對),兩邊同輪看。</div>
+</article>
+
+<!-- AE -->
+<article id="AE" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-bold">AE. Vision 驗證只回列;pipeline 不再當轉手站</h2>
+    <span class="px-2 py-0.5 rounded text-xs font-semibold bg-amber-100 text-amber-800">Worth exploring</span>
+    <span class="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-700">in-process</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">vision_verification.py:100-110、165-176(FORMAT_INVALID 有值分支)· test_verify.py:259-283 · pipeline.py:145-157、324-325(約 30 個 re-export)· snapshots.py:166(為 read_decisions import 整個 pipeline)</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg bg-stone-100 p-4 text-sm space-y-2">
+      <p class="text-xs font-semibold text-slate-500">BEFORE</p>
+      <p>permit_in_text 只回合格式的值 → 「Vision 值不符 4 位數格式」那條走不到,4 支測試測死路</p>
+      <p>VerifiedResult / VerificationLevel / verify_vision_result 經 pipeline 再匯出,外面沒人拿</p>
+      <p class="leak text-xs">snapshots 讀一個函式就載入 google、pytesseract</p>
+    </div>
+    <div class="rounded-lg bg-stone-100 p-4 text-sm space-y-2">
+      <p class="text-xs font-semibold text-slate-500">AFTER</p>
+      <div class="deep rounded p-3">Vision 驗證:送 Vision 的決定 → 列(交叉比對在裡面)</div>
+      <p class="text-xs text-slate-600">死分支與 re-export 刪掉;讀回 matches.csv 的函式住在 C 的 module,snapshots 不再 import pipeline</p>
+    </div>
+  </div>
+  <p><b>Problem</b>:Vision 驗證的介面比實作寬(格式層是死路),pipeline 的再匯出層通過刪除測試 —— 刪掉沒有損失。</p>
+  <p><b>Solution</b>:刪死分支、收窄 Vision 驗證的介面;再匯出層逐步拿掉,呼叫端直接 import 主人。</p>
+  <ul class="list-disc pl-6 text-sm text-slate-700">
+    <li>4 支死路測試刪掉</li>
+    <li>依賴方向看得見</li>
+    <li>snapshots 不碰 pipeline</li>
+  </ul>
+  <p class="text-sm text-slate-600">FORMAT_INVALID 死路 10/22 已記在「小事」;re-export 已排給 W。這裡升為候選,因為兩者加上 snapshots 的依賴是同一件事:誰是名字的主人。與 C 同輪最划算。</p>
+</article>
+
+</section>
+
+<section class="space-y-3">
+  <h2 class="text-2xl font-bold">舊候選現況(U/P 之後,對程式碼核過)</h2>
+  <table class="w-full text-sm border border-slate-200 bg-white">
+    <thead class="bg-slate-100"><tr><th class="p-2 text-left">候選</th><th class="p-2 text-left">現況</th></tr></thead>
+    <tbody>
+      <tr class="border-t"><td class="p-2">U、P</td><td class="p-2">✅ #50、#51~#54</td></tr>
+      <tr class="border-t"><td class="p-2 font-semibold">W</td><td class="p-2"><b>變重了</b>:P 把 small 寫列規則(只寫命中列/全無命中標 small_no_hit)搬進 run_scan,run_scan 147 → 173 行;「三種佔位列」改為讀不到圖、large 全無命中、small 寫列;docx 仍讀三次</td></tr>
+      <tr class="border-t"><td class="p-2 font-semibold">C</td><td class="p-2">仍成立;ADR-0013 已定欄位(讀值 + 掃描觀測、舊檔三欄忽略);加範圍:狀態字串手抄版(P Q4 交來)、manual_review 去留;未知 status 仍安靜當 OK</td></tr>
+      <tr class="border-t"><td class="p-2">2</td><td class="p-2">仍成立</td></tr>
+      <tr class="border-t"><td class="p-2">3、K</td><td class="p-2">仍成立(pick_agency 在 pipeline;名冊三態全域);U 只統一了呼叫端 —— 與 AC 相鄰</td></tr>
+      <tr class="border-t"><td class="p-2">4</td><td class="p-2">仍成立(main 回 None,閘門擋下結束碼 0)—— 與 AC 相鄰</td></tr>
+      <tr class="border-t"><td class="p-2">V</td><td class="p-2">仍成立(with_retry、vision_text 在 pipeline)</td></tr>
+      <tr class="border-t"><td class="p-2">L</td><td class="p-2">仍成立(preflight 約 200 行在 pipeline)</td></tr>
+      <tr class="border-t"><td class="p-2">5、B、G、J、N、O、S、T、X、Y、Z、AA</td><td class="p-2">U/P 沒碰,不變</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="top-recommendation" class="rounded-xl border-2 border-emerald-300 bg-emerald-50 p-6 space-y-3">
+  <h2 class="text-2xl font-bold">首推</h2>
+  <p><b>先處理 AB 裡「CONTEXT 與程式不一致」那一小塊</b>:是一個措辭決定(改 CONTEXT 照現況,或開行為票讓 D 欄寫明「走過反查救援、救不回」),不決定它,之後動 D 欄的每張票都會踩到。</p>
+  <p><b>接著照原序做 W + C</b>(序 3),把 AE(誰是名字的主人、snapshots 不碰 pipeline)與 AD 的 manual_review 一起收進來 —— 同一條 matches.csv 資料流。</p>
+  <p><b>AC 排在 V 之後</b>:它要的 Vision port 由 V 提供;與候選 4、3+K 同一段 main,一起 grill 才不會改三次。AB 的「單一主人」本體可與 AC 同輪(各階段只交事實,正是 AC 的形狀)。</p>
+</section>
+
+</main>
+</body>
+</html>
