@@ -218,31 +218,6 @@ class TestSmallIsNotTiered:
         assert scanned["small"] == ["image1.jpeg"]
 
 
-class TestSmallRowsInMatchesCsv:
-    """small 寫進 matches.csv 的列(掃描事實,不是判斷):有命中只寫命中列;
-    整份全無命中則每列都寫、標 small_no_hit(存 image2/3 供比對也靠它)。"""
-
-    def _run(self, scan_env, tmp_path, hits):
-        scanned = scan_env([_img(1), _img(2), _img(3)])
-
-        def small(docx, name, data):
-            r = P.ScanResult(source_docx=docx, image_name=name, docx_class="small")
-            if name in hits:
-                r.mol, r.mol_conf = hits[name], 60.0
-            return P.Reading(r, [])
-        scanned.small = small
-        scanned.run(_batch(tmp_path, "s.docx"))
-        return [(r["image_name"], r["mol"], r["status"]) for r in _rows(tmp_path)]
-
-    def test_only_hit_rows_are_written(self, scan_env, tmp_path):
-        assert self._run(scan_env, tmp_path, {"image2.jpeg": "1234"}) == [
-            ("image2.jpeg", "1234", "ok")]
-
-    def test_all_no_hit_writes_every_row_as_small_no_hit(self, scan_env, tmp_path):
-        assert self._run(scan_env, tmp_path, {}) == [
-            (f"image{i}.jpeg", "", "small_no_hit") for i in (1, 2, 3)]
-
-
 class TestFullScanFlag:
     """--full-scan 關掉分層,行為等同分層前的現況。"""
 

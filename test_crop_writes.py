@@ -47,9 +47,9 @@ class TestScanWritesNothing:
         result, crops = P.scan_image_large("32503.docx", "image5.jpeg", b"not an image", ocr=ocr)
 
         assert crops == [
-            P.Crop("permit_crop", Path("permit_crops/32503_image5.png"),
+            P.Crop(P.CropKind.PERMIT, Path("permit_crops/32503_image5.png"),
                    P.ROI_REGIONS["permit_upper"]),
-            P.Crop("low_conf", Path("low_conf_crops/32503_image5_permit_upper_conf40.png"),
+            P.Crop(P.CropKind.LOW_CONF, Path("low_conf_crops/32503_image5_permit_upper_conf40.png"),
                    P.ROI_REGIONS["permit_upper"]),
         ]
         assert (result.permit_crop, result.low_conf) == ("", "")
@@ -58,7 +58,7 @@ class TestScanWritesNothing:
     def test_large_high_confidence_writes_no_low_conf_crop(self, ocr):
         _every_config(ocr, "permit_upper", "No. Izin: 1234", 80.0)
         _, crops = P.scan_image_large("a.docx", "image5.jpeg", b"", ocr=ocr)
-        assert [c.field for c in crops] == ["permit_crop"]
+        assert [c.kind for c in crops] == [P.CropKind.PERMIT]
 
     def test_large_mol_vote_and_permit(self, ocr):
         _every_config(ocr, "mol", "MOL 1234", 70.0, P.PERMIT_VOTE_CONFIGS)
@@ -66,10 +66,10 @@ class TestScanWritesNothing:
 
         _, crops = P.scan_image_large("a.docx", "image2.jpeg", b"", ocr=ocr)
 
-        assert [(c.field, str(c.path)) for c in crops] == [
-            ("mol_crop", str(Path("mol_crops/a_image2.png"))),
-            ("permit_crop", str(Path("permit_crops/a_image2.png"))),
-            ("low_conf", str(Path("low_conf_crops/a_image2_permit_lower_conf30.png"))),
+        assert [(c.kind, str(c.path)) for c in crops] == [
+            (P.CropKind.MOL, str(Path("mol_crops/a_image2.png"))),
+            (P.CropKind.PERMIT, str(Path("permit_crops/a_image2.png"))),
+            (P.CropKind.LOW_CONF, str(Path("low_conf_crops/a_image2_permit_lower_conf30.png"))),
         ]
 
     def test_large_only_one_low_conf_crop(self, ocr):
@@ -80,7 +80,7 @@ class TestScanWritesNothing:
 
         _, crops = P.scan_image_large("a.docx", "image2.jpeg", b"", ocr=ocr)
 
-        assert [c.path.name for c in crops if c.field == "low_conf"] == [
+        assert [c.path.name for c in crops if c.kind is P.CropKind.LOW_CONF] == [
             "a_image2_mol_conf40.png"]
 
     def test_small_mol_vote(self, ocr, tmp_path, monkeypatch):
@@ -90,7 +90,7 @@ class TestScanWritesNothing:
         result, crops = P.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
 
         assert result.mol_from_vote and result.mol == "1234"
-        assert crops == [P.Crop("mol_crop", Path("mol_crops/a_image2.png"),
+        assert crops == [P.Crop(P.CropKind.MOL, Path("mol_crops/a_image2.png"),
                                 P.ROI_REGIONS["mol"])]
         assert list(tmp_path.iterdir()) == []
 
@@ -130,8 +130,8 @@ class TestRunScanWrites:
             r = P.ScanResult(source_docx=docx, image_name=name, docx_class="large",
                              id="1234", id_conf=70.0, id_from_vote=True)
             return P.Reading(r, [
-                P.Crop("permit_crop", Path("permit_crops/32503_image5.png"), roi),
-                P.Crop("low_conf", Path("low_conf_crops/32503_image5_permit_upper_conf40.png"), roi),
+                P.Crop(P.CropKind.PERMIT, Path("permit_crops/32503_image5.png"), roi),
+                P.Crop(P.CropKind.LOW_CONF, Path("low_conf_crops/32503_image5_permit_upper_conf40.png"), roi),
             ])
         out = tmp_path / "out"
 

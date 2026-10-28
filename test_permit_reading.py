@@ -86,7 +86,7 @@ class TestScanImageLarge:
     def test_mol_vote_alone(self):
         r, crops = _large(FakeOcr().every("mol", "MOL 1234", 70.0, PERMIT_VOTE_CONFIGS))
         assert (r.mol, r.mol_conf, r.mol_from_vote, r.id) == ("1234", 70.0, True, "")
-        assert [c.field for c in crops] == ["mol_crop"]
+        assert [c.kind for c in crops] == [R.CropKind.MOL]
 
     def test_roi_filter_reads_only_that_roi_for_the_first_hit(self):
         ocr = FakeOcr().every("mol", "MOL 1234", 70.0, PERMIT_VOTE_CONFIGS)
@@ -144,7 +144,7 @@ class TestReadLargeDocx:
         read, seen = _reader({"image5.jpeg": _vote("image5.jpeg")})
         scan = R.read_large_docx("a.docx", self.IMAGES, read)
         assert seen == ["image2.jpeg", "image5.jpeg", "image6.jpeg"]
-        assert (scan.stopped_at_tier1, scan.expanded, scan.scanned) == (True, False, 3)
+        assert (scan.tier, scan.scanned) == (R.TierOutcome.第一層命中, 3)
         assert [r.result.scan_tier for r in scan.readings] == [1]
 
     def test_no_vote_expands_and_marks_the_second_tier(self):
@@ -152,24 +152,24 @@ class TestReadLargeDocx:
         scan = R.read_large_docx("a.docx", self.IMAGES, read)
         assert seen == ["image2.jpeg", "image5.jpeg", "image6.jpeg",
                         "image1.jpeg", "image3.jpeg", "image4.jpeg", "image7.jpeg"]
-        assert (scan.stopped_at_tier1, scan.expanded, scan.scanned) == (False, True, 7)
+        assert (scan.tier, scan.scanned) == (R.TierOutcome.擴掃, 7)
         assert [(r.result.image_name, r.result.scan_tier) for r in scan.readings] == [
             ("image4.jpeg", 2)]
 
     def test_low_confidence_vote_does_not_stop(self):
         read, _ = _reader({"image5.jpeg": _vote("image5.jpeg", conf=CONF_VOTE_MIN)})
-        assert R.read_large_docx("a.docx", self.IMAGES, read).expanded
+        assert R.read_large_docx("a.docx", self.IMAGES, read).tier is R.TierOutcome.擴掃
 
     def test_nothing_left_to_expand(self):
         read, seen = _reader({})
         scan = R.read_large_docx("a.docx", [_img(2), _img(5)], read)
-        assert (scan.stopped_at_tier1, scan.expanded, scan.scanned) == (False, False, 2)
+        assert (scan.tier, scan.scanned) == (R.TierOutcome.無可擴, 2)
 
     def test_full_scan_is_one_tier(self):
         read, seen = _reader({"image5.jpeg": _vote("image5.jpeg")})
         scan = R.read_large_docx("a.docx", self.IMAGES, read, full_scan=True)
         assert len(seen) == 7
-        assert not scan.expanded
+        assert scan.tier is R.TierOutcome.第一層命中
         assert {r.result.scan_tier for r in scan.readings} == {1}
 
     def test_readings_are_not_judged_here(self):

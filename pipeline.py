@@ -152,14 +152,12 @@ from matches_csv import ResultStatus, ScanResult  # noqa: E402
 # 都在 permit_reading(#19)。這裡匯入流程用到的名字;其餘照舊可從 pipeline 取得。
 from permit_reading import (  # noqa: E402,F401
     FALLBACK_CONFIGS, PERMIT_VOTE_CONFIGS, ROI_REGIONS, SCAN_CONFIGS,
-    TESS_LANG, TIER1_IMAGES, WHITELIST_LATIN, Crop, LargeDocxReading, Reading,
-    Vote, build_tess_config,
+    SMALL_DOCX_THRESHOLD, TESS_LANG, TIER1_IMAGES, WHITELIST_LATIN, Crop, CropKind,
+    DocxScan, LargeDocxReading, Reading, TierOutcome, Vote, build_tess_config,
+    classify_by_count, scan_docx, unscannable,
     has_permit_vote, majority_vote, ocr_with_conf, read_large_docx,
     roi_field, scan_image_large, scan_image_mol_only, split_tiers, tesseract,
     _empty_result)
-
-# ─── prefilter ────────────────────────────────────────────────────────────
-SMALL_DOCX_THRESHOLD = 3   # 圖片數 ≤ 此值 → "small"
 
 
 
@@ -236,13 +234,8 @@ def _is_retryable_google_error(exc: BaseException) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ② prefilter
+# ② 讀 docx 的圖(small/large 分類與寫列規則在 permit_reading.scan_docx)
 # ═══════════════════════════════════════════════════════════════════════════
-
-def classify_by_count(image_count: int) -> str:
-    """依圖片數量回傳 'small' 或 'large'。"""
-    return "small" if image_count <= SMALL_DOCX_THRESHOLD else "large"
-
 
 def read_docx_images(docx_path: Path) -> list[tuple[str, bytes]] | None:
     """docx 的內嵌圖;打不開回傳 None,不拋。
@@ -256,15 +249,6 @@ def read_docx_images(docx_path: Path) -> list[tuple[str, bytes]] | None:
         return docx_images.read_images(docx_path)
     except (zipfile.BadZipFile, zlib.error):
         return None
-
-
-def unscannable(images: list[tuple[str, bytes]] | None) -> tuple[ResultStatus, str] | None:
-    """read_docx_images 的結果沒東西可掃 → (狀態, 給人看的一句);有圖回傳 None。"""
-    if images is None:
-        return ResultStatus.UNREADABLE, "docx 無法開啟"
-    if not images:
-        return ResultStatus.NO_IMAGES, "docx 沒有可讀的內嵌圖"
-    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -697,7 +681,12 @@ def _write_crops(out_dir: Path, image_bytes: bytes, reading: Reading) -> ScanRes
             path = out_dir / c.path
             path.parent.mkdir(parents=True, exist_ok=True)
             crop(upright, c.roi).save(path)
-            setattr(result, c.field, str(path))
+            if c.kind is CropKind.MOL:
+                result.mol_crop = str(path)
+            elif c.kind is CropKind.PERMIT:
+                result.permit_crop = str(path)
+            else:
+                result.low_conf = str(path)
     return result
 
 
@@ -707,9 +696,12 @@ def run_scan(batch: Batch, image_filter: str = "",
              read_small: Callable[..., Reading] = scan_image_mol_only) -> Path:
     """掃這一批的 docx，輸出 matches.csv，回傳 csv 路徑。
 
+    每份 docx 只讀一次;它要寫哪些列由 permit_reading.scan_docx 決定,這裡只做
+    I/O(寫裁切圖、比對原圖、matches.csv)、計數與 log。
     所有產出（matches.csv、裁切圖、無命中複查圖）都寫在 batch.output_dir 底下。
 
     image_filter：若非空，配合單一 docx 只處理該檔名的圖（對應 --image）。
+                  對不到要在呼叫前擋下(main 的 _image_filter_miss);這裡遇到就拋。
     roi_filter  ：若非空，只掃指定的 ROI（對應 --roi）。
     full_scan   ：True 則關掉分層，每張圖都掃（對應 --full-scan）。
     read_large / read_small：一張圖 → 判讀,預設 permit_reading 的 Tesseract 版本。
@@ -724,117 +716,42 @@ def run_scan(batch: Batch, image_filter: str = "",
     t0 = time.time()
 
     with matches_csv.writer(csv_path) as writer:
-
         for docx_path in batch.docx_files:
-            all_images = read_docx_images(docx_path)
-            # 讀不到圖:沒東西可掃,寫一列佔位列(比照 large 全無命中),送審決策
-            # 直接人工審查。沒有這列,它在 matches.csv 與 Sheets 上都不存在(#47)。
-            nothing = unscannable(all_images)
-            if nothing:
-                placeholder = _empty_result(docx_path.name, "", "")
-                placeholder.manual_review = True
-                placeholder.status, placeholder.note = nothing
-                writer.write(placeholder)
-                logger.warning(f"  ⚠ {docx_path.name} {placeholder.note} → 直接人工審查")
-                continue
+            docx_name = docx_path.name
+            images = read_docx_images(docx_path)
+            scan = scan_docx(
+                docx_name, images,
+                read_large=lambda name, data: read_large(docx_name, name, data,
+                                                         roi_filter=roi_filter),
+                read_small=lambda name, data: read_small(docx_name, name, data),
+                full_scan=full_scan, image_filter=image_filter)
 
-            # docx_class 一律用「原始張數」判定，必須在任何過濾之前算：把過濾後
-            # 的張數丟進 classify_by_count，5 張圖的 docx 剩 3 張就會被判成
-            # small，整份改走 mol-only 的另一條路（ADR-0005）。
-            docx_class = classify_by_count(len(all_images))
-            logger.debug(f"  {docx_path.name}: {len(all_images)} 張圖 → {docx_class}")
-
-            images = all_images
-            # --image 過濾
-            if image_filter:
-                all_names = [n for n, _ in all_images]
-                images = [(n, b) for n, b in all_images if n == image_filter]
-                if not images:
-                    logger.error(
-                        f"找不到圖檔 {image_filter!r}（{docx_path.name} 內含:{all_names}）"
-                    )
-                    continue
-
-            small_bucket: list[ScanResult] = []
-            large_rows: list[ScanResult] = []
-            expanded = False
-
-            if docx_class == "small":
-                # small 不分層：最多 3 張圖、只掃一個佔頁面 7% 的 mol ROI，最壞
-                # 也才 2.3 分鐘；而 1~2 張圖的 docx 與 TIER1_IMAGES 可能毫無交集，
-                # 過濾會把它掃成零張、產出一筆與真的讀不到無從分辨的「全無命中」。
-                for img_name, img_bytes in images:
-                    total += 1
-                    small_bucket.append(_write_crops(
-                        out_dir, img_bytes,
-                        read_small(docx_path.name, img_name, img_bytes)))
-            else:
-                large_docs += 1
-                docx_name = docx_path.name
-                scan = read_large_docx(
-                    docx_name, images,
-                    lambda name, data: read_large(docx_name, name, data, roi_filter=roi_filter),
-                    full_scan=full_scan)
-                total += scan.scanned
-                tier1_docs += scan.stopped_at_tier1
-                expanded = scan.expanded
-                expanded_docs += expanded
-                image_bytes = dict(images)
-                large_rows = [_write_crops(out_dir, image_bytes[r.result.image_name], r)
-                              for r in scan.readings]
-
-                for result in large_rows:
+            image_bytes = dict(images or [])
+            for reading in scan.rows:
+                result = _write_crops(out_dir, image_bytes.get(reading.result.image_name, b""),
+                                      reading)
+                writer.write(result)
+                if result.mol or result.id:
                     hits += 1
-                    if result.hit_roi == "permit_upper":
-                        upper_hits += 1
-                    elif result.hit_roi == "permit_lower":
-                        lower_hits += 1
-                    writer.write(result)
+                if result.hit_roi == "permit_upper":
+                    upper_hits += 1
+                elif result.hit_roi == "permit_lower":
+                    lower_hits += 1
 
-            large_hit_count = len(large_rows)
+            total += scan.scanned
+            if scan.docx_class == "large":
+                large_docs += 1
+                tier1_docs += scan.tier is TierOutcome.第一層命中
+                expanded_docs += scan.tier is TierOutcome.擴掃
 
-            # large 全無命中：寫一列佔位記錄,供後續人工審查，並存 image2/5/6 原圖
-            if docx_class == "large" and large_hit_count == 0:
-                first_img_name = images[0][0] if images else ""
-                fallback = _empty_result(docx_path.name, first_img_name, "large")
-                fallback.note          = "large:全無命中"
-                fallback.manual_review = True
-                fallback.status        = ResultStatus.LARGE_NO_HIT
-                # 全無命中的份不會有任何命中列,這張佔位列是它在 CSV 裡的唯一
-                # 代表。擴掃過就得標 2 —— 否則「大量擴掃且仍沒命中」(規則過期
-                # 最典型的表現)在 scan_tier 欄上完全看不出來。
-                fallback.scan_tier     = 2 if expanded else 1
-                writer.write(fallback)
+            if scan.review_images:
+                scanned = [(n, b) for n, b in images if not image_filter or n == image_filter]
                 saved = _save_review_images(batch.no_hit_review_dir, docx_path,
-                                            images, {2, 5, 6})
+                                            scanned, scan.review_images)
                 logger.info(
-                    f"  ⚠ {docx_path.name} large全無命中 → 標記人工審查"
+                    f"  ⚠ {docx_name} {scan.docx_class}全無命中 → 標記人工審查"
                     f"，存原圖供比對 {saved}"
                 )
-
-            if docx_class == "small" and small_bucket:
-                # 有命中只寫命中列;整份全無命中則每列都寫、標 small 全無命中。
-                # winner 與門檻在送審決策(ADR-0013)。
-                to_write = [r for r in small_bucket if r.mol or r.id]
-                hits += len(to_write)
-                if not to_write:
-                    for r in small_bucket:
-                        r.status, r.note = ResultStatus.SMALL_NO_HIT, "small:無命中"
-                    to_write = small_bucket
-                for result in to_write:
-                    writer.write(result)
-                    logger.info(
-                        f"★ {docx_path.name} / {result.image_name}"
-                        f"  [small|{result.hit_roi}]"
-                        f"  mol={result.mol!r}({result.mol_conf})"
-                    )
-                # mol ROI 全無命中：存該檔 image2、image3 供人工比對
-                if all(r.status == ResultStatus.SMALL_NO_HIT for r in to_write):
-                    saved = _save_review_images(batch.no_hit_review_dir, docx_path,
-                                                images, {2, 3})
-                    logger.info(
-                        f"  ⚠ {docx_path.name} small全無命中 → 存 image2/3 供比對 {saved}"
-                    )
 
     elapsed = round(time.time() - t0, 1)
     logger.info(f"掃描完成：{total} 張圖，命中 {hits} 張，耗時 {elapsed}s")
@@ -1106,18 +1023,9 @@ def main(opts: argparse.Namespace) -> None:
         logging.getLogger().setLevel(logging.DEBUG)
         logger.debug(f"單檔 DEBUG 模式：{batch.source.name}")
 
-    # ── 步驟 1：prefilter（已在 scan 內呼叫 classify_by_count，此處記錄摘要）
-    logger.info("── 步驟 1：prefilter 分類 ──")
-    for dp in docx_files:
-        imgs = read_docx_images(dp)
-        nothing = unscannable(imgs)
-        if nothing:
-            logger.info(f"  {dp.name}: {nothing[1]} → 直接人工審查")
-        else:
-            logger.info(f"  {dp.name}: {len(imgs)} 張 → {classify_by_count(len(imgs))}")
-
     # --image 只在單檔除錯用:對不到就是指令打錯,直接結束 —— 不寫 Sheets、不跑雇主
-    # 擷取(那要花 Vision),不套用上面「每份 docx 一列」的規則。
+    # 擷取(那要花 Vision),不套用「每份 docx 一列」的規則。要在掃描之前擋:
+    # 掃描一開始就覆寫 matches.csv。small/large 分類在掃描時邊掃邊印。
     if opts.image:
         missing = _image_filter_miss(docx_files, opts.image)
         if missing:

@@ -271,6 +271,8 @@ class TestImageFilterMiss:
         assert world["sheets"] == []
         assert "image9.png" in msg
         assert "image1.png" in msg and "image2.png" in msg
+        # 在掃描之前擋下:打錯字不能先覆寫上一次的 matches.csv(#57)
+        assert not (tmp_path / "scan_results").exists()
 
     @pytest.mark.parametrize("make, says", [
         (not_zip, "無法開啟"),
