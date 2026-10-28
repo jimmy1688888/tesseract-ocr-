@@ -360,7 +360,7 @@ Tesseract 掃完全部圖片後（每張圖 × 多組前處理 config × mol/per
 | LIKELY_OCR_CONFUSION | **差 1 字元**（0/O、5/S 型混淆） | 人工審查，**不自動填任何一方的值**，兩候選都寫進 reason |
 | VISION_ONLY | Tesseract 無候選，僅 Vision 有值 | 人工審查（單引擎） |
 | DISAGREEMENT | 差 2 字元以上 | 人工審查 |
-| FORMAT_INVALID | Vision 無值或非 4 位數格式 | 人工審查 |
+| VISION_NO_HIT | Vision 沒取到號(無正則命中) | 人工審查 |
 
 只有雙引擎完全一致才自動 key-in；沒有「歷史出現過就放行」的捷徑——避免歷史錯值自我強化。
 

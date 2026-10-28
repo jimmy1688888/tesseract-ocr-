@@ -12,6 +12,7 @@
                                          "雇主欄位": {欄: 值}}}
                                  允許只填部分;沒填的不驗
   samples/snapshots/             快照(機器輸出,不是真值),見 snapshots.py
+  samples/scan_snapshot/         掃描快照:錄好的 OCR 結果與 matches.csv/寫出檔,見 scan_snapshot.py
   samples/legacy/                舊格式檔(如 #15 之前寫出的 matches.csv)
   samples/permit_scan/<日期>/    某日掃描:新素材在本機跑許可證掃描的輸出,一天一個資料夾(#43):
                                  matches.csv 與 permit_crops/ mol_crops/(#58 之前還有 low_conf_crops/)

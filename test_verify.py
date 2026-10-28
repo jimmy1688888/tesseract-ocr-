@@ -13,7 +13,7 @@
   TestLikelyOcrConfusion    — 差 1 字元(視覺相近字混淆,仍需審查)
   TestVisionOnly            — Tesseract 沒讀到、僅 Vision 有值(仍需審查)
   TestDisagreement          — 差 2 字元以上(兩引擎不同意)
-  TestFormatInvalid         — Vision 沒取到號(無正則命中)
+  TestVisionNoHit           — Vision 沒取到號(無正則命中)
   TestEditDistance          — _edit_distance 工具函數
 """
 
@@ -236,22 +236,22 @@ class TestDisagreement:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# FormatInvalid:Vision 沒取到號
+# VisionNoHit:Vision 沒取到號
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestFormatInvalid:
+class TestVisionNoHit:
     """第一層:Vision 沒取到號就人工審查。
 
     取號只會回空或 4 位數(可帶 -x)的值,「有值但格式不符」不會發生(#59 刪掉那條路)。
     """
 
     def test_empty_vision_value(self):
-        """Vision 沒讀到任何東西 → FORMAT_INVALID"""
+        """Vision 沒讀到任何東西 → VISION_NO_HIT"""
         v = verify_vision_result(
             vision_value="",
             tesseract_candidate="1234",
         )
-        assert v.level == VerificationLevel.FORMAT_INVALID
+        assert v.level == VerificationLevel.VISION_NO_HIT
         assert v.should_keyin is False
         # final_value 退回 Tesseract 候選,方便審查者看
         assert v.final_value == "1234"

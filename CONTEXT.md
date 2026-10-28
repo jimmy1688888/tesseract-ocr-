@@ -269,7 +269,9 @@ _Avoid_: 標準答案、golden、expected
 某個時間點程式對真實素材的輸出。是**機器輸出,不是真值** —— 只用來守「純重構逐格
 不變」。行為改動造成的差異要刻意重錄,重錄的 diff 就是那次改動的行為變化,要逐格
 看過;不可拿快照當核對值,否則修好一個 bug 會被判成退步。
-_Avoid_: 基準、baseline
+**掃描快照**(`samples/scan_snapshot/`,#55)是許可證掃描的快照:錄一次真 Tesseract 的
+每次 OCR,之後重放 run_scan,比 matches.csv 每格與每個寫出檔。
+_Avoid_: 基準、baseline、黃金基準、golden
 
 **某日掃描**:
 某一天在本機對真實素材跑一次許可證掃描的輸出(matches.csv 與截圖),放

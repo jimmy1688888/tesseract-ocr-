@@ -82,7 +82,7 @@ class VerificationLevel(str, Enum):
     LIKELY_OCR_CONFUSION = "likely_ocr_confusion"  # 差 1 字元(視覺相近字常見)
     VISION_ONLY          = "vision_only"           # Tesseract 沒讀到,僅 Vision 有值
     DISAGREEMENT         = "disagreement"          # 兩引擎差異 2 字元以上
-    FORMAT_INVALID       = "format_invalid"        # Vision 沒取到號(無正則命中)
+    VISION_NO_HIT        = "vision_no_hit"         # Vision 沒取到號(無正則命中)
 
 
 @dataclass
@@ -136,7 +136,7 @@ def verify_vision_result(
       LIKELY_OCR_CONFUSION    | should_keyin=False    | 空(不自動填,由人工輸入)
       VISION_ONLY             | should_keyin=False    | vision_value
       DISAGREEMENT            | should_keyin=False    | vision_value
-      FORMAT_INVALID          | should_keyin=False    | tesseract_candidate(若有)或空
+      VISION_NO_HIT           | should_keyin=False    | tesseract_candidate(若有)或空
 
     LIKELY_OCR_CONFUSION(差 1 字元):不自動挑值,final_value 為空;兩個候選與各自
       的信心寫進 rationale 供人工參考。
@@ -154,7 +154,7 @@ def verify_vision_result(
     if not vision_value:
         return VerifiedResult(
             final_value=tesseract_candidate,
-            level=VerificationLevel.FORMAT_INVALID,
+            level=VerificationLevel.VISION_NO_HIT,
             should_keyin=False,
             rationale="Vision 無正則命中,需人工審查",
         )

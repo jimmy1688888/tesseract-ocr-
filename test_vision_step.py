@@ -3,7 +3,7 @@
 
 該送 Vision 的 docx 若截圖檔不在,舊做法 `continue` —— 不進 key-in、不進人工審查,
 整份 docx 從 Sheets 消失,只在 log 留一行。改成進人工審查:B 欄填 Tesseract 候選值,
-D 欄只陳述事實,比照 Vision 沒讀到值(FORMAT_INVALID)的既有做法。
+D 欄只陳述事實,比照 Vision 沒讀到值(VISION_NO_HIT)的既有做法。
 不改走反查救援:手上已有候選值,缺的是第二個證據。
 資料全部捏造,Vision 以假的讀取函式代替(不打 API)。
 """
