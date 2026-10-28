@@ -2,12 +2,12 @@
 """
 pipeline.py
 ===========
-整合流程：prefilter → scan → vision_submit → Google Sheets key-in
+整合流程：prefilter → scan → 送審決策 → Google Sheets key-in
 
 執行步驟：
   1. prefilter  ：依圖片數量將 docx 分類為 small / large
   2. scan       ：Tesseract OCR，掃 mol / permit ROI，輸出 matches.csv
-  3. vision_submit：讀取 matches.csv，決定哪些送 Google Vision、哪些直接 key-in
+  3. 送審決策  ：讀取 matches.csv，每份 docx 一個去向(直接 key-in／送 Vision／反查救援／直接人工審查)
   4. key-in     ：Vision 結果 / 高信心值 → 寫入 Google Sheets；人工審查案件另行標記
 
 用法：
@@ -295,10 +295,10 @@ def build_vision_queue(csv_path: Path) -> SubmissionQueue:
 
     一份 docx 只有一個決定(一份契約只有一個許可證,Sheets 上只有一列)。
     """
-    vision_items:  list[Decision] = []
-    keyin_rows:    list[SheetRow] = []
-    rescue_rows:   list[SheetRow] = []
-    direct_review: list[SheetRow] = []
+    vision_decisions: list[Decision] = []
+    keyin_rows:       list[SheetRow] = []
+    rescue_rows:      list[SheetRow] = []
+    direct_review:    list[SheetRow] = []
 
     for d in read_decisions(csv_path):
         if d.destination is Destination.直接KEYIN:
@@ -313,9 +313,9 @@ def build_vision_queue(csv_path: Path) -> SubmissionQueue:
             rescue_rows.append(SheetRow(d.source_docx, d.candidate_value,
                                         SheetStatus.MANUAL_REVIEW, d.reason))
             continue
-        vision_items.append(d)
+        vision_decisions.append(d)
 
-    return SubmissionQueue(vision_items, rescue_rows, keyin_rows, direct_review)
+    return SubmissionQueue(vision_decisions, rescue_rows, keyin_rows, direct_review)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1138,13 +1138,13 @@ def main(opts: argparse.Namespace) -> None:
                         full_scan=opts.full_scan)
     logger.info(f"  matches.csv 已輸出：{csv_path.resolve()}")
 
-    # ── 步驟 3：vision_submit 分流 ─────────────────────────────────────────
-    logger.info("── 步驟 3：vision_submit 分流 ──")
+    # ── 步驟 3：送審決策 ─────────────────────────────────────────────────
+    logger.info("── 步驟 3：送審決策 ──")
     queue = build_vision_queue(csv_path)
-    vision_items, rescue_rows, keyin_rows = queue.vision, queue.rescue, queue.keyin
+    vision_decisions, rescue_rows, keyin_rows = queue.vision, queue.rescue, queue.keyin
     direct_review = queue.direct_review
     logger.info(f"  直接 key-in：{len(keyin_rows)} 筆")
-    logger.info(f"  送 Vision  ：{len(vision_items)} 筆")
+    logger.info(f"  送 Vision  ：{len(vision_decisions)} 筆")
     logger.info(f"  反查救援   ：{len(rescue_rows)} 件")
     logger.info(f"  直接人工審查(讀不到圖):{len(direct_review)} 件")
 
@@ -1156,7 +1156,7 @@ def main(opts: argparse.Namespace) -> None:
     # 一律標人工審查、由人工輸入(兩候選與信心寫進 reason 供參考)。
     logger.info("── 步驟 4a：Google Vision 判讀 + 交叉比對 ──")
     vision_auto_keyin, vision_review_rows = run_vision_items(
-        vision_items, read_text=vision_text)
+        vision_decisions, read_text=vision_text)
 
     # ── 步驟 4b：統一寫入 Google Sheets ────────────────────────────────────
     # 簡化為兩個 status,理由欄(reason)負責歸因:
@@ -1166,11 +1166,11 @@ def main(opts: argparse.Namespace) -> None:
     # 設計動機:自動 vs 人工的二分讓使用者只需依 status 篩選即可知道「哪些要看」。
     # 每列來源(Tesseract 直接 / Vision 確認 / 差 1 字元 / 僅 Vision / 無命中)
     # 都寫進 reason 欄,審查時看 reason 就知道 context。
-    # ── 步驟 4b 前置：雇主資料擷取（H~O 欄）───────────────────────────────
+    # ── 步驟 4b 前置①：雇主資料擷取（H~O 欄）──────────────────────────────
     # 每份 docx 一次 Vision 呼叫(契約頁偵測是本機 Tesseract,不花 API)。
     # 這裡對「本次要寫入的所有 docx」都擷取,含 manual_review 列——
     # 許可證待人工複核不代表雇主資料無效,先填好可省一次人工查找。
-    logger.info("── 步驟 4b 前置：雇主資料擷取（契約頁 OCR → H~O 欄）──")
+    logger.info("── 步驟 4b 前置①：雇主資料擷取（契約頁 OCR → H~O 欄）──")
     employer_by_docx = collect_employer_fields(batch)
     write_doubt_report(batch, employer_by_docx)
 

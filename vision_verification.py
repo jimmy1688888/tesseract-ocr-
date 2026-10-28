@@ -23,45 +23,45 @@ __all__ = ["VerificationLevel", "VerifiedResult", "run_vision_items",
            "verify_vision_result"]
 
 
-def run_vision_items(items: list[Decision],
+def run_vision_items(decisions: list[Decision],
                      read_text: Callable[[str], str]
                      ) -> tuple[list[SheetRow], list[SheetRow]]:
     """送 Vision 那一步:每一個送 Vision 的決定都分到 (自動寫入, 人工審查) 其中**一處**,
     絕不丟掉。
 
     read_text 是 Vision client:「截圖路徑 → 全文」(正式流程是 pipeline.vision_text,
-    測試換假的)。取號依截圖所屬的 ROI(item.hit_roi),與 Tesseract 同一個函式。
+    測試換假的)。取號依截圖所屬的 ROI(d.hit_roi),與 Tesseract 同一個函式。
     雙引擎完全一致才自動寫入;其餘進人工審查(交叉比對見 verify_vision_result)。
     """
     auto: list[SheetRow] = []    # 雙引擎一致(CONFIRMED) → 自動寫
     review: list[SheetRow] = []  # 任何不一致 → 人工審查
-    for item in items:
+    for d in decisions:
         # 截圖不在:舊做法 continue,整份 docx 從 Sheets 消失(#39)。改進人工審查,
         # 比照 Vision 沒讀到值:B 欄留 Tesseract 候選值、理由只講事實。
-        if not item.img_path or not Path(item.img_path).exists():
-            logger.warning(f"  ⚠ 找不到圖檔：{item.img_path}（{item.source_docx}）→ 人工審查")
+        if not d.img_path or not Path(d.img_path).exists():
+            logger.warning(f"  ⚠ 找不到圖檔：{d.img_path}（{d.source_docx}）→ 人工審查")
             review.append(SheetRow(
-                item.source_docx, item.candidate_value, SheetStatus.MANUAL_REVIEW,
-                f"[送Vision原因] {item.reason} ／ 截圖檔不在,未送 Vision"))
+                d.source_docx, d.candidate_value, SheetStatus.MANUAL_REVIEW,
+                f"[送Vision原因] {d.reason} ／ 截圖檔不在,未送 Vision"))
             continue
-        vision_value = permit_in_text(read_text(item.img_path), item.hit_roi)
+        vision_value = permit_in_text(read_text(d.img_path), d.hit_roi)
         verified = verify_vision_result(
             vision_value=vision_value,
-            tesseract_candidate=item.candidate_value,
-            tesseract_conf=item.candidate_conf,
+            tesseract_candidate=d.candidate_value,
+            tesseract_conf=d.candidate_conf,
         )
         logger.info(
-            f"  Vision → {item.source_docx} / {item.image_name}"
-            f"  candidate={item.candidate_value!r}(conf={item.candidate_conf:.1f})"
+            f"  Vision → {d.source_docx} / {d.image_name}"
+            f"  candidate={d.candidate_value!r}(conf={d.candidate_conf:.1f})"
             f"  vision={vision_value!r}"
             f"  → {verified.level.value}(keyin={verified.should_keyin})"
         )
-        reason = f"[送Vision原因] {item.reason} ／ [Vision結果] {verified.rationale}"
+        reason = f"[送Vision原因] {d.reason} ／ [Vision結果] {verified.rationale}"
         if verified.should_keyin:
-            auto.append(SheetRow(item.source_docx, verified.final_value,
+            auto.append(SheetRow(d.source_docx, verified.final_value,
                                  SheetStatus.KEYED_IN, reason))
         else:
-            review.append(SheetRow(item.source_docx, verified.final_value,
+            review.append(SheetRow(d.source_docx, verified.final_value,
                                    SheetStatus.MANUAL_REVIEW, reason))
     return auto, review
 
