@@ -149,7 +149,7 @@ def record(out: Callable[[str], None] = print,
 # ─── 送審快照(#38):許可證掃描結果 → 每份 docx 的送審決策 ─────────────────
 #
 # 送審決策(CONTEXT.md)要收成一個 module(#40),這張網守住重構前後每份 docx 的
-# 去向、候選值、被選的那張圖。與 H~O 快照同一套規矩:pytest 只比對,重錄先印 diff、
+# 去向、候選值、被選的那張圖,以及理由(#51:原樣進 Sheets D 欄)。與 H~O 快照同一套規矩:pytest 只比對,重錄先印 diff、
 # 舊檔加日期留存。記成 {docx: [決定, …]} 的清單:#40 之前一份 docx 可能產生多筆,
 # 快照錄的就是那時的樣子;#40 之後每份只有一筆 —— 哪天又出現兩筆,diff 會直接看得到。
 
@@ -165,7 +165,7 @@ def _default_decisions(csv_path: Path) -> dict[str, list[dict[str, str]]]:
     """
     import pipeline
     return {d.source_docx: [{"去向": d.destination.value, "候選值": d.candidate_value,
-                             "圖": d.image_name}]
+                             "圖": d.image_name, "理由": d.reason}]
             for d in pipeline.read_decisions(csv_path)}
 
 

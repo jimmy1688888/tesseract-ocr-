@@ -2,7 +2,7 @@
 """送審快照(#38):真實素材的許可證掃描結果離線重放,釘住每份 docx 的送審決策。
 
 送審決策(CONTEXT.md)散在多個函式、沒有直接測試,接下來要收成一個 module(#40)。
-這張網記的是「現在每份 docx 的去向、候選值、被選的那張圖」—— 機器輸出,不是真值
+這張網記的是「現在每份 docx 的去向、候選值、被選的那張圖、理由(#51,原樣進 D 欄)」—— 機器輸出,不是真值
 (同 H~O 快照):對不上代表行為變了,刻意的改動用 `python snapshots.py record` 重錄、
 diff 交人看過。pytest 只比對、絕不寫入,也不打任何 API。
 
@@ -126,7 +126,9 @@ PERMIT_PARTIAL = ResultStatus.PERMIT_PARTIAL
 
 
 class TestDefaultDecisionsAdapter:
-    """現行送審程式 → 快照的形狀(去向／候選值／圖)。#40 重構時只換這一層。"""
+    """現行送審程式 → 快照的形狀(去向／候選值／圖／理由)。#40 重構時只換這一層。
+
+    理由會原樣進 Sheets D 欄(#51):候選 P 要搬產生理由的規則,得先有網。"""
 
     def _csv(self, tmp_path, rows):
         """經 ScanResult 的正式序列化寫出 matches.csv(旗標的字面值不自己猜)。"""
@@ -154,9 +156,12 @@ class TestDefaultDecisionsAdapter:
              "vision_review": True},
         ])
         got = snap._default_decisions(p)
-        assert got["a.docx"] == [{"去向": "直接key-in", "候選值": "1234", "圖": "image5.jpeg"}]
-        assert got["b.docx"] == [{"去向": "反查救援", "候選值": "", "圖": ""}]
-        assert got["c.docx"] == [{"去向": "送Vision", "候選值": "5678", "圖": "image2.jpeg"}]
+        assert got["a.docx"] == [{"去向": "直接key-in", "候選值": "1234", "圖": "image5.jpeg",
+                                  "理由": "permit多數票_高信心_最早圖(image5.jpeg) conf=80.0"}]
+        assert got["b.docx"] == [{"去向": "反查救援", "候選值": "", "圖": "",
+                                  "理由": "large docx：全 1 張圖掃描無許可證命中"}]
+        assert got["c.docx"] == [{"去向": "送Vision", "候選值": "5678", "圖": "image2.jpeg",
+                                  "理由": "large:讀值信心不足"}]
 
     def test_low_conf_single_read_is_rescue(self, tmp_path):
         p = self._csv(tmp_path, [
@@ -165,4 +170,6 @@ class TestDefaultDecisionsAdapter:
              "vision_review": True, "status": PERMIT_PARTIAL},
         ])
         assert snap._default_decisions(p)["d.docx"] == [
-            {"去向": "反查救援", "候選值": "1234", "圖": "image5.jpeg"}]
+            {"去向": "反查救援", "候選值": "1234", "圖": "image5.jpeg",
+             "理由": "[單一判讀低信心 conf=40.0<50,略過 ROI Vision 改走次頁電話反查] "
+                     "permit部分命中無多數"}]
