@@ -14,7 +14,7 @@
   samples/snapshots/             快照(機器輸出,不是真值),見 snapshots.py
   samples/legacy/                舊格式檔(如 #15 之前寫出的 matches.csv)
   samples/permit_scan/<日期>/    某日掃描:新素材在本機跑許可證掃描的輸出,一天一個資料夾(#43):
-                                 matches.csv 與 permit_crops/ mol_crops/ low_conf_crops/
+                                 matches.csv 與 permit_crops/ mol_crops/(#58 之前還有 low_conf_crops/)
                                  no_hit_review/。讀最新的某日掃描(日期最大、已寫出 matches.csv),
                                  是送審快照的素材之一。之後每次本機掃描,Batch 的
                                  output_dir 指到 samples/permit_scan/<今天日期>/

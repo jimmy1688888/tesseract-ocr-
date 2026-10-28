@@ -97,7 +97,6 @@ _DISK_LITERALS = {
     "mol_from_vote": "Y",
     "id_from_vote":  "Y",
     "cross_match":   "✓",
-    "manual_review": "Y",
 }
 
 
@@ -111,8 +110,9 @@ def test_bool_literals_match_existing_csv_files():
     assert {k: written[k] for k in _DISK_LITERALS} == _DISK_LITERALS
 
 
-# ADR-0013:matches.csv 只存讀值;判斷(要不要送 Vision、winner、最終值)只在送審決策。
-_JUDGEMENT_COLUMNS = {"final_value", "final_conf", "vision_review"}
+# ADR-0013:matches.csv 只存讀值;判斷(要不要送 Vision、winner、最終值、要不要人工)
+# 只在送審決策。low_conf 是依送審門檻另存的低信心截圖(#58 刪)。
+_JUDGEMENT_COLUMNS = {"final_value", "final_conf", "vision_review", "manual_review", "low_conf"}
 
 
 def test_matches_csv_holds_readings_only():
@@ -126,6 +126,42 @@ def test_old_files_with_judgement_columns_still_read():
             "id": "1234", "id_conf": "70.0"}
     old = {**base, "final_value": "1234", "final_conf": "70.0", "vision_review": "Y"}
     assert ScanResult.from_csv_row(old) == ScanResult.from_csv_row(base)
+
+
+@pytest.mark.parametrize("manual_review", ["Y", "mol 無值，需人工判斷", ""],
+                         ids=["Y", "整句理由", "空"])
+def test_old_files_with_manual_review_and_low_conf_still_read(manual_review):
+    """#58 之前的檔帶 manual_review(#15 之前還會寫整句理由)與 low_conf:讀進來忽略。"""
+    base = {"source_docx": "a.docx", "image_name": "image2.png", "docx_class": "small",
+            "mol": "1234", "mol_conf": "40.0", "note": "small:無命中"}
+    old = {**base, "manual_review": manual_review,
+           "low_conf": r"scan_results\low_conf_crops\a_image2_mol_conf40.png"}
+    assert ScanResult.from_csv_row(old) == ScanResult.from_csv_row(base)
+
+
+def test_real_old_matches_csv_reads_and_rewrites(tmp_path):
+    """真實的舊 matches.csv(帶判斷欄):讀得進來,再寫出時讀值欄逐格不變、判斷欄不再寫。
+
+    素材唯讀(只開來讀),輸出只寫 tmp。不在就 skip。
+    """
+    import csv
+    from real_samples import old_matches_csv
+    with open(old_matches_csv(), encoding="utf-8-sig", newline="") as f:
+        raw = list(csv.DictReader(f))
+    assert any(row.get("manual_review") for row in raw), "素材裡沒有判斷欄,驗不到東西"
+
+    out = tmp_path / "matches.csv"
+    matches_csv.write(out, [ScanResult.from_csv_row(row) for row in raw])
+    with open(out, encoding="utf-8-sig", newline="") as f:
+        rewritten = list(csv.DictReader(f))
+
+    assert len(rewritten) == len(raw)
+    for old, new in zip(raw, rewritten):
+        for col in old:
+            if col in _JUDGEMENT_COLUMNS:
+                assert col not in new
+            else:
+                assert new[col] == old[col], (old["source_docx"], col)
 
 
 # ─── status:不認得的值拋例外,空字串是沒有這欄的舊檔(#56) ───────────────

@@ -10,8 +10,8 @@ import golden_scan as G
 import real_samples as rs
 
 # 明確排除的欄位/資料夾:刪欄、不再寫出某類檔的票才加,並寫明是哪張票。
-EXCLUDED_COLUMNS: tuple[str, ...] = ()
-EXCLUDED_DIRS: tuple[str, ...] = ()
+EXCLUDED_COLUMNS: tuple[str, ...] = ("manual_review", "low_conf")   # #58 刪欄
+EXCLUDED_DIRS: tuple[str, ...] = ("low_conf_crops",)                # #58 不再寫低信心截圖
 
 
 @pytest.fixture(scope="module")

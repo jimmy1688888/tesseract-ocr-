@@ -118,7 +118,6 @@ class TestScanWritesPlaceholder:
         r = P.ScanResult.from_csv_row(row)
         assert r.source_docx == p.name
         assert r.status is status
-        assert r.manual_review is True
         assert r.image_name == ""
 
     def test_bad_file_does_not_stop_the_batch(self, mol_hit, tmp_path):

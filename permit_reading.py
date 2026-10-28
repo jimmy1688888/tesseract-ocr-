@@ -29,8 +29,8 @@ import docx_images
 from matches_csv import ResultStatus, ScanResult
 from permit_patterns import RE_PERMIT_ID_LIST_LOWER, find_permits, permit_id_patterns
 from pixels import preprocess
-from submission_decision import (
-    CONF_KEY_IN, is_permit_vote)
+# 停止擴掃與規則 A2 用同一個多數票謂詞(ADR-0005);送審門檻不在這裡用
+from submission_decision import is_permit_vote
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +210,6 @@ class CropKind(Enum):
     """裁切圖的種類 = 寫出後路徑記在 ScanResult 的哪一格。"""
     MOL      = "mol"        # → mol_crop
     PERMIT   = "permit"     # → permit_crop
-    LOW_CONF = "low_conf"   # → low_conf
 
 
 class Crop(NamedTuple):
@@ -223,7 +222,7 @@ class Crop(NamedTuple):
 class Reading(NamedTuple):
     """一張圖的判讀:讀值整理(ScanResult)+ 要寫出的裁切圖。
 
-    crops 還沒寫出,result 的 mol_crop / permit_crop / low_conf 是空的;
+    crops 還沒寫出,result 的 mol_crop / permit_crop 是空的;
     run_scan 寫出後才把路徑填回去。
     """
     result: ScanResult
@@ -252,12 +251,6 @@ def _apply_mol_vote(result: ScanResult, image_bytes: bytes, stem: str,
         f"  ({vote.count}/{vote.total} 票)"
     )
     return Crop(CropKind.MOL, Path("mol_crops") / f"{stem}.png", ROI_REGIONS["mol"])
-
-
-def _low_conf_crop(stem: str, roi_name: str, roi_coords: tuple, conf: float) -> Crop:
-    path = Path("low_conf_crops") / f"{stem}_{roi_name}_conf{int(conf)}.png"
-    logger.info(f"  ⚠ 低信心 {conf} < {CONF_KEY_IN}：{path.name}")
-    return Crop(CropKind.LOW_CONF, path, roi_coords)
 
 
 def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
@@ -292,14 +285,11 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
         result.hit_config = cfg["name"]
         result.hit_roi   = "mol"
         crops.append(Crop(CropKind.MOL, Path("mol_crops") / f"{stem}.png", roi_coords))
-        if conf < CONF_KEY_IN:
-            crops.append(_low_conf_crop(stem, "mol", roi_coords, conf))
         logger.debug(f"  ★ mol/{cfg['name']}  conf={conf}  mol={mol!r}")
         return Reading(result, crops)
 
-    result.manual_review = True
-    result.note          = "mol 無值，需人工判斷"
-    logger.info(f"  ⚠ {img_name}: mol 無值，標記人工審查")
+    result.note = "mol 無值"
+    logger.info(f"  ⚠ {img_name}: mol 無值")
     return Reading(result, crops)
 
 
@@ -372,8 +362,6 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
             kind = CropKind(field)
             if not planned(kind):
                 crops.append(Crop(kind, Path(f"{field}_crops") / f"{stem}.png", roi_coords))
-            if conf < CONF_KEY_IN and not planned(CropKind.LOW_CONF):
-                crops.append(_low_conf_crop(stem, roi_name, roi_coords, conf))
             logger.debug(f"  ★ {roi_name}/{cfg['name']}  conf={conf}  id={id_!r} mol={mol!r}")
             break
 
@@ -544,7 +532,6 @@ def scan_docx(docx_name: str, images: list[tuple[str, bytes]] | None,
     nothing = unscannable(images)
     if nothing:
         placeholder = _empty_result(docx_name, "", "")
-        placeholder.manual_review = True
         placeholder.status, placeholder.note = nothing
         logger.warning(f"  ⚠ {docx_name} {placeholder.note} → 直接人工審查")
         return DocxScan([Reading(placeholder, [])], frozenset(), "", None, 0)
@@ -599,7 +586,6 @@ def _large_rows(docx_name: str, images: list[tuple[str, bytes]],
     # 全無命中：寫一列佔位記錄,供後續人工審查
     fallback = _empty_result(docx_name, images[0][0], "large")
     fallback.note          = "large:全無命中"
-    fallback.manual_review = True
     fallback.status        = ResultStatus.LARGE_NO_HIT
     # 全無命中的份不會有任何命中列,這張佔位列是它在 CSV 裡的唯一
     # 代表。擴掃過就得標 2 —— 否則「大量擴掃且仍沒命中」(規則過期

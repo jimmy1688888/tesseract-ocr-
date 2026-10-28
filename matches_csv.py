@@ -42,7 +42,7 @@ FIELDS = [
     "mol", "mol_layer", "mol_conf", "mol_from_vote",
     "id",  "id_layer",  "id_conf",  "id_from_vote",
     "cross_match",
-    "note", "manual_review", "low_conf", "hit_config", "hit_roi",
+    "note", "hit_config", "hit_roi",
     "mol_crop", "permit_crop",
     "status",
 ]
@@ -65,8 +65,7 @@ class ScanResult:
        r.mol_cnof = 80 現在會在執行時拋 AttributeError，IDE 也標紅。
 
     3. 隱性狀態：cross_match 過去是 "✓" / ""，靠字串比對判斷真假；
-       現在是 bool，意圖明確。manual_review 過去混著
-       "Y" 與整句理由，現在也是 bool，理由寫在 note。
+       現在是 bool，意圖明確。
 
     CSV 邊界由 to_csv_row()/from_csv_row() 處理。寫到磁碟仍是字串
     （"Y" / "✓" / "" / "80.0"），人類看 CSV 跟以前一樣。
@@ -94,8 +93,6 @@ class ScanResult:
     status: ResultStatus = ResultStatus.OK
 
     # ─── 詮釋資料 ────────────────────────────────────────────────────────
-    manual_review: bool = False  # 要不要人工；「為什麼」寫在 note
-    low_conf: str = ""         # 低信心 crop 圖檔路徑
     hit_config: str = ""       # 命中時用的 Tesseract config 名稱
     hit_roi: str = ""          # 命中時的 ROI 名稱
     mol_crop: str = ""         # mol crop 圖檔路徑
@@ -130,8 +127,6 @@ class ScanResult:
             "id_from_vote":  "Y" if self.id_from_vote else "",
             "cross_match":   "✓" if self.cross_match else "",
             "note":          self.note,
-            "manual_review": "Y" if self.manual_review else "",
-            "low_conf":      self.low_conf,
             "hit_config":    self.hit_config,
             "hit_roi":       self.hit_roi,
             "mol_crop":      self.mol_crop,
@@ -173,12 +168,9 @@ class ScanResult:
             id_conf       = to_float(row.get("id_conf", "")),
             id_from_vote  = (row.get("id_from_vote", "") == "Y"),
             cross_match   = (row.get("cross_match", "") == "✓"),
-            # ADR-0013 之前的檔還帶 final_value/final_conf/vision_review:判斷,不讀
+            # 舊檔還帶判斷欄,不讀(ADR-0013):final_value/final_conf/vision_review,
+            # 以及 manual_review(值是 "Y" 或整句理由)、low_conf(低信心截圖路徑)
             note          = row.get("note", ""),
-            # 舊 CSV 除了 "Y" 還有整句理由(「mol 無值，需人工判斷」)——非空一律
-            # 算需要人工，不能讓它安靜變成 False、脫離人工審查
-            manual_review = bool(row.get("manual_review", "").strip()),
-            low_conf      = row.get("low_conf", ""),
             hit_config    = row.get("hit_config", ""),
             hit_roi       = row.get("hit_roi", ""),
             mol_crop      = row.get("mol_crop", ""),

@@ -6,7 +6,8 @@
 
     <輸出目錄>/mol_crops/<docx>_<圖>.png
     <輸出目錄>/permit_crops/<docx>_<圖>.png
-    <輸出目錄>/low_conf_crops/<docx>_<圖>_<ROI>_conf<信心取整>.png   (信心 < CONF_KEY_IN)
+
+低信心截圖(low_conf_crops/)#58 起不再寫出:沒人看,門檻也和送審決策不一致。
 """
 import csv
 from io import BytesIO
@@ -49,16 +50,9 @@ class TestScanWritesNothing:
         assert crops == [
             P.Crop(P.CropKind.PERMIT, Path("permit_crops/32503_image5.png"),
                    P.ROI_REGIONS["permit_upper"]),
-            P.Crop(P.CropKind.LOW_CONF, Path("low_conf_crops/32503_image5_permit_upper_conf40.png"),
-                   P.ROI_REGIONS["permit_upper"]),
         ]
-        assert (result.permit_crop, result.low_conf) == ("", "")
+        assert result.permit_crop == ""
         assert list(tmp_path.iterdir()) == []
-
-    def test_large_high_confidence_writes_no_low_conf_crop(self, ocr):
-        _every_config(ocr, "permit_upper", "No. Izin: 1234", 80.0)
-        _, crops = P.scan_image_large("a.docx", "image5.jpeg", b"", ocr=ocr)
-        assert [c.kind for c in crops] == [P.CropKind.PERMIT]
 
     def test_large_mol_vote_and_permit(self, ocr):
         _every_config(ocr, "mol", "MOL 1234", 70.0, P.PERMIT_VOTE_CONFIGS)
@@ -69,19 +63,7 @@ class TestScanWritesNothing:
         assert [(c.kind, str(c.path)) for c in crops] == [
             (P.CropKind.MOL, str(Path("mol_crops/a_image2.png"))),
             (P.CropKind.PERMIT, str(Path("permit_crops/a_image2.png"))),
-            (P.CropKind.LOW_CONF, str(Path("low_conf_crops/a_image2_permit_lower_conf30.png"))),
         ]
-
-    def test_large_only_one_low_conf_crop(self, ocr):
-        """兩個 ROI 都低信心:只留第一個(以前靠 result.low_conf 已有值擋掉第二張)。"""
-        not_voting = [c for c in P.SCAN_CONFIGS if c not in P.PERMIT_VOTE_CONFIGS]
-        _every_config(ocr, "mol", "MOL 1234", 40.0, not_voting)   # 單一判讀,不成多數票
-        _every_config(ocr, "permit_upper", "No. Izin: 1234", 30.0)
-
-        _, crops = P.scan_image_large("a.docx", "image2.jpeg", b"", ocr=ocr)
-
-        assert [c.path.name for c in crops if c.kind is P.CropKind.LOW_CONF] == [
-            "a_image2_mol_conf40.png"]
 
     def test_small_mol_vote(self, ocr, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -100,15 +82,12 @@ class TestScanWritesNothing:
         result, crops = P.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
 
         assert (result.mol, result.mol_from_vote) == ("1234", False)
-        assert [str(c.path) for c in crops] == [
-            str(Path("mol_crops/a_image2.png")),
-            str(Path("low_conf_crops/a_image2_mol_conf40.png")),
-        ]
+        assert [str(c.path) for c in crops] == [str(Path("mol_crops/a_image2.png"))]
 
     def test_small_nothing_read(self, ocr):
         result, crops = P.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
         assert crops == []
-        assert result.manual_review
+        assert result.note == "mol 無值"     # 掃描當下的事實;要不要人工是送審決策的事
 
 
 def _png(w=100, h=50) -> bytes:
@@ -131,7 +110,6 @@ class TestRunScanWrites:
                              id="1234", id_conf=70.0, id_from_vote=True)
             return P.Reading(r, [
                 P.Crop(P.CropKind.PERMIT, Path("permit_crops/32503_image5.png"), roi),
-                P.Crop(P.CropKind.LOW_CONF, Path("low_conf_crops/32503_image5_permit_upper_conf40.png"), roi),
             ])
         out = tmp_path / "out"
 
@@ -140,7 +118,6 @@ class TestRunScanWrites:
 
         [row] = csv.DictReader(open(out / "matches.csv", encoding="utf-8-sig"))
         assert row["permit_crop"] == str(out / "permit_crops" / "32503_image5.png")
-        assert row["low_conf"] == str(out / "low_conf_crops" / "32503_image5_permit_upper_conf40.png")
         assert row["mol_crop"] == ""
         written = Image.open(out / "permit_crops" / "32503_image5.png")
         assert written.size == (60, 25)     # 100x50 的 (0.40, 0.05, 1.00, 0.55)

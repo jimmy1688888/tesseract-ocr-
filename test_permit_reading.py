@@ -190,3 +190,15 @@ def test_permit_reading_does_not_import_pipeline():
                  if isinstance(n, ast.ImportFrom) and n.module}
     assert "pipeline" not in imported
     assert not {m for m in imported if m.startswith("google")}
+
+
+def test_only_the_vote_predicate_comes_from_submission_decision():
+    """許可證判讀不碰送審門檻:只為停止擴掃用多數票謂詞(ADR-0005、#58)。"""
+    import ast
+    from pathlib import Path
+    tree = ast.parse(Path(R.__file__).read_text(encoding="utf-8"))
+    names = {a.name for n in ast.walk(tree)
+             if isinstance(n, ast.ImportFrom) and n.module == "submission_decision"
+             for a in n.names}
+    plain = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    assert names == {"is_permit_vote"} and "submission_decision" not in plain

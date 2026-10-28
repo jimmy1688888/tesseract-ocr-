@@ -683,10 +683,8 @@ def _write_crops(out_dir: Path, image_bytes: bytes, reading: Reading) -> ScanRes
             crop(upright, c.roi).save(path)
             if c.kind is CropKind.MOL:
                 result.mol_crop = str(path)
-            elif c.kind is CropKind.PERMIT:
-                result.permit_crop = str(path)
             else:
-                result.low_conf = str(path)
+                result.permit_crop = str(path)
     return result
 
 

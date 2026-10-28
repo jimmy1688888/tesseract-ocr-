@@ -73,7 +73,7 @@ class TestUnscannable:
 
         [row] = [r.result for r in scan.rows]
         assert (row.source_docx, row.image_name, row.docx_class) == ("a.docx", "", "")
-        assert (row.status, row.note, row.manual_review) == (status, note, True)
+        assert (row.status, row.note) == (status, note)
         assert (scan.docx_class, scan.review_images, scan.scanned) == ("", frozenset(), 0)
         assert large.seen == small.seen == []
 
@@ -111,7 +111,7 @@ class TestLarge:
         scan = _scan(_imgs(1, 2, 3, 4, 5, 6, 7))
         assert _rows(scan) == [("image1.jpeg", ResultStatus.LARGE_NO_HIT, 2)]
         [row] = [r.result for r in scan.rows]
-        assert (row.note, row.manual_review, row.docx_class) == ("large:全無命中", True, "large")
+        assert (row.note, row.docx_class) == ("large:全無命中", "large")
         assert scan.tier is R.TierOutcome.擴掃
         assert scan.review_images == {2, 5, 6}
 
