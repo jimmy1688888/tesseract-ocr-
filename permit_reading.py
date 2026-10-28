@@ -7,9 +7,7 @@
 
   scan_image_large / scan_image_mol_only   一張圖 → Reading(ScanResult, crops)
   read_large_docx                           一份 large docx 的分層掃描(ADR-0005)
-  aggregate_small_docx                      small docx 的整份決策
-
-large 的讀值不在這裡判斷:門檻與要不要送 Vision 只在送審決策(ADR-0013)。
+讀值不在這裡判斷:門檻、small 的 winner、要不要送 Vision 只在送審決策(ADR-0013)。
 
 送審決策(一份 docx 一個決定)在 submission_decision,吃這裡的 ScanResult。
 """
@@ -29,7 +27,7 @@ import docx_images
 from permit_patterns import RE_PERMIT_ID_LIST_LOWER, find_permits, permit_id_patterns
 from pixels import preprocess
 from submission_decision import (
-    CONF_KEY_IN, CONF_MOL_VOTE_MIN, is_permit_vote)
+    CONF_KEY_IN, is_permit_vote)
 
 logger = logging.getLogger(__name__)
 
@@ -649,48 +647,5 @@ def read_large_docx(docx_name: str, images: list[tuple[str, bytes]],
     )
     readings += _read_tier(docx_name, rest, read_image, 2)
     return LargeDocxReading(readings, False, True, len(tier1) + len(rest))
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# ④ small docx 的整份決策（aggregate_small_docx）
-# ═══════════════════════════════════════════════════════════════════════════
-
-def aggregate_small_docx(results: list[ScanResult]) -> list[ScanResult]:
-    """small docx 的批次決策。
-
-    過去因 dict 不知道 mol_conf 是 str 還是 float,需要 _to_f 包一層;
-    現在 dataclass 直接保證是 float,程式短了不少。
-    """
-    hits = [r for r in results if r.mol or r.id]
-    if not hits:
-        for r in results:
-            r.vision_review = True
-            r.note   = "small:無命中"
-            r.status = ResultStatus.SMALL_NO_HIT
-        return results
-
-    def best_conf(r: ScanResult) -> float:
-        return max(r.mol_conf, r.id_conf)
-
-    winner  = max(hits, key=best_conf)
-    w_value = winner.mol or winner.id
-    w_conf  = best_conf(winner)
-
-    # 所有命中列共享同一個 docx 層級的最終值
-    for r in hits:
-        r.final_value = w_value
-        r.final_conf  = round(w_conf, 1) if w_conf else 0.0
-        if r is not winner:
-            r.mol_from_vote = False   # 只保留 winner 的多數票旗標
-
-    # mol 多數票且平均信心高於門檻 → 直接 key-in，無須送 Vision
-    if winner.mol_from_vote and winner.mol_conf > CONF_MOL_VOTE_MIN:
-        logger.info(
-            f"  ✓ mol 多數票高信心（{winner.mol_conf} > {CONF_MOL_VOTE_MIN}）"
-            f"  → 直接 key-in：{w_value}"
-        )
-    else:
-        winner.vision_review = True   # Q2 修正：只送 winner 一張
-    return hits
 
 

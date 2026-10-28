@@ -243,23 +243,80 @@ class TestOneDecisionPerDocx:
 
 
 class TestSmall:
+    """small:winner 是信心最高的讀值(同分取先出現者),門檻與理由。
 
-    def _small(self, image, value, conf, *, vote=False):
+    #53:先在掃描當下彙總一次的舊程式上錄成特性測試,再把 winner 只留在送審決策。"""
+
+    def _small(self, image, value, conf, *, vote=False, id_conf=0.0):
         return _row(image, cls="small", mol=value, mol_conf=conf, mol_from_vote=vote,
-                    final_value=value, final_conf=conf, hit_roi="mol",
+                    id_conf=id_conf, hit_roi="mol",
                     mol_crop=f"crops/{image}_mol.png", permit_crop="")
+
+    @pytest.mark.parametrize("conf, vote, dest, reason", [
+        (float(CONF_MOL_VOTE_MIN), True, Destination.送VISION,
+         "small:mol多數票但平均信心50.0未達直接key-in門檻50,需人工確認"),
+        (50.1, True, Destination.直接KEYIN, "mol多數票_高信心 avg_conf=50.1"),
+        (49.9, False, Destination.反查救援,
+         "[單一判讀低信心 conf=49.9<50,略過 ROI Vision 改走次頁電話反查] "
+         "small:mol非多數票(單一判讀 conf=49.9),需人工複核"),
+        (CONF_NOVOTE_RESCUE_MAX, False, Destination.送VISION,
+         "small:mol非多數票(單一判讀 conf=50.0),需人工複核"),
+        (90.0, False, Destination.送VISION,
+         "small:mol非多數票(單一判讀 conf=90.0),需人工複核"),
+    ])
+    def test_thresholds(self, conf, vote, dest, reason):
+        d = decide([self._small("image1.png", "1234", conf, vote=vote)])
+        assert (d.destination, d.candidate_value, d.reason) == (dest, "1234", reason)
+
+    def test_rescue_threshold_compares_conf_to_one_decimal(self):
+        """49.96 取到小數一位是 50.0 —— 送 Vision,不是反查救援(與 matches.csv 寫出的一致)。"""
+        d = decide([self._small("image1.png", "1234", 49.96)])
+        assert (d.destination, d.candidate_conf) == (Destination.送VISION, 50.0)
+        assert d.reason == "small:mol非多數票(單一判讀 conf=50.0),需人工複核"
+
+    def test_winner_is_the_most_confident_read_of_either_roi(self):
+        d = decide([self._small("image1.png", "1111", 60.0),
+                           self._small("image2.png", "2222", 55.0, id_conf=85.0),
+                           self._small("image3.png", "3333", 70.0)])
+        assert (d.candidate_value, d.image_name, d.candidate_conf) == ("2222", "image2.png", 85.0)
+
+    def test_tie_takes_the_first_read(self):
+        d = decide([self._small("image1.png", "1111", 60.0, vote=True),
+                           self._small("image2.png", "2222", 60.0, vote=True)])
+        assert (d.destination, d.candidate_value, d.image_name) == (
+            Destination.直接KEYIN, "1111", "image1.png")
+
+    def test_a_vote_that_is_not_the_winner_does_not_key_in(self):
+        """多數票只算 winner 自己的;另一張低信心的多數票不會讓 winner 直接 key-in。"""
+        d = decide([self._small("image1.png", "1111", 52.0, vote=True),
+                           self._small("image2.png", "2222", 60.0)])
+        assert (d.destination, d.candidate_value) == (Destination.送VISION, "2222")
+        assert d.reason == "small:mol非多數票(單一判讀 conf=60.0),需人工複核"
+
+    def test_permit_only_read_is_the_value(self):
+        r = _row("image1.png", cls="small", id="9999", id_conf=70.0, hit_roi="mol")
+        d = decide([r])
+        assert (d.destination, d.candidate_value) == (Destination.送VISION, "9999")
+
+    def test_mol_value_comes_before_permit_value(self):
+        """同一列兩個 ROI 都有值時取 mol(舊彙總 winner.mol or winner.id 的順序)。"""
+        r = self._small("image1.png", "1111", 60.0, id_conf=40.0)
+        r.id = "2222"
+        assert decide([r]).candidate_value == "1111"
+
+    def test_no_hit_rows_beside_a_hit_do_not_matter(self):
+        d = decide([_row("image1.png", cls="small"),
+                           self._small("image2.png", "1234", 70.0, vote=True)])
+        assert (d.destination, d.image_name) == (Destination.直接KEYIN, "image2.png")
+
+    def test_all_no_hit_counts_every_image(self):
+        d = decide([_row(f"image{i}.png", cls="small") for i in (1, 2, 3)])
+        assert (d.destination, d.reason) == (
+            Destination.反查救援, "small docx：mol ROI 全 3 張圖無命中")
 
     def test_all_no_hit_is_rescue(self):
         d = decide([_row("image1.png", cls="small", status=ResultStatus.SMALL_NO_HIT)])
         assert d.destination is Destination.反查救援 and d.candidate_value == ""
-
-    def test_mol_vote_threshold_is_exclusive(self):
-        d = decide([self._small("image1.png", "1234", CONF_MOL_VOTE_MIN, vote=True)])
-        assert d.destination is Destination.送VISION
-
-    def test_mol_vote_high_conf_is_keyin(self):
-        d = decide([self._small("image1.png", "1234", 70, vote=True)])
-        assert d.destination is Destination.直接KEYIN
 
     def test_single_read_low_conf_is_rescue(self):
         d = decide([self._small("image1.png", "1234", 40)])
@@ -270,7 +327,7 @@ class TestSmall:
     def test_otherwise_vision_on_the_best_read_without_needing_flags(self):
         """不靠 vision_review 旗標(舊的防禦性退路就是為了旗標漏設而存在)。"""
         d = decide([self._small("image1.png", "1234", 50),
-                    self._small("image2.png", "1234", 52)])
+                           self._small("image2.png", "1234", 52)])
         assert d.destination is Destination.送VISION and d.image_name == "image2.png"
         assert d.img_path == "crops/image2.png_mol.png"
 

@@ -151,7 +151,7 @@ from submission_decision import (  # noqa: E402
 from permit_reading import (  # noqa: E402,F401
     CSV_FIELDS, FALLBACK_CONFIGS, PERMIT_VOTE_CONFIGS, ROI_REGIONS, SCAN_CONFIGS,
     TESS_LANG, TIER1_IMAGES, WHITELIST_LATIN, Crop, LargeDocxReading, Reading,
-    ResultStatus, ScanResult, Vote, aggregate_small_docx, build_tess_config,
+    ResultStatus, ScanResult, Vote, build_tess_config,
     has_permit_vote, majority_vote, ocr_with_conf, read_large_docx,
     roi_field, scan_image_large, scan_image_mol_only, split_tiers, tesseract,
     _empty_result)
@@ -823,17 +823,20 @@ def run_scan(batch: Batch, image_filter: str = "",
                 )
 
             if docx_class == "small" and small_bucket:
-                to_write = aggregate_small_docx(small_bucket)
+                # 有命中只寫命中列;整份全無命中則每列都寫、標 small 全無命中。
+                # winner 與門檻在送審決策(ADR-0013)。
+                to_write = [r for r in small_bucket if r.mol or r.id]
+                hits += len(to_write)
+                if not to_write:
+                    for r in small_bucket:
+                        r.status, r.note = ResultStatus.SMALL_NO_HIT, "small:無命中"
+                    to_write = small_bucket
                 for result in to_write:
-                    if result.mol or result.id:
-                        hits += 1
                     writer.writerow(result.to_csv_row())
                     logger.info(
                         f"★ {docx_path.name} / {result.image_name}"
                         f"  [small|{result.hit_roi}]"
-                        f"  mol={result.mol!r}"
-                        f"  final={result.final_value!r}"
-                        f"  vision={result.vision_review!r}"
+                        f"  mol={result.mol!r}({result.mol_conf})"
                     )
                 # mol ROI 全無命中：存該檔 image2、image3 供人工比對
                 if all(r.status == ResultStatus.SMALL_NO_HIT for r in to_write):

@@ -216,13 +216,13 @@ def _decide_small(rows: list[ScanResult]) -> Decision:
     hits = [r for r in rows if r.mol or r.id]
     if not hits or all(r.status == _SMALL_NO_HIT for r in rows):
         return _no_hit(rows, f"small docx：mol ROI 全 {len(rows)} 張圖無命中")
-    # 與 aggregate_small_docx 同一個 winner:兩引擎信心取高者,同分取先出現者
+    # winner:兩個 ROI 的信心取高者,同分取先出現者;多數票只算 winner 自己的
     r = max(hits, key=lambda h: max(h.mol_conf, h.id_conf))
-    v = r.final_value or r.mol or r.id
+    v = r.mol or r.id
     if r.mol_from_vote and r.mol_conf > CONF_MOL_VOTE_MIN:
         return _decision(r, Destination.直接KEYIN, v, r.mol_conf,
                          f"mol多數票_高信心 avg_conf={r.mol_conf}")
-    c = r.final_conf or max(r.mol_conf, r.id_conf)
+    c = _conf1(max(r.mol_conf, r.id_conf))
     if r.mol_from_vote:
         return _decision(r, Destination.送VISION, v, c,
                          f"small:mol多數票但平均信心{r.mol_conf}未達直接key-in門檻"
