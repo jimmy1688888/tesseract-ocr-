@@ -57,7 +57,7 @@ import argparse
 import functools
 import zipfile
 import zlib
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
@@ -139,25 +139,18 @@ INPUT_DIR  = Path("./docs")
 # 注意：Sheet 標題列需自行補上 E~O 各欄標題（程式 append 不會寫標題列）。
 # 要模擬哪個服務帳號、用量記到哪個 GCP 專案：見 identity.py。
 
-# 信心門檻
-# 送審決策的門檻只記一份,在 submission_decision(#40);這裡只是照舊可從 pipeline 取得。
-from submission_decision import (  # noqa: E402
-    CONF_KEY_IN, CONF_MOL_VOTE_MIN, CONF_VOTE_MIN,
-    Decision, Destination, decide, is_permit_vote, read_decisions)
-# matches.csv(許可證掃描結果)的形狀、寫、讀在 matches_csv。
+# 本檔只 import 自己用到的名字;別的 module 的名字到主人那裡取,不經這裡轉手(#59):
+#   matches.csv 的列與寫讀      matches_csv
+#   許可證判讀(ROI、多數票、分層掃描、一份 docx → 它的列)  permit_reading
+#   送審決策與門檻              submission_decision
+#   Vision 驗證                 vision_verification
+# 送審決策:每份 docx 一個去向(門檻與判斷只在那裡,#40)。
+from submission_decision import Decision, Destination, read_decisions  # noqa: E402
 import matches_csv  # noqa: E402
-from matches_csv import ResultStatus, ScanResult  # noqa: E402
-
-# 一張圖的 image bytes → 一次判讀(ROI、Tesseract 設定、多數票、分層掃描)
-# 都在 permit_reading(#19)。這裡匯入流程用到的名字;其餘照舊可從 pipeline 取得。
-from permit_reading import (  # noqa: E402,F401
-    FALLBACK_CONFIGS, PERMIT_VOTE_CONFIGS, ROI_REGIONS, SCAN_CONFIGS,
-    SMALL_DOCX_THRESHOLD, TESS_LANG, TIER1_IMAGES, WHITELIST_LATIN, Crop, CropKind,
-    DocxScan, LargeDocxReading, Reading, TierOutcome, Vote, build_tess_config,
-    classify_by_count, scan_docx, unscannable,
-    has_permit_vote, majority_vote, ocr_with_conf, read_large_docx,
-    roi_field, scan_image_large, scan_image_mol_only, split_tiers, tesseract,
-    _empty_result)
+from matches_csv import ScanResult  # noqa: E402
+from permit_reading import (  # noqa: E402
+    ROI_REGIONS, TESS_LANG, TIER1_IMAGES, CropKind, Reading, TierOutcome,
+    scan_docx, scan_image_large, scan_image_mol_only, unscannable)
 
 
 
@@ -297,8 +290,7 @@ def build_vision_queue(csv_path: Path) -> SubmissionQueue:
 # ⑧ Google Vision(驗證本身在 vision_verification;這裡只有 client)
 # ═══════════════════════════════════════════════════════════════════════════
 
-from vision_verification import (  # noqa: E402
-    VerificationLevel, VerifiedResult, run_vision_items, verify_vision_result)
+from vision_verification import run_vision_items  # noqa: E402
 
 
 @with_retry(

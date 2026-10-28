@@ -16,10 +16,13 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+import docx_images
+import permit_reading as R
+from matches_csv import ScanResult
 import pipeline as P
 from batch import Batch
 
-ROI_NAME = {v: k for k, v in P.ROI_REGIONS.items()}
+ROI_NAME = {v: k for k, v in R.ROI_REGIONS.items()}
 
 
 class FakeOcr(dict):
@@ -35,7 +38,7 @@ def ocr():
 
 
 def _every_config(table, roi, text, conf, configs=None):
-    for cfg in configs or (P.SCAN_CONFIGS + P.FALLBACK_CONFIGS):
+    for cfg in configs or (R.SCAN_CONFIGS + R.FALLBACK_CONFIGS):
         table[(roi, cfg["name"])] = (text, conf)
 
 
@@ -45,47 +48,47 @@ class TestScanWritesNothing:
         monkeypatch.chdir(tmp_path)
         _every_config(ocr, "permit_upper", "No. Izin: 1234", 40.0)
 
-        result, crops = P.scan_image_large("32503.docx", "image5.jpeg", b"not an image", ocr=ocr)
+        result, crops = R.scan_image_large("32503.docx", "image5.jpeg", b"not an image", ocr=ocr)
 
         assert crops == [
-            P.Crop(P.CropKind.PERMIT, Path("permit_crops/32503_image5.png"),
-                   P.ROI_REGIONS["permit_upper"]),
+            R.Crop(R.CropKind.PERMIT, Path("permit_crops/32503_image5.png"),
+                   R.ROI_REGIONS["permit_upper"]),
         ]
         assert result.permit_crop == ""
         assert list(tmp_path.iterdir()) == []
 
     def test_large_mol_vote_and_permit(self, ocr):
-        _every_config(ocr, "mol", "MOL 1234", 70.0, P.PERMIT_VOTE_CONFIGS)
+        _every_config(ocr, "mol", "MOL 1234", 70.0, R.PERMIT_VOTE_CONFIGS)
         _every_config(ocr, "permit_lower", "No. Izin 1234", 30.0)
 
-        _, crops = P.scan_image_large("a.docx", "image2.jpeg", b"", ocr=ocr)
+        _, crops = R.scan_image_large("a.docx", "image2.jpeg", b"", ocr=ocr)
 
         assert [(c.kind, str(c.path)) for c in crops] == [
-            (P.CropKind.MOL, str(Path("mol_crops/a_image2.png"))),
-            (P.CropKind.PERMIT, str(Path("permit_crops/a_image2.png"))),
+            (R.CropKind.MOL, str(Path("mol_crops/a_image2.png"))),
+            (R.CropKind.PERMIT, str(Path("permit_crops/a_image2.png"))),
         ]
 
     def test_small_mol_vote(self, ocr, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        _every_config(ocr, "mol", "MOL 1234", 70.0, P.PERMIT_VOTE_CONFIGS)
+        _every_config(ocr, "mol", "MOL 1234", 70.0, R.PERMIT_VOTE_CONFIGS)
 
-        result, crops = P.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
+        result, crops = R.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
 
         assert result.mol_from_vote and result.mol == "1234"
-        assert crops == [P.Crop(P.CropKind.MOL, Path("mol_crops/a_image2.png"),
-                                P.ROI_REGIONS["mol"])]
+        assert crops == [R.Crop(R.CropKind.MOL, Path("mol_crops/a_image2.png"),
+                                R.ROI_REGIONS["mol"])]
         assert list(tmp_path.iterdir()) == []
 
     def test_small_single_read_low_confidence(self, ocr):
-        ocr[("mol", P.FALLBACK_CONFIGS[0]["name"])] = ("MOL 1234", 40.4)
+        ocr[("mol", R.FALLBACK_CONFIGS[0]["name"])] = ("MOL 1234", 40.4)
 
-        result, crops = P.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
+        result, crops = R.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
 
         assert (result.mol, result.mol_from_vote) == ("1234", False)
         assert [str(c.path) for c in crops] == [str(Path("mol_crops/a_image2.png"))]
 
     def test_small_nothing_read(self, ocr):
-        result, crops = P.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
+        result, crops = R.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
         assert crops == []
         assert result.note == "mol 無值"     # 掃描當下的事實;要不要人工是送審決策的事
 
@@ -99,17 +102,17 @@ def _png(w=100, h=50) -> bytes:
 class TestRunScanWrites:
 
     def test_crops_land_at_the_same_paths_and_fill_the_csv(self, monkeypatch, tmp_path):
-        roi = P.ROI_REGIONS["permit_upper"]
-        monkeypatch.setattr(P.docx_images, "read_images",
+        roi = R.ROI_REGIONS["permit_upper"]
+        monkeypatch.setattr(docx_images, "read_images",
                             lambda p: [(f"image{n}.png", _png()) for n in range(1, 8)])
 
         def large(docx, name, data, roi_filter=""):
             if name != "image5.png":
                 return None
-            r = P.ScanResult(source_docx=docx, image_name=name, docx_class="large",
+            r = ScanResult(source_docx=docx, image_name=name, docx_class="large",
                              id="1234", id_conf=70.0, id_from_vote=True)
-            return P.Reading(r, [
-                P.Crop(P.CropKind.PERMIT, Path("permit_crops/32503_image5.png"), roi),
+            return R.Reading(r, [
+                R.Crop(R.CropKind.PERMIT, Path("permit_crops/32503_image5.png"), roi),
             ])
         out = tmp_path / "out"
 

@@ -126,8 +126,8 @@ class TestSettings:
 
     def test_next_page_is_the_first_permit_scan_setting(self):
         """次頁用的就是許可證掃描第一組(紅通道_2x_中值3),只是不帶 Tesseract 的 psm。"""
-        import pipeline
-        first = pipeline.SCAN_CONFIGS[0]
+        from permit_reading import SCAN_CONFIGS
+        first = SCAN_CONFIGS[0]
         assert first["name"] == "紅通道_2x_中值3"
         assert {k: v for k, v in first.items() if k not in ("name", "psm")} == NEXT_PAGE_DEINK
 

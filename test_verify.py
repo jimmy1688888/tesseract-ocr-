@@ -2,7 +2,7 @@
 """verify_vision_result 與輔助函數的行為測試。
 
 這層是 Vision 結果的最後一道閘門:對每個 Vision OCR 回傳值,做兩層檢查
-(格式 → 雙引擎比對),決定可否自動 key-in。
+(有沒有取到號 → 雙引擎比對),決定可否自動 key-in。
 
 設計原則:**只有雙引擎(Tesseract + Vision)完全一致才自動 key-in**。
 這份測試以可執行規格的形式鎖住這個保守策略。任何放寬(例如「差 1 字元就採 Vision」)
@@ -13,7 +13,7 @@
   TestLikelyOcrConfusion    — 差 1 字元(視覺相近字混淆,仍需審查)
   TestVisionOnly            — Tesseract 沒讀到、僅 Vision 有值(仍需審查)
   TestDisagreement          — 差 2 字元以上(兩引擎不同意)
-  TestFormatInvalid         — Vision 無值或格式不符
+  TestFormatInvalid         — Vision 沒取到號(無正則命中)
   TestEditDistance          — _edit_distance 工具函數
 """
 
@@ -25,7 +25,6 @@ from vision_verification import (
     VerifiedResult,
     VerificationLevel,
     _edit_distance,
-    _is_valid_permit_format,
 )
 
 
@@ -64,7 +63,7 @@ class TestLikelyOcrConfusion:
             vision_value="1234",
             tesseract_candidate="12O4",  # 假設 Tesseract 把 0 看成 O
         )
-        # 注意:_is_valid_permit_format 只看 vision_value,Tesseract 候選可帶字母
+        # Tesseract 候選可帶字母;比對只看兩值的差距
         assert v.level == VerificationLevel.LIKELY_OCR_CONFUSION
         assert v.should_keyin is False
 
@@ -237,11 +236,14 @@ class TestDisagreement:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# FormatInvalid:Vision 無值或格式不符
+# FormatInvalid:Vision 沒取到號
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestFormatInvalid:
-    """第一層格式驗證:Vision 必須回傳 4 位數字才能進入後續比對。"""
+    """第一層:Vision 沒取到號就人工審查。
+
+    取號只會回空或 4 位數(可帶 -x)的值,「有值但格式不符」不會發生(#59 刪掉那條路)。
+    """
 
     def test_empty_vision_value(self):
         """Vision 沒讀到任何東西 → FORMAT_INVALID"""
@@ -254,34 +256,6 @@ class TestFormatInvalid:
         # final_value 退回 Tesseract 候選,方便審查者看
         assert v.final_value == "1234"
         assert "Vision 無正則命中" in v.rationale
-
-    def test_five_digit_vision_value(self):
-        """Vision 回傳 5 位數(超過 permit 規範) → FORMAT_INVALID"""
-        v = verify_vision_result(
-            vision_value="12345",
-            tesseract_candidate="1234",
-        )
-        assert v.level == VerificationLevel.FORMAT_INVALID
-        assert v.should_keyin is False
-        assert "不符合 4 位數格式" in v.rationale
-
-    def test_three_digit_vision_value(self):
-        """Vision 回傳 3 位數 → FORMAT_INVALID"""
-        v = verify_vision_result(
-            vision_value="123",
-            tesseract_candidate="1234",
-        )
-        assert v.level == VerificationLevel.FORMAT_INVALID
-        assert v.should_keyin is False
-
-    def test_alphabetic_vision_value(self):
-        """Vision 回傳含字母(例如把日期讀進來) → FORMAT_INVALID"""
-        v = verify_vision_result(
-            vision_value="ABCD",
-            tesseract_candidate="1234",
-        )
-        assert v.level == VerificationLevel.FORMAT_INVALID
-        assert v.should_keyin is False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -315,40 +289,6 @@ class TestEditDistance:
     ])
     def test_multi_edit_distance(self, a, b, expected):
         assert _edit_distance(a, b) == expected
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 工具函數:_is_valid_permit_format
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestValidPermitFormat:
-    """4 位數(可選帶 -x 後綴)格式檢查。
-
-    支援格式:
-      1234     (4 位純數字)
-      1234-5   (4 位數 + 破折號 + 1 位數字後綴)
-    """
-
-    @pytest.mark.parametrize("value", ["0000", "1234", "9999"])
-    def test_valid_four_digits(self, value):
-        assert _is_valid_permit_format(value) is True
-
-    @pytest.mark.parametrize("value", ["0000-0", "1234-5", "9999-9", "3422-1"])
-    def test_valid_four_digits_with_dash_suffix(self, value):
-        """**新規則**:xxxx-x 也視為合法格式"""
-        assert _is_valid_permit_format(value) is True
-
-    @pytest.mark.parametrize("value", [
-        "", "123", "12345", "ABCD", "12.4", "12 3",
-        "1234-",         # 破折號後無數字
-        "1234-12",       # 後綴超過 1 位數
-        "1234-A",        # 後綴非數字
-        "1234 -5",       # 含空白
-        "-1234-5",       # 多餘破折號
-        "12-3456",       # 位數錯位
-    ])
-    def test_invalid(self, value):
-        assert _is_valid_permit_format(value) is False
 
 
 class TestRegexExtractsDashSuffix:

@@ -19,6 +19,7 @@ import logging
 import pytest
 
 import permit_lookup
+from sheet_row import SheetRow, SheetStatus
 import pipeline
 from batch import Batch
 
@@ -179,10 +180,10 @@ class TestSheetRowSurvivesRosterFailure:
 
     PERMIT = "2340"
 
-    @pytest.mark.parametrize("status", list(pipeline.SheetStatus))
+    @pytest.mark.parametrize("status", list(SheetStatus))
     def test_row_keeps_permit_and_blanks_agency_cols(self, roster_unavailable, status):
         row = pipeline._row_to_sheet_values(
-            pipeline.SheetRow("32417.docx", self.PERMIT, status, "多數票"), {})
+            SheetRow("32417.docx", self.PERMIT, status, "多數票"), {})
         assert row[1] == self.PERMIT          # B 欄：許可證照常有值
         assert row[4:7] == ["", "", ""]       # E~G：機構名稱／地址／電話留空
 

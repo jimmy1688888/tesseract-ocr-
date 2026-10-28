@@ -336,7 +336,7 @@ class TestVisionTextIsPersisted:
     def test_write_failure_does_not_raise(self, tmp_path, monkeypatch):
         """輔助產物寫不出來,不該拖垮已經跑完的主流程。"""
         import pipeline
-        monkeypatch.setattr(pipeline.Path, "mkdir",
+        monkeypatch.setattr(Path, "mkdir",
                             lambda *a, **k: (_ for _ in ()).throw(OSError("nope")))
         assert pipeline.write_employer_texts(
             self._batch(tmp_path / "x"), {"a.docx": {"text": "x"}}) == 0

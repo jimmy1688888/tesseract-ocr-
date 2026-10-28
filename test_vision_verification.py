@@ -31,8 +31,8 @@ class TestPermitInText:
         """ROI → pattern 的選擇只一處:掃描迴圈與 Vision 取號都呼叫 permit_id_patterns。"""
         import inspect
 
-        import pipeline
-        assert "permit_id_patterns(roi_name)" in inspect.getsource(pipeline.scan_image_large)
+        import permit_reading
+        assert "permit_id_patterns(roi_name)" in inspect.getsource(permit_reading.scan_image_large)
         assert permit_patterns.permit_id_patterns("permit_lower") is \
             permit_patterns.RE_PERMIT_ID_LIST_LOWER
         assert permit_patterns.permit_id_patterns("permit_upper") is \

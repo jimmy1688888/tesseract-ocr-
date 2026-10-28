@@ -342,12 +342,12 @@ class TestVotePredicate:
         assert not is_permit_vote(_mol("image2.jpeg", "1234", 90, vote=True))
 
     def test_stop_expanding_uses_the_same_predicate(self):
-        import pipeline
+        from permit_reading import has_permit_vote
         rows = [_permit("image5.jpeg", "1234", CONF_VOTE_MIN + 1, vote=True)]
-        assert pipeline.has_permit_vote(rows) is True
+        assert has_permit_vote(rows) is True
         assert decide(rows).destination is Destination.直接KEYIN
         rows = [_permit("image5.jpeg", "1234", CONF_VOTE_MIN, vote=True)]
-        assert pipeline.has_permit_vote(rows) is False
+        assert has_permit_vote(rows) is False
         assert decide(rows).destination is not Destination.直接KEYIN
 
 

@@ -17,6 +17,8 @@ preflight 的憑證檢查會在掃描前先攔下來,這裡是 --skip-preflight 
 import pytest
 
 import identity
+from sheet_row import SheetRow, SheetStatus
+from submission_decision import Decision, Destination
 import pipeline as P
 from batch import Batch
 from vision_verification import run_vision_items
@@ -41,7 +43,7 @@ def no_credentials():
 def test_permit_reading_aborts_the_run(tmp_path):
     crop = tmp_path / "crop.png"
     crop.write_bytes(b"x")
-    item = P.Decision(source_docx="a.docx", destination=P.Destination.送VISION,
+    item = Decision(source_docx="a.docx", destination=Destination.送VISION,
                       image_name="image5.jpeg", img_path=str(crop),
                       reason="permit部分命中無多數", hit_roi="permit_lower",
                       candidate_value="1234", candidate_conf=60.0)
@@ -56,5 +58,5 @@ def test_employer_fields_abort_the_run(tmp_path):
 
 def test_agency_rescue_degrades_to_nothing_rescued(tmp_path, monkeypatch):
     monkeypatch.setattr(P, "_permit_lookup", lambda: object())   # 名冊在,才走得到 client
-    rows = [P.SheetRow("a.docx", "", P.SheetStatus.MANUAL_REVIEW, "全無命中")]
+    rows = [SheetRow("a.docx", "", SheetStatus.MANUAL_REVIEW, "全無命中")]
     assert P.rescue_manual_review_via_agency_phone(Batch.from_dir(tmp_path), rows) == rows

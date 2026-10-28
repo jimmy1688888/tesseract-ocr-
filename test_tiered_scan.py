@@ -13,6 +13,10 @@ import csv
 
 import pytest
 
+import docx_images
+import permit_reading as R
+from matches_csv import ResultStatus, ScanResult
+from submission_decision import CONF_VOTE_MIN
 import pipeline as P
 from batch import Batch
 
@@ -22,9 +26,9 @@ def _img(n: int) -> tuple[str, bytes]:
 
 
 def _vote_row(docx: str, img: str, value: str = "1234",
-              conf: float = 70.0) -> P.ScanResult:
+              conf: float = 70.0) -> ScanResult:
     """一張讀到 permit 多數票的圖(足以停止擴掃)。"""
-    r = P.ScanResult(source_docx=docx, image_name=img, docx_class="large")
+    r = ScanResult(source_docx=docx, image_name=img, docx_class="large")
     r.id, r.id_conf, r.id_from_vote = value, conf, True
     return r
 
@@ -39,13 +43,13 @@ class Scanned(dict):
     def large(self, docx, name, data, roi_filter=""):
         self["large"].append(name)
         r = self._large_result(docx, name)
-        return P.Reading(r, []) if r else None
+        return R.Reading(r, []) if r else None
 
     def small(self, docx, name, data):
         self["small"].append(name)
-        return P.Reading(P.ScanResult(source_docx=docx, image_name=name,
+        return R.Reading(ScanResult(source_docx=docx, image_name=name,
                                       docx_class="small",
-                                      status=P.ResultStatus.SMALL_NO_HIT), [])
+                                      status=ResultStatus.SMALL_NO_HIT), [])
 
     def run(self, batch, **kw):
         return P.run_scan(batch, read_large=self.large, read_small=self.small, **kw)
@@ -56,7 +60,7 @@ def scan_env(monkeypatch):
     """docx 裡有哪些圖由 images 決定;回傳 Scanned,用它的 run 跑 run_scan。
     輸出目錄由 _batch 指到 tmp。"""
     def make(images, large_result=lambda docx, name: None):
-        monkeypatch.setattr(P.docx_images, "read_images", lambda p: list(images))
+        monkeypatch.setattr(docx_images, "read_images", lambda p: list(images))
         return Scanned(large_result)
 
     return make
@@ -77,7 +81,7 @@ class TestSplitTiers:
 
     def test_partition_is_lossless(self):
         images = [_img(n) for n in range(1, 8)]
-        t1, rest = P.split_tiers(images)
+        t1, rest = R.split_tiers(images)
         assert [n for n, _ in t1] == ["image2.jpeg", "image5.jpeg", "image6.jpeg"]
         assert [n for n, _ in rest] == ["image1.jpeg", "image3.jpeg",
                                         "image4.jpeg", "image7.jpeg"]
@@ -86,12 +90,12 @@ class TestSplitTiers:
     def test_unnumbered_names_go_to_second_tier(self):
         """檔名不是 imageN 的圖身分不明,放進第一層只會白花時間。"""
         images = [("cover.png", b"x"), _img(5)]
-        t1, rest = P.split_tiers(images)
+        t1, rest = R.split_tiers(images)
         assert [n for n, _ in t1] == ["image5.jpeg"]
         assert [n for n, _ in rest] == ["cover.png"]
 
     def test_first_tier_may_be_empty(self):
-        t1, rest = P.split_tiers([_img(1), _img(7)])
+        t1, rest = R.split_tiers([_img(1), _img(7)])
         assert t1 == []
         assert len(rest) == 2
 
@@ -100,7 +104,7 @@ class TestHasPermitVote:
     """只有「可信的 permit 多數票」能停止擴掃。這是兩個坑的正面表述。"""
 
     def test_real_vote_stops_expansion(self):
-        assert P.has_permit_vote([_vote_row("a.docx", "image5.jpeg")])
+        assert R.has_permit_vote([_vote_row("a.docx", "image5.jpeg")])
 
     def test_mol_hit_is_not_enough(self):
         """mol 只證明這是契約頁,不是許可證的讀值。
@@ -108,10 +112,10 @@ class TestHasPermitVote:
         32523 與 32529 的 mol 信心是 37 與 28 —— 拿這種值擋掉擴掃,等於讓
         雜訊決定要不要去找真正的許可證。
         """
-        r = P.ScanResult(source_docx="a.docx", image_name="image2.jpeg",
+        r = ScanResult(source_docx="a.docx", image_name="image2.jpeg",
                          docx_class="large")
         r.mol, r.mol_conf, r.mol_from_vote = "0669", 37.0, True
-        assert not P.has_permit_vote([r])
+        assert not R.has_permit_vote([r])
 
     def test_permit_partial_is_not_enough(self):
         """幾個設定各讀出不同的值、湊不出多數 —— r.id 有值但不算讀到。
@@ -120,15 +124,15 @@ class TestHasPermitVote:
         規則B(低信心時)把整份推去走反查救援,而真正的多數票可能
         就在還沒掃的那幾張圖上。這是分層最危險的一條路徑。
         """
-        r = P.ScanResult(source_docx="a.docx", image_name="image5.jpeg",
+        r = ScanResult(source_docx="a.docx", image_name="image5.jpeg",
                          docx_class="large")
         r.id, r.id_conf = "1284", 40.0          # id 有值,但 id_from_vote 為 False
-        r.status = P.ResultStatus.PERMIT_PARTIAL
-        assert not P.has_permit_vote([r])
+        r.status = ResultStatus.PERMIT_PARTIAL
+        assert not R.has_permit_vote([r])
 
     def test_low_confidence_vote_is_not_enough(self):
-        assert not P.has_permit_vote(
-            [_vote_row("a.docx", "image5.jpeg", conf=P.CONF_VOTE_MIN)]
+        assert not R.has_permit_vote(
+            [_vote_row("a.docx", "image5.jpeg", conf=CONF_VOTE_MIN)]
         )
 
 
@@ -161,9 +165,9 @@ class TestExpansion:
         def partial(docx, name):
             if name != "image5.jpeg":
                 return None
-            r = P.ScanResult(source_docx=docx, image_name=name, docx_class="large")
+            r = ScanResult(source_docx=docx, image_name=name, docx_class="large")
             r.id, r.id_conf = "1284", 40.0
-            r.status = P.ResultStatus.PERMIT_PARTIAL
+            r.status = ResultStatus.PERMIT_PARTIAL
             return r
 
         scanned = scan_env([_img(n) for n in range(1, 8)], large_result=partial)
@@ -248,7 +252,7 @@ class TestScanTierIsRecorded:
         """第一層只讀到 mol(不足以停止擴掃)、真正的多數票在第二層的 image4。"""
         def result(docx, name):
             if name == "image2.jpeg":
-                r = P.ScanResult(source_docx=docx, image_name=name,
+                r = ScanResult(source_docx=docx, image_name=name,
                                  docx_class="large")
                 r.mol, r.mol_conf, r.mol_from_vote = "0669", 37.0, True
                 return r
@@ -281,13 +285,13 @@ class TestScanTierIsRecorded:
         assert _rows(tmp_path)[0]["scan_tier"] == "1"
 
     def test_column_survives_csv_round_trip(self):
-        r = P.ScanResult(source_docx="a.docx", image_name="image4.jpeg",
+        r = ScanResult(source_docx="a.docx", image_name="image4.jpeg",
                          docx_class="large", scan_tier=2)
-        assert P.ScanResult.from_csv_row(r.to_csv_row()).scan_tier == 2
+        assert ScanResult.from_csv_row(r.to_csv_row()).scan_tier == 2
 
     def test_old_csv_without_the_column_reads_as_first_tier(self):
         """舊 matches.csv 沒有這欄,不能讓缺欄變成無意義的 0。"""
-        assert P.ScanResult.from_csv_row({"source_docx": "a.docx"}).scan_tier == 1
+        assert ScanResult.from_csv_row({"source_docx": "a.docx"}).scan_tier == 1
 
 
 class TestOutputFollowsBatch:

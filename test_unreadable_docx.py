@@ -22,6 +22,8 @@ import pytest
 from PIL import Image
 
 import google_clients
+import permit_reading as R
+from matches_csv import ResultStatus, ScanResult
 import pipeline as P
 from batch import Batch
 from employer_result import DOUBT_KEY, EMPLOYER_COLUMNS
@@ -83,10 +85,10 @@ def good_small(d: Path) -> Path:
 
 
 BAD = [
-    pytest.param(no_media, NO_IMAGES_REASON, P.ResultStatus.NO_IMAGES, id="no_media"),
-    pytest.param(emf_only, NO_IMAGES_REASON, P.ResultStatus.NO_IMAGES, id="emf_only"),
-    pytest.param(not_zip, UNREADABLE_REASON, P.ResultStatus.UNREADABLE, id="not_zip"),
-    pytest.param(corrupt_zip, UNREADABLE_REASON, P.ResultStatus.UNREADABLE, id="corrupt_zip"),
+    pytest.param(no_media, NO_IMAGES_REASON, ResultStatus.NO_IMAGES, id="no_media"),
+    pytest.param(emf_only, NO_IMAGES_REASON, ResultStatus.NO_IMAGES, id="emf_only"),
+    pytest.param(not_zip, UNREADABLE_REASON, ResultStatus.UNREADABLE, id="not_zip"),
+    pytest.param(corrupt_zip, UNREADABLE_REASON, ResultStatus.UNREADABLE, id="corrupt_zip"),
 ]
 
 
@@ -94,7 +96,7 @@ BAD = [
 def mol_hit():
     """好的 small docx:每張圖都讀到同一個 mol 多數票(不跑 Tesseract)。注入 run_scan 用。"""
     def fake(docx, name, data):
-        return P.Reading(P.ScanResult(source_docx=docx, image_name=name, docx_class="small",
+        return R.Reading(ScanResult(source_docx=docx, image_name=name, docx_class="small",
                                       mol="1234", mol_conf=80.0, mol_from_vote=True,
                                       hit_roi="mol"), [])
     return fake
@@ -115,7 +117,7 @@ class TestScanWritesPlaceholder:
         P.run_scan(Batch((p,), source=tmp_path, output_dir=tmp_path / "out"))
 
         [row] = _csv_rows(tmp_path / "out" / "matches.csv")
-        r = P.ScanResult.from_csv_row(row)
+        r = ScanResult.from_csv_row(row)
         assert r.source_docx == p.name
         assert r.status is status
         assert r.image_name == ""
@@ -139,7 +141,7 @@ class TestDirectManualReview:
     def test_decision(self, make, reason, status, tmp_path):
         p = make(tmp_path)
         P.run_scan(Batch((p,), source=tmp_path, output_dir=tmp_path))
-        rows = [P.ScanResult.from_csv_row(r) for r in _csv_rows(tmp_path / "matches.csv")]
+        rows = [ScanResult.from_csv_row(r) for r in _csv_rows(tmp_path / "matches.csv")]
 
         d = decide(rows)
         assert d.destination is Destination.直接人工審查

@@ -7,7 +7,6 @@ permit_patterns,依截圖所屬的 ROI 選 pattern。
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -70,8 +69,10 @@ def run_vision_items(decisions: list[Decision],
 # ⑧b Vision 結果交叉比對
 # ═══════════════════════════════════════════════════════════════════════════
 # 目的:Vision 自己讀到一個值不代表就對。本層用兩層檢查:
-#   1. 格式驗證 — Vision 值必須是 4 位數(基本 sanity check)
+#   1. Vision 有沒有取到號 — 沒有就人工審查
 #   2. 雙引擎交叉 — Vision 值與 Tesseract 原本讀到的值是否一致
+# 取號(permit_patterns.permit_in_text)只會回空或「4 位數、可帶 -x」的值,所以這裡
+# 不再另驗格式(#59:「有值但格式不符」那條路走不到)。
 #
 # 設計原則:保守。**只有當 Tesseract 與 Vision 完全一致時才自動 key-in**,
 # 其餘所有情境一律標記人工審查。
@@ -81,7 +82,7 @@ class VerificationLevel(str, Enum):
     LIKELY_OCR_CONFUSION = "likely_ocr_confusion"  # 差 1 字元(視覺相近字常見)
     VISION_ONLY          = "vision_only"           # Tesseract 沒讀到,僅 Vision 有值
     DISAGREEMENT         = "disagreement"          # 兩引擎差異 2 字元以上
-    FORMAT_INVALID       = "format_invalid"        # Vision 無值或值不符 4 位數格式
+    FORMAT_INVALID       = "format_invalid"        # Vision 沒取到號(無正則命中)
 
 
 @dataclass
@@ -95,19 +96,6 @@ class VerifiedResult:
     level: VerificationLevel
     should_keyin: bool
     rationale: str
-
-
-# 4 位數格式檢查:Vision 回傳的值必須是純 4 位數字才接受,或 4 位數+破折號+1 位數(xxxx-x)。
-# 這是「最低門檻」:Vision 偶爾會把日期、頁碼、其他不相關文字解析為候選值,
-# 此 regex 把這類雜訊濾掉。接受格式:
-#   1234     (4 位純數字)
-#   1234-5   (4 位數+破折號+1 位數)
-_RE_PERMIT_VALUE = re.compile(r"^\d{4}(?:-\d)?$")
-
-
-def _is_valid_permit_format(value: str) -> bool:
-    """Vision 值是否符合 4 位數 permit/mol 格式。"""
-    return bool(value and _RE_PERMIT_VALUE.match(value))
 
 
 def _edit_distance(a: str, b: str) -> int:
@@ -139,7 +127,7 @@ def verify_vision_result(
     *,
     tesseract_conf: float = 0.0,
 ) -> VerifiedResult:
-    """對 Vision 的結果做交叉比對(格式 → 雙引擎)。
+    """對 Vision 的結果做交叉比對(有沒有取到號 → 雙引擎)。
 
     決策表(保守版,僅 CONFIRMED 自動 key-in):
       Level                   | Action                | final_value 來源
@@ -154,24 +142,21 @@ def verify_vision_result(
       的信心寫進 rationale 供人工參考。
 
     參數:
-      vision_value         : Vision OCR 萃取的值。空字串代表 Vision 沒有正則命中。
+      vision_value         : Vision OCR 萃取的值(permit_in_text:空,或 4 位數可帶 -x)。
+                             空字串代表 Vision 沒有正則命中。
       tesseract_candidate  : 該圖在 Tesseract 階段讀到的最佳候選(可為空字串)。
       tesseract_conf       : 該 tesseract_candidate 對應的 Tesseract 信心(0-100);
                              只寫進 LIKELY_OCR_CONFUSION 的 rationale,不影響取值。
 
     回傳:VerifiedResult,呼叫端據此決定該列進 key-in 批次或人工審查批次。
     """
-    # ── 第一層:格式 ──────────────────────────────────────────────────
-    if not _is_valid_permit_format(vision_value):
+    # ── 第一層:Vision 沒取到號 ─────────────────────────────────────────
+    if not vision_value:
         return VerifiedResult(
-            final_value=vision_value or tesseract_candidate,
+            final_value=tesseract_candidate,
             level=VerificationLevel.FORMAT_INVALID,
             should_keyin=False,
-            rationale=(
-                "Vision 無正則命中,需人工審查"
-                if not vision_value
-                else f"Vision 值 {vision_value!r} 不符合 4 位數格式"
-            ),
+            rationale="Vision 無正則命中,需人工審查",
         )
 
     # ── 第二層:跟 Tesseract 比對 ────────────────────────────────────

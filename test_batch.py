@@ -13,6 +13,7 @@ import pytest
 
 import employer_extract
 import google_clients
+import docx_images
 import pipeline
 from batch import Batch
 from sheet_row import SheetRow, SheetStatus
@@ -177,7 +178,7 @@ class TestMainStopsWhenNothingToProcess:
             raise _Stop      # 本檔只關心「有沒有開跑、跑哪幾份」,後面的步驟不走
 
         monkeypatch.setattr(pipeline, "run_scan", fake_run_scan)
-        monkeypatch.setattr(pipeline.docx_images, "read_images", lambda p: [])
+        monkeypatch.setattr(docx_images, "read_images", lambda p: [])
         return calls
 
     def test_missing_file_is_not_scanned(self, caplog, scanned, tmp_path):
