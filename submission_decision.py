@@ -9,8 +9,8 @@ Sheets 上只有一列);舊做法逐圖決定,同一份 docx 會進佇列多次�
 多數票判斷與各信心門檻只記在這裡:停止擴掃(ADR-0005)與規則 A2 用同一個
 is_permit_vote —— 兩者不一致時,分層掃描會在 A2 不採用的值上停下來。
 
-輸入是 permit_reading 的 ScanResult(單張圖的讀值整理,decide_result 已寫好 final_value、
-vision_review、note);這裡只讀屬性。permit_reading 反過來 import 這裡的門檻與
+輸入是 permit_reading 的 ScanResult(一張圖讀到的值、信心、是否多數票、兩 ROI 是否互證、
+命中狀態);這裡只讀屬性,所有判斷在這裡做(ADR-0013)。permit_reading 反過來 import 這裡的門檻與
 is_permit_vote,所以只在型別標註時 import 它,免得循環匯入。
 """
 from __future__ import annotations
@@ -154,14 +154,15 @@ def _decide_large(rows: list[ScanResult]) -> Decision:
         return _decision(r, Destination.直接KEYIN, r.id, r.id_conf,
                          f"permit多數票_高信心_最早圖({r.image_name}) conf={r.id_conf}")
 
-    # 規則B(部分命中無多數)與規則C(其餘需覆核):合併後只選一張
+    # 走到這裡,整份只有一種 ROI 讀到值(只有 mol、或只有 permit)。
+    # 規則B(部分命中無多數)與規則C(讀值信心不足):合併後只選一張
     cands: list[tuple[ScanResult, str, float, str]] = []
     for r in rows:
         if r.status == _PERMIT_PARTIAL:
-            cands.append((r, r.id or r.final_value, r.id_conf or r.final_conf,
-                          "permit部分命中無多數"))
-        elif r.vision_review:
-            cands.append((r, r.final_value, r.final_conf, r.note or "large:讀值信心不足"))
+            cands.append((r, r.id, r.id_conf, "permit部分命中無多數"))
+        elif (why := _low_conf_reason(r)):
+            v, c = _single_roi_value(r)
+            cands.append((r, v, _conf1(c), why))
     if cands:
         r, v, c, why = _pick(cands)
         why = why + _others(cands, r)
@@ -170,12 +171,45 @@ def _decide_large(rows: list[ScanResult]) -> Decision:
         return _decision(r, Destination.送VISION, v, c, why)
 
     # 沒有需覆核的列:信心最高的讀值直接 key-in
-    valued = [r for r in rows if r.final_value]
+    valued = [(r, v, _conf1(c)) for r in rows for v, c in [_single_roi_value(r)] if v]
     if valued:
-        r = max(valued, key=lambda r: r.final_conf)
-        return _decision(r, Destination.直接KEYIN, r.final_value, r.final_conf,
-                         f"高信心直接key-in conf={r.final_conf}")
+        r, v, c = max(valued, key=lambda x: x[2])
+        return _decision(r, Destination.直接KEYIN, v, c, f"高信心直接key-in conf={c}")
     return _no_hit(rows, f"large docx：{len(rows)} 張圖皆無可用讀值")
+
+
+def _single_roi_value(r: ScanResult) -> tuple[str, float]:
+    """large 一張圖的讀值(整份只有一種 ROI 讀到值時才問;兩種都有已在規則 A 回傳)。"""
+    return (r.mol, r.mol_conf) if r.mol else (r.id, r.id_conf)
+
+
+def _low_conf_reason(r: ScanResult) -> str:
+    """large 一張圖的讀值信心不足以直接 key-in 時,為什麼(原樣進 Sheets D 欄);足夠則空。
+
+    多數票的門檻比單次讀值低(重複性本身即第二證據);mol 與 permit 兩 ROI 互證時,
+    互證的值仍要過 CONF_KEY_IN。門檻比的是讀到的信心本身,不先取整。
+    """
+    why = ""
+    if not (r.mol or r.id):
+        return why
+    if r.mol:
+        conf = r.mol_conf
+        if conf <= (CONF_MOL_VOTE_MIN if r.mol_from_vote else CONF_KEY_IN):
+            why = "僅mol，多數票信心低" if r.mol_from_vote else "僅mol，信心低"
+    else:
+        conf = r.id_conf
+        if r.id_from_vote:   # 過 CONF_VOTE_MIN 的多數票已在規則 A2 直接 key-in
+            why = "permit多數票，信心低"
+        elif conf <= CONF_KEY_IN:
+            why = "僅permit，信心低"
+    if r.cross_match and conf <= CONF_KEY_IN:
+        why = f"{why} 多數決信心低".strip()
+    return why
+
+
+def _conf1(conf: float) -> float:
+    """理由與候選值裡的信心取到小數一位(與 matches.csv 寫出的一致)。"""
+    return round(conf, 1) if conf else 0.0
 
 
 def _decide_small(rows: list[ScanResult]) -> Decision:

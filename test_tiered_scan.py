@@ -26,7 +26,6 @@ def _vote_row(docx: str, img: str, value: str = "1234",
     """一張讀到 permit 多數票的圖(足以停止擴掃)。"""
     r = P.ScanResult(source_docx=docx, image_name=img, docx_class="large")
     r.id, r.id_conf, r.id_from_vote = value, conf, True
-    r.final_value, r.final_conf = value, conf
     return r
 
 
@@ -112,7 +111,6 @@ class TestHasPermitVote:
         r = P.ScanResult(source_docx="a.docx", image_name="image2.jpeg",
                          docx_class="large")
         r.mol, r.mol_conf, r.mol_from_vote = "0669", 37.0, True
-        r.final_value, r.final_conf = "0669", 37.0
         assert not P.has_permit_vote([r])
 
     def test_permit_partial_is_not_enough(self):

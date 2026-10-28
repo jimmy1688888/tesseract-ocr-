@@ -145,15 +145,13 @@ class TestDefaultDecisionsAdapter:
         p = self._csv(tmp_path, [
             # 高信心多數票 → 直接 key-in
             {"source_docx": "a.docx", "image_name": "image5.jpeg", "docx_class": "large",
-             "id": "1234", "id_conf": 80.0, "id_from_vote": True,
-             "final_value": "1234", "final_conf": 80.0},
+             "id": "1234", "id_conf": 80.0, "id_from_vote": True},
             # 全無命中 → 反查救援
             {"source_docx": "b.docx", "image_name": "image5.jpeg", "docx_class": "large",
              "status": LARGE_NO_HIT},
             # mol 單一判讀、信心不足以 key-in → 送 Vision
             {"source_docx": "c.docx", "image_name": "image2.jpeg", "docx_class": "large",
-             "mol": "5678", "mol_conf": 53.0, "final_value": "5678", "final_conf": 53.0,
-             "vision_review": True},
+             "mol": "5678", "mol_conf": 53.0},
         ])
         got = snap._default_decisions(p)
         assert got["a.docx"] == [{"去向": "直接key-in", "候選值": "1234", "圖": "image5.jpeg",
@@ -161,13 +159,12 @@ class TestDefaultDecisionsAdapter:
         assert got["b.docx"] == [{"去向": "反查救援", "候選值": "", "圖": "",
                                   "理由": "large docx：全 1 張圖掃描無許可證命中"}]
         assert got["c.docx"] == [{"去向": "送Vision", "候選值": "5678", "圖": "image2.jpeg",
-                                  "理由": "large:讀值信心不足"}]
+                                  "理由": "僅mol，信心低"}]
 
     def test_low_conf_single_read_is_rescue(self, tmp_path):
         p = self._csv(tmp_path, [
             {"source_docx": "d.docx", "image_name": "image5.jpeg", "docx_class": "large",
-             "id": "1234", "id_conf": 40.0, "final_value": "1234", "final_conf": 40.0,
-             "vision_review": True, "status": PERMIT_PARTIAL},
+             "id": "1234", "id_conf": 40.0, "status": PERMIT_PARTIAL},
         ])
         assert snap._default_decisions(p)["d.docx"] == [
             {"去向": "反查救援", "候選值": "1234", "圖": "image5.jpeg",

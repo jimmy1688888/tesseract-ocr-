@@ -141,8 +141,7 @@ INPUT_DIR  = Path("./docs")
 # 要模擬哪個服務帳號、用量記到哪個 GCP 專案：見 identity.py。
 
 # 信心門檻
-# 送審決策的門檻只記一份,在 submission_decision(#40);這裡沿用同名供掃描與
-# decide_result 使用。
+# 送審決策的門檻只記一份,在 submission_decision(#40);這裡沿用同名供掃描使用。
 from submission_decision import (  # noqa: E402
     CONF_KEY_IN, CONF_MOL_VOTE_MIN, CONF_VOTE_MIN,
     Decision, Destination, decide, is_permit_vote)
@@ -153,7 +152,7 @@ from permit_reading import (  # noqa: E402,F401
     CSV_FIELDS, FALLBACK_CONFIGS, PERMIT_VOTE_CONFIGS, ROI_REGIONS, SCAN_CONFIGS,
     TESS_LANG, TIER1_IMAGES, WHITELIST_LATIN, Crop, LargeDocxReading, Reading,
     ResultStatus, ScanResult, Vote, aggregate_small_docx, build_tess_config,
-    decide_result, has_permit_vote, majority_vote, ocr_with_conf, read_large_docx,
+    has_permit_vote, majority_vote, ocr_with_conf, read_large_docx,
     roi_field, scan_image_large, scan_image_mol_only, split_tiers, tesseract,
     _empty_result)
 

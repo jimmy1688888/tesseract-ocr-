@@ -7,7 +7,9 @@
 
   scan_image_large / scan_image_mol_only   一張圖 → Reading(ScanResult, crops)
   read_large_docx                           一份 large docx 的分層掃描(ADR-0005)
-  decide_result / aggregate_small_docx      單張圖的初步決策 / small docx 的整份決策
+  aggregate_small_docx                      small docx 的整份決策
+
+large 的讀值不在這裡判斷:門檻與要不要送 Vision 只在送審決策(ADR-0013)。
 
 送審決策(一份 docx 一個決定)在 submission_decision,吃這裡的 ScanResult。
 """
@@ -27,7 +29,7 @@ import docx_images
 from permit_patterns import RE_PERMIT_ID_LIST_LOWER, find_permits, permit_id_patterns
 from pixels import preprocess
 from submission_decision import (
-    CONF_KEY_IN, CONF_MOL_VOTE_MIN, CONF_VOTE_MIN, is_permit_vote)
+    CONF_KEY_IN, CONF_MOL_VOTE_MIN, is_permit_vote)
 
 logger = logging.getLogger(__name__)
 
@@ -603,7 +605,7 @@ ReadImage = Callable[[str, bytes], "Reading | None"]
 
 class LargeDocxReading(NamedTuple):
     """一份 large docx 的分層掃描結果。"""
-    readings: list[Reading]   # 有命中的圖,依掃描順序;已跑過 decide_result、標好 scan_tier
+    readings: list[Reading]   # 有命中的圖,依掃描順序;標好 scan_tier
     stopped_at_tier1: bool    # 第一層就拿到 permit 多數票,沒有擴掃
     expanded: bool            # 第一層沒拿到、擴掃了其餘的圖
     scanned: int              # 實際掃了幾張
@@ -611,7 +613,7 @@ class LargeDocxReading(NamedTuple):
 
 def _read_tier(docx_name: str, images: list[tuple[str, bytes]], read_image: ReadImage,
                tier: int) -> list[Reading]:
-    """掃一層的圖，回傳有命中的判讀（已跑過 decide_result 並標上 scan_tier）。"""
+    """掃一層的圖，回傳有命中的判讀（標上 scan_tier）。"""
     out: list[Reading] = []
     for img_name, img_bytes in images:
         reading = read_image(img_name, img_bytes)
@@ -619,15 +621,12 @@ def _read_tier(docx_name: str, images: list[tuple[str, bytes]], read_image: Read
             logger.debug(f"  {docx_name} / {img_name}  未命中")
             continue
         result = reading.result
-        decide_result(result)
         result.scan_tier = tier
         out.append(reading)
         logger.info(
             f"★ {docx_name}/{img_name}"
             f"  [large|T{tier}|{result.hit_roi}]"
-            f"  mol={result.mol!r} id={result.id!r}"
-            f"  final={result.final_value!r}"
-            f"  vision={result.vision_review!r}"
+            f"  mol={result.mol!r}({result.mol_conf}) id={result.id!r}({result.id_conf})"
         )
     return out
 
@@ -653,70 +652,8 @@ def read_large_docx(docx_name: str, images: list[tuple[str, bytes]],
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ④ 單張決策（decide_result / aggregate_small_docx）
+# ④ small docx 的整份決策（aggregate_small_docx）
 # ═══════════════════════════════════════════════════════════════════════════
-
-def decide_result(result: ScanResult) -> ScanResult:
-    """根據 OCR 結果決定 final_value / vision_review / note。
-
-    注意此函數就地修改並回傳同一個 ScanResult(維持 dict 版時的語意)。
-    重構前因為 dict 欄位型別不固定(mol_conf 可能是 "" / float / "67.3"),
-    需要 _to_f() 在使用前翻譯;現在 dataclass 強制 float,_to_f 已刪除。
-    """
-    mol         = result.mol
-    id_         = result.id
-    mol_conf    = result.mol_conf
-    id_conf     = result.id_conf
-    cross       = result.cross_match
-    docx_class  = result.docx_class
-    id_from_vote  = result.id_from_vote
-    mol_from_vote = result.mol_from_vote
-
-    final_value = ""
-    final_conf  = 0.0
-    vision_review = False
-    note = result.note
-
-    if mol and id_:
-        if mol_conf >= id_conf:
-            final_value, final_conf = mol, mol_conf
-            note = "mol勝(信心高)" if mol_conf != id_conf else "mol==permit"
-        else:
-            final_value, final_conf = id_, id_conf
-            note = "permit勝(信心高)"
-        if final_conf <= CONF_KEY_IN:
-            vision_review = True
-        if mol_conf > id_conf and mol != id_:
-            vision_review = True
-            note = "mol≠permit，mol信心高，值衝突"
-    elif mol:
-        final_value, final_conf = mol, mol_conf
-        if docx_class == "large":
-            mol_threshold = CONF_MOL_VOTE_MIN if mol_from_vote else CONF_KEY_IN
-            if mol_conf <= mol_threshold:
-                vision_review = True
-                note = "僅mol，多數票信心低" if mol_from_vote else "僅mol，信心低"
-    elif id_:
-        final_value, final_conf = id_, id_conf
-        threshold = CONF_VOTE_MIN if id_from_vote else CONF_KEY_IN
-        if id_conf <= threshold:
-            vision_review = True
-            note = "permit多數票，信心低" if id_from_vote else "僅permit，信心低"
-
-    if cross and final_conf <= CONF_KEY_IN:
-        vision_review = True
-        note = (note + " 多數決信心低").strip() if note else "多數決信心低"
-
-    if result.status == ResultStatus.PERMIT_PARTIAL:
-        vision_review = True
-        note = (note + " permit部分命中無多數").strip() if note else "permit部分命中無多數"
-
-    result.final_value   = final_value
-    result.final_conf    = round(final_conf, 1) if final_conf else 0.0
-    result.vision_review = vision_review
-    result.note          = note
-    return result
-
 
 def aggregate_small_docx(results: list[ScanResult]) -> list[ScanResult]:
     """small docx 的批次決策。

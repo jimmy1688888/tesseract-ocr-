@@ -7,6 +7,7 @@ OCR 由參數注入,所以這裡全部不跑 Tesseract、不需要真的影像,�
 """
 import permit_reading as R
 from permit_reading import PERMIT_VOTE_CONFIGS, ROI_REGIONS, ScanResult
+from submission_decision import CONF_VOTE_MIN
 
 ROI_NAME = {v: k for k, v in ROI_REGIONS.items()}
 FIRST_HIT = R.SCAN_CONFIGS + R.FALLBACK_CONFIGS
@@ -156,7 +157,7 @@ class TestReadLargeDocx:
             ("image4.jpeg", 2)]
 
     def test_low_confidence_vote_does_not_stop(self):
-        read, _ = _reader({"image5.jpeg": _vote("image5.jpeg", conf=R.CONF_VOTE_MIN)})
+        read, _ = _reader({"image5.jpeg": _vote("image5.jpeg", conf=CONF_VOTE_MIN)})
         assert R.read_large_docx("a.docx", self.IMAGES, read).expanded
 
     def test_nothing_left_to_expand(self):
@@ -171,11 +172,12 @@ class TestReadLargeDocx:
         assert not scan.expanded
         assert {r.result.scan_tier for r in scan.readings} == {1}
 
-    def test_readings_are_decided(self):
-        """每張命中的圖已跑過 decide_result(final_value 有值),送審決策才讀得到。"""
+    def test_readings_are_not_judged_here(self):
+        """掃描只留讀值;要不要送 Vision 在送審決策判(ADR-0013)。"""
         read, _ = _reader({"image5.jpeg": _vote("image5.jpeg")})
         [reading] = R.read_large_docx("a.docx", self.IMAGES, read).readings
-        assert (reading.result.final_value, reading.result.final_conf) == ("1234", 70.0)
+        assert (reading.result.id, reading.result.id_conf) == ("1234", 70.0)
+        assert (reading.result.final_value, reading.result.vision_review) == ("", False)
 
 
 def test_permit_reading_does_not_import_pipeline():
