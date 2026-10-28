@@ -90,6 +90,9 @@ _Avoid_: 快速掃描、預掃、prescan
 決定(一份 docx 只有一列 —— 一批裡的每份 docx 都有,連讀不到圖的也有)。人工審查通常
 不是去向,是送 Vision 或反查救援之後的結果;只有 docx 本身讀不到圖(沒有可讀的內嵌圖、
 檔案打不開)時直接人工審查 —— 沒有圖,Vision 與反查救援都無從做起。
+所有信心門檻與判斷都在這裡;許可證掃描只留下**讀值**(值、信心、是否多數票、兩 ROI
+是否互證、命中狀態),不預先判斷要不要送 Vision(見
+[ADR-0013](docs/adr/0013-matches-csv-holds-readings-only.md))。
 _Avoid_: 分流、vision_submit、routing
 
 **多數票**:
