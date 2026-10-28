@@ -48,7 +48,6 @@ Google 認證（程式內服務帳戶模擬，不使用金鑰檔）：
   完整決策脈絡見 foreign-worker-query 的 docs/adr/0002。
 """
 
-import re
 import csv
 import json
 import time
@@ -644,20 +643,18 @@ def write_sheets_batched(rows: list[SheetRow],
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _save_review_images(review_dir: Path, docx_path: Path,
-                        images: list[tuple[str, bytes]], wanted: set[int]) -> list[str]:
-    """把指定編號（依檔名 imageN 的 N）的原圖存到人工比對資料夾，回傳已存檔名。
+                        images: list[tuple[str, bytes]]) -> list[str]:
+    """把原圖存到人工比對資料夾，回傳已存檔名。
 
     用於「全無命中」的 docx：留下關鍵頁原圖，人工可直接開來對照缺漏原因。
-    存整張原圖（非 ROI 裁切）；找不到對應編號者略過。
+    存哪幾張由 permit_reading.scan_docx 決定;存整張原圖（非 ROI 裁切）。
     """
     review_dir.mkdir(parents=True, exist_ok=True)
     saved: list[str] = []
     for name, data in images:
-        m = re.search(r"(\d+)", name)
-        if m and int(m.group(1)) in wanted:
-            dst = review_dir / f"{docx_path.stem}_{name}"
-            dst.write_bytes(data)
-            saved.append(dst.name)
+        dst = review_dir / f"{docx_path.stem}_{name}"
+        dst.write_bytes(data)
+        saved.append(dst.name)
     return saved
 
 
@@ -735,11 +732,10 @@ def run_scan(batch: Batch, image_filter: str = "",
                 expanded_docs += scan.tier is TierOutcome.擴掃
 
             if scan.review_images:
-                scanned = [(n, b) for n, b in images if not image_filter or n == image_filter]
                 saved = _save_review_images(batch.no_hit_review_dir, docx_path,
-                                            scanned, scan.review_images)
+                                            scan.review_images)
                 logger.info(
-                    f"  ⚠ {docx_name} {scan.docx_class}全無命中 → 標記人工審查"
+                    f"  ⚠ {docx_name} {scan.docx_class}全無命中"
                     f"，存原圖供比對 {saved}"
                 )
 

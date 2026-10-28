@@ -74,7 +74,7 @@ class TestUnscannable:
         [row] = [r.result for r in scan.rows]
         assert (row.source_docx, row.image_name, row.docx_class) == ("a.docx", "", "")
         assert (row.status, row.note) == (status, note)
-        assert (scan.docx_class, scan.review_images, scan.scanned) == ("", frozenset(), 0)
+        assert (scan.docx_class, scan.review_images, scan.scanned) == ("", [], 0)
         assert large.seen == small.seen == []
 
 
@@ -105,7 +105,7 @@ class TestLarge:
         scan = _scan(_imgs(1, 2, 3, 4, 5, 6, 7), large=Reader("large", {"image5.jpeg": VOTE}))
         assert _rows(scan) == [("image5.jpeg", ResultStatus.OK, 1)]
         assert (scan.tier, scan.review_images, scan.scanned) == (
-            R.TierOutcome.第一層命中, frozenset(), 3)
+            R.TierOutcome.第一層命中, [], 3)
 
     def test_no_hit_after_expanding_is_marked_second_tier(self):
         scan = _scan(_imgs(1, 2, 3, 4, 5, 6, 7))
@@ -113,7 +113,7 @@ class TestLarge:
         [row] = [r.result for r in scan.rows]
         assert (row.note, row.docx_class) == ("large:全無命中", "large")
         assert scan.tier is R.TierOutcome.擴掃
-        assert scan.review_images == {2, 5, 6}
+        assert scan.review_images == _imgs(2, 5, 6)
 
     def test_no_hit_with_nothing_to_expand_stays_first_tier(self):
         scan = _scan(_imgs(1, 2, 3, 4, 5, 6, 7), full_scan=True)
@@ -123,6 +123,7 @@ class TestLarge:
     def test_placeholder_names_the_filtered_image(self):
         scan = _scan(_imgs(1, 2, 3, 4, 5, 6, 7), image_filter="image6.jpeg")
         assert _rows(scan) == [("image6.jpeg", ResultStatus.LARGE_NO_HIT, 1)]
+        assert scan.review_images == _imgs(6)    # 只存掃過的那張
 
 
 class TestSmall:
@@ -131,13 +132,13 @@ class TestSmall:
         small = Reader("small", {"image2.jpeg": {"mol": "1234", "mol_conf": 60.0}})
         scan = _scan(_imgs(1, 2, 3), small=small)
         assert _rows(scan) == [("image2.jpeg", ResultStatus.OK, 1)]
-        assert (scan.review_images, scan.tier, scan.scanned) == (frozenset(), None, 3)
+        assert (scan.review_images, scan.tier, scan.scanned) == ([], None, 3)
 
     def test_all_no_hit_writes_every_row_as_small_no_hit(self):
         scan = _scan(_imgs(1, 2, 3))
         assert _rows(scan) == [(f"image{i}.jpeg", ResultStatus.SMALL_NO_HIT, 1) for i in (1, 2, 3)]
         assert {r.result.note for r in scan.rows} == {"small:無命中"}
-        assert scan.review_images == {2, 3}
+        assert scan.review_images == _imgs(2, 3)
 
     def test_small_is_not_tiered(self):
         small = Reader("small")

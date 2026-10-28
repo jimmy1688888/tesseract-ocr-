@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import re
 from enum import Enum
 import logging
 from pathlib import Path
@@ -509,10 +510,21 @@ def unscannable(images: list[tuple[str, bytes]] | None) -> tuple[ResultStatus, s
 class DocxScan(NamedTuple):
     """一份 docx 的許可證掃描:它在 matches.csv 的列,與要存給人比對的原圖。"""
     rows: list[Reading]               # 依寫出順序;至少一列。裁切圖還沒寫出
-    review_images: frozenset[int]     # 全無命中時要存的原圖(imageN 的 N);其餘為空
+    review_images: list[tuple[str, bytes]]   # 全無命中時要存給人比對的原圖;其餘為空
     docx_class: str                   # small / large;讀不到圖為 ""
     tier: TierOutcome | None          # large 的分層結果;其餘為 None
     scanned: int                      # 實際掃了幾張圖
+
+
+def _review_images(images: list[tuple[str, bytes]], wanted: frozenset[int]
+                   ) -> list[tuple[str, bytes]]:
+    """要存給人比對的原圖:檔名裡第一串數字在 wanted 裡的(找不到對應編號者略過)。"""
+    out = []
+    for name, data in images:
+        m = re.search(r"(\d+)", name)
+        if m and int(m.group(1)) in wanted:
+            out.append((name, data))
+    return out
 
 
 def scan_docx(docx_name: str, images: list[tuple[str, bytes]] | None,
@@ -533,8 +545,8 @@ def scan_docx(docx_name: str, images: list[tuple[str, bytes]] | None,
     if nothing:
         placeholder = _empty_result(docx_name, "", "")
         placeholder.status, placeholder.note = nothing
-        logger.warning(f"  ⚠ {docx_name} {placeholder.note} → 直接人工審查")
-        return DocxScan([Reading(placeholder, [])], frozenset(), "", None, 0)
+        logger.warning(f"  ⚠ {docx_name} {placeholder.note}")
+        return DocxScan([Reading(placeholder, [])], [], "", None, 0)
 
     # docx_class 一律用「原始張數」判定，必須在任何過濾之前算：把過濾後
     # 的張數丟進 classify_by_count，5 張圖的 docx 剩 3 張就會被判成
@@ -563,11 +575,11 @@ def _small_rows(docx_name: str, images: list[tuple[str, bytes]],
     # winner 與門檻在送審決策(ADR-0013)。
     hits = [r for r in readings if r.result.mol or r.result.id]
     if hits:
-        rows, review = hits, frozenset()
+        rows, review = hits, []
     else:
         for r in readings:
             r.result.status, r.result.note = ResultStatus.SMALL_NO_HIT, "small:無命中"
-        rows, review = readings, NO_HIT_REVIEW_SMALL
+        rows, review = readings, _review_images(images, NO_HIT_REVIEW_SMALL)
     for r in rows:
         logger.info(
             f"★ {docx_name} / {r.result.image_name}"
@@ -581,17 +593,17 @@ def _large_rows(docx_name: str, images: list[tuple[str, bytes]],
                 read_large: ReadImage, full_scan: bool) -> DocxScan:
     scan = read_large_docx(docx_name, images, read_large, full_scan=full_scan)
     if scan.readings:
-        return DocxScan(scan.readings, frozenset(), "large", scan.tier, scan.scanned)
+        return DocxScan(scan.readings, [], "large", scan.tier, scan.scanned)
 
-    # 全無命中：寫一列佔位記錄,供後續人工審查
-    fallback = _empty_result(docx_name, images[0][0], "large")
-    fallback.note          = "large:全無命中"
-    fallback.status        = ResultStatus.LARGE_NO_HIT
+    # 全無命中：寫一列佔位列
+    placeholder = _empty_result(docx_name, images[0][0], "large")
+    placeholder.note   = "large:全無命中"
+    placeholder.status = ResultStatus.LARGE_NO_HIT
     # 全無命中的份不會有任何命中列,這張佔位列是它在 CSV 裡的唯一
     # 代表。擴掃過就得標 2 —— 否則「大量擴掃且仍沒命中」(規則過期
     # 最典型的表現)在 scan_tier 欄上完全看不出來。
-    fallback.scan_tier     = 2 if scan.tier is TierOutcome.擴掃 else 1
-    return DocxScan([Reading(fallback, [])], NO_HIT_REVIEW_LARGE, "large",
-                    scan.tier, scan.scanned)
+    placeholder.scan_tier = 2 if scan.tier is TierOutcome.擴掃 else 1
+    return DocxScan([Reading(placeholder, [])], _review_images(images, NO_HIT_REVIEW_LARGE),
+                    "large", scan.tier, scan.scanned)
 
 
