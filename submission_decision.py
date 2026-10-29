@@ -21,7 +21,7 @@ from pathlib import Path
 
 import matches_csv
 from docx_images import image_sort_key
-from matches_csv import ResultStatus, ScanResult
+from matches_csv import DocxClass, ResultStatus, Roi, ScanResult
 
 # 信心門檻
 CONF_KEY_IN       = 55   # 高於此值直接 key-in;低於則送 Google Vision
@@ -53,7 +53,7 @@ class Decision:
     candidate_conf: float
     image_name: str        # 被選的那張圖;全無命中時為空
     img_path: str          # 那張圖的截圖(送 Vision 用)
-    hit_roi: str           # 送出那張截圖屬於哪個 ROI(Vision 取號依此選 pattern)
+    hit_roi: Roi | None    # 送出那張截圖屬於哪個 ROI(Vision 取號依此選 pattern)
     reason: str
 
 
@@ -69,7 +69,7 @@ def _crop(r: ScanResult) -> str:
     return r.permit_crop or r.mol_crop or ""
 
 
-def _crop_roi(r: ScanResult) -> str:
+def _crop_roi(r: ScanResult) -> Roi | None:
     """_crop 選中的那張截圖屬於哪個 ROI。
 
     不能照抄 r.hit_roi:它記的是「第一個」命中的 ROI —— mol 先中、permit 後中時停在
@@ -77,9 +77,9 @@ def _crop_roi(r: ScanResult) -> str:
     permit、不知道哪一半。
     """
     if r.permit_crop:
-        return r.hit_roi if r.hit_roi.startswith("permit") else "permit"
+        return r.hit_roi if r.hit_roi and r.hit_roi.is_permit else Roi.PERMIT
     if r.mol_crop:
-        return "mol"
+        return Roi.MOL
     return r.hit_roi
 
 
@@ -117,7 +117,7 @@ def decide(rows: list[ScanResult]) -> Decision:
     why = _NO_IMAGE_REASONS.get(rows[0].status)
     if why:
         return _no_hit(rows, why, Destination.直接人工審查)
-    if rows[0].docx_class == "large":
+    if rows[0].docx_class is DocxClass.LARGE:
         return _decide_large(rows)
     return _decide_small(rows)
 
@@ -214,7 +214,7 @@ def _round_conf(conf: float) -> float:
 
 
 def _decide_small(rows: list[ScanResult]) -> Decision:
-    hits = [r for r in rows if r.mol or r.id]
+    hits = [r for r in rows if r.hit]
     if not hits or all(r.status == ResultStatus.SMALL_NO_HIT for r in rows):
         return _no_hit(rows, f"small docx：mol ROI 全 {len(rows)} 張圖無命中")
     # winner:兩個 ROI 的信心取高者,同分取先出現者;多數票只算 winner 自己的

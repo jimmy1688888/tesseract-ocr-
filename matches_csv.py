@@ -5,6 +5,7 @@
 讀一份 matches.csv 不必載入掃描或整條流程。
 
   ScanResult / ResultStatus   一列:一張圖讀到的值與掃描觀測、命中狀態
+  DocxClass / Roi             small/large 與 ROI 身分(值就是 CSV 裡的字串)
   FIELDS                      欄位順序(寫與讀同一份)
   writer(path)                寫一份新的 matches.csv
   read(path)                  讀回成 {docx 檔名: [列]},依檔名排序
@@ -16,7 +17,7 @@ from __future__ import annotations
 import csv
 from contextlib import contextmanager
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Iterator
 
@@ -36,6 +37,33 @@ class ResultStatus(str, Enum):
     UNREADABLE     = "unreadable"       # 打不開(不是有效的 zip,或壓縮資料損壞)
 
 
+class DocxClass(StrEnum):
+    """small docx / large docx(CONTEXT.md):依內嵌圖原始張數分的兩種掃法。讀不到圖的兩種都不是。"""
+    SMALL = "small"
+    LARGE = "large"
+
+
+class Roi(StrEnum):
+    """ROI 身分(CONTEXT.md「ROI 掃描」)。值就是 matches.csv hit_roi 欄的字串。
+
+    PERMIT 只有送審決策會產生:送出的是 permit 截圖,但不知道是哪一半(見
+    submission_decision._crop_roi)。
+    """
+    MOL          = "mol"
+    PERMIT_UPPER = "permit_upper"
+    PERMIT_LOWER = "permit_lower"
+    PERMIT       = "permit"
+
+    @property
+    def is_permit(self) -> bool:
+        return self is not Roi.MOL
+
+    @property
+    def field(self) -> str:
+        """讀的是哪一個欄位:mol 或 permit(上下半同一欄;裁切圖也依此分資料夾)。"""
+        return "permit" if self.is_permit else "mol"
+
+
 # ─── 欄位順序（同時供寫入與讀取使用，避免兩端走樣） ───────────────────────
 FIELDS = [
     "source_docx", "image_name", "docx_class", "scan_tier",
@@ -48,8 +76,12 @@ FIELDS = [
 ]
 
 
-class UnknownStatus(ValueError):
-    """matches.csv 的 status 欄是不認得的值:壞檔或未來的格式,不能當成正常讀值。"""
+class UnknownValue(ValueError):
+    """matches.csv 的列帶著不認得的值:壞檔或未來的格式,不能當成正常讀值。"""
+
+
+class UnknownStatus(UnknownValue):
+    """status 欄是不認得的值。"""
 
 
 @dataclass
@@ -73,7 +105,7 @@ class ScanResult:
     # ─── 識別欄位（必填） ─────────────────────────────────────────────────
     source_docx: str
     image_name: str
-    docx_class: str            # "small" / "large"
+    docx_class: DocxClass | None   # 讀不到圖的佔位列為 None
     # 這張圖是在第幾層被掃到的:1=第一層(TIER1_IMAGES)，2=第一層沒拿到 permit
     # 多數票後的擴掃。small 與 --full-scan 一律為 1。純觀測欄位，不參與任何決策
     # ——它存在是為了讓「第一層命中率崩掉」這件事看得見(見 ADR-0005)。
@@ -94,13 +126,23 @@ class ScanResult:
 
     # ─── 詮釋資料 ────────────────────────────────────────────────────────
     hit_config: str = ""       # 命中時用的 Tesseract config 名稱
-    hit_roi: str = ""          # 命中時的 ROI 名稱
+    hit_roi: Roi | None = None  # 第一個命中的 ROI;沒命中為 None
     mol_crop: str = ""         # mol crop 圖檔路徑
     permit_crop: str = ""      # permit crop 圖檔路徑
 
     # ─── 內部 flag（取代過去的 _id_from_vote） ───────────────────────────
     id_from_vote:  bool = False
     mol_from_vote: bool = False   # mol 值來自多數票（PERMIT_VOTE_CONFIGS 那幾組的多數票）
+
+    def __post_init__(self):
+        # 呼叫端(與測試)可以傳字串;進來就換成型別,不認得的值在這裡就拋
+        self.docx_class = DocxClass(self.docx_class) if self.docx_class else None
+        self.hit_roi = Roi(self.hit_roi) if self.hit_roi else None
+
+    @property
+    def hit(self) -> bool:
+        """命中:這張圖讀到了許可證號(mol 或 permit 任一個 ROI)。佔位列沒有命中。"""
+        return bool(self.mol or self.id)
 
     # ─── 序列化 ──────────────────────────────────────────────────────────
     def to_csv_row(self) -> dict[str, str]:
@@ -115,7 +157,7 @@ class ScanResult:
         return {
             "source_docx":   self.source_docx,
             "image_name":    self.image_name,
-            "docx_class":    self.docx_class,
+            "docx_class":    self.docx_class or "",
             "scan_tier":     str(self.scan_tier),
             "mol":           self.mol,
             "mol_layer":     str(self.mol_layer) if self.mol_layer else "",
@@ -128,7 +170,7 @@ class ScanResult:
             "cross_match":   "✓" if self.cross_match else "",
             "note":          self.note,
             "hit_config":    self.hit_config,
-            "hit_roi":       self.hit_roi,
+            "hit_roi":       self.hit_roi or "",
             "mol_crop":      self.mol_crop,
             "permit_crop":   self.permit_crop,
             "status":        self.status.value,
@@ -156,7 +198,7 @@ class ScanResult:
         return cls(
             source_docx   = row.get("source_docx", ""),
             image_name    = row.get("image_name", ""),
-            docx_class    = row.get("docx_class", ""),
+            docx_class    = _member(row, "docx_class", DocxClass),
             # 舊 CSV 沒有這欄 → 視為第一層,不讓缺欄變成無意義的 0
             scan_tier     = to_int(row.get("scan_tier", "")) or 1,
             mol           = row.get("mol", ""),
@@ -172,7 +214,7 @@ class ScanResult:
             # 以及 manual_review(值是 "Y" 或整句理由)、low_conf(低信心截圖路徑)
             note          = row.get("note", ""),
             hit_config    = row.get("hit_config", ""),
-            hit_roi       = row.get("hit_roi", ""),
+            hit_roi       = _member(row, "hit_roi", Roi),
             mol_crop      = row.get("mol_crop", ""),
             permit_crop   = row.get("permit_crop", ""),
             status        = _status(row),
@@ -192,6 +234,18 @@ def _status(row: dict[str, str]) -> ResultStatus:
     except ValueError:
         raise UnknownStatus(
             f"matches.csv 的 status 不認得:{row.get('source_docx', '')} 的 {value!r}") from None
+
+
+def _member(row: dict[str, str], column: str, enum: type[StrEnum]):
+    """欄位 → 型別;空字串為 None,不認得的值拋例外(帶 docx 名與值)。"""
+    value = row.get(column, "")
+    if not value:
+        return None
+    try:
+        return enum(value)
+    except ValueError:
+        raise UnknownValue(
+            f"matches.csv 的 {column} 不認得:{row.get('source_docx', '')} 的 {value!r}") from None
 
 
 class _Writer:

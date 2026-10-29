@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 from collections import Counter
-import re
 from enum import Enum
 import logging
 from pathlib import Path
@@ -27,7 +26,7 @@ import pytesseract
 from pytesseract import Output
 
 import docx_images
-from matches_csv import ResultStatus, ScanResult
+from matches_csv import DocxClass, ResultStatus, Roi, ScanResult
 from permit_patterns import RE_PERMIT_ID_LIST_LOWER, find_permits, permit_id_patterns
 from pixels import preprocess
 # 停止擴掃與規則 A2 用同一個多數票謂詞(ADR-0005);送審門檻不在這裡用
@@ -53,9 +52,9 @@ TIER1_IMAGES = {2, 5, 6}
 
 # ─── ROI ──────────────────────────────────────────────────────────────────
 ROI_REGIONS = {
-    "mol":           (0.05, 0.04, 0.40, 0.25),
-    "permit_upper":  (0.40, 0.05, 1.00, 0.55),
-    "permit_lower":  (0.40, 0.45, 1.00, 0.95),
+    Roi.MOL:           (0.05, 0.04, 0.40, 0.25),
+    Roi.PERMIT_UPPER:  (0.40, 0.05, 1.00, 0.55),
+    Roi.PERMIT_LOWER:  (0.40, 0.45, 1.00, 0.95),
 }
 
 # ─── Tesseract configs ────────────────────────────────────────────────────
@@ -119,9 +118,8 @@ def has_permit_vote(rows: list[ScanResult]) -> bool:
       mol 命中          mol 只證明這是契約頁,不是許可證的讀值。32523/32529 的
                         mol 信心是 37 與 28,拿這種值擋掉擴掃等於用雜訊做決策。
       PERMIT_PARTIAL    幾個設定各讀出不同的值、湊不出多數。r.id 雖有值,但
-                        送審決策的規則A2 不會採用它,反而會掉進規則B
-                        (低信心時)把整份推去走反查救援 —— 而真正的
-                        多數票可能就在還沒掃的那幾張圖上(見 ADR-0005)。
+                        送審決策不會把它當成可信讀值 —— 而真正的多數票
+                        可能就在還沒掃的那幾張圖上(見 ADR-0005)。
     """
     return any(is_permit_vote(r) for r in rows)
 
@@ -151,10 +149,6 @@ def tesseract(image_bytes: bytes, cfg: dict, roi: tuple) -> tuple[str, float]:
     """預設的 Ocr:前處理(pixels.preprocess)後送 Tesseract。"""
     img = preprocess(image_bytes, {**cfg, "roi": roi})
     return ocr_with_conf(img, cfg.get("lang", TESS_LANG), build_tess_config(cfg))
-
-
-def roi_field(roi_name: str) -> str:
-    return roi_name.split("_")[0]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -200,7 +194,7 @@ def _collect_mol_votes(image_bytes: bytes, ocr: Ocr) -> list[tuple[str, float]]:
     """mol ROI 以 PERMIT_VOTE_CONFIGS（6組）逐一掃描，回傳 (值, conf) 清單。"""
     entries: list[tuple[str, float]] = []
     for cfg in PERMIT_VOTE_CONFIGS:
-        text, conf = ocr(image_bytes, cfg, ROI_REGIONS["mol"])
+        text, conf = ocr(image_bytes, cfg, ROI_REGIONS[Roi.MOL])
         _, _, mol, _ = find_permits(text)
         if mol:
             entries.append((mol, conf))
@@ -246,12 +240,12 @@ def _apply_mol_vote(result: ScanResult, image_bytes: bytes, stem: str,
     result.mol           = vote.value
     result.mol_conf      = vote.conf
     result.mol_from_vote = True
-    result.hit_roi       = "mol"
+    result.hit_roi       = Roi.MOL
     logger.info(
         f"  ★ mol 多數票：{vote.value}  avg_conf={vote.conf}"
         f"  ({vote.count}/{vote.total} 票)"
     )
-    return Crop(CropKind.MOL, Path("mol_crops") / f"{stem}.png", ROI_REGIONS["mol"])
+    return Crop(CropKind.MOL, Path("mol_crops") / f"{stem}.png", ROI_REGIONS[Roi.MOL])
 
 
 def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
@@ -264,8 +258,8 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
     不碰硬碟:命中的裁切圖放在回傳的 crops,由 run_scan 寫出(#18)。
     """
     stem = _crop_stem(docx_name, img_name)
-    result = _empty_result(docx_name, img_name, "small")
-    roi_coords = ROI_REGIONS["mol"]
+    result = _empty_result(docx_name, img_name, DocxClass.SMALL)
+    roi_coords = ROI_REGIONS[Roi.MOL]
 
     # ── 第一階段：多數票（PERMIT_VOTE_CONFIGS 6組）────────────────────
     vote_crop = _apply_mol_vote(result, image_bytes, stem, ocr)
@@ -284,7 +278,7 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
         result.mol_layer = mol_layer
         result.mol_conf  = conf
         result.hit_config = cfg["name"]
-        result.hit_roi   = "mol"
+        result.hit_roi   = Roi.MOL
         crops.append(Crop(CropKind.MOL, Path("mol_crops") / f"{stem}.png", roi_coords))
         logger.debug(f"  ★ mol/{cfg['name']}  conf={conf}  mol={mol!r}")
         return Reading(result, crops)
@@ -305,7 +299,7 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
     讓函數行為僅依輸入決定，方便測試與並行化。
     """
     stem = _crop_stem(docx_name, img_name)
-    result = _empty_result(docx_name, img_name, "large")
+    result = _empty_result(docx_name, img_name, DocxClass.LARGE)
     crops: list[Crop] = []
     fields_found: set[str] = set()
     any_hit = False
@@ -316,12 +310,12 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
     for roi_name, roi_coords in ROI_REGIONS.items():
         if roi_filter and roi_name != roi_filter:
             continue
-        field = roi_field(roi_name)
+        field = roi_name.field
         if field in fields_found:
             continue
 
         # ── mol ROI：先嘗試多數票（PERMIT_VOTE_CONFIGS 6組）────────────
-        if roi_name == "mol":
+        if roi_name is Roi.MOL:
             vote_crop = _apply_mol_vote(result, image_bytes, stem, ocr)
             if vote_crop:
                 crops.append(vote_crop)
@@ -335,7 +329,7 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
                 f"  ✗ {roi_name}/{cfg['name']}  conf={conf:.0f}"
                 f"  text={text[:400]!r}"
             )
-            is_permit_roi = roi_name.startswith("permit")
+            is_permit_roi = roi_name.is_permit
             permit_id_list = permit_id_patterns(roi_name) if is_permit_roi else None
             id_, id_layer, mol, mol_layer = find_permits(
                 text, permit_id_list,
@@ -374,9 +368,9 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
     permit_vote_avg_conf = 0.0
 
     if not mol_val or not permit_val:
-        upper_entries = _collect_permit_votes(image_bytes, ROI_REGIONS["permit_upper"], ocr)
+        upper_entries = _collect_permit_votes(image_bytes, ROI_REGIONS[Roi.PERMIT_UPPER], ocr)
         lower_entries = _collect_permit_votes(
-            image_bytes, ROI_REGIONS["permit_lower"], ocr,
+            image_bytes, ROI_REGIONS[Roi.PERMIT_LOWER], ocr,
             permit_id_list=RE_PERMIT_ID_LIST_LOWER)
         all_entries = upper_entries + lower_entries
         vote = majority_vote(all_entries)
@@ -388,7 +382,7 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
             result.status = ResultStatus.PERMIT_PARTIAL
             logger.info(
                 f"  ⚠ permit 有部分命中({len(all_entries)}筆)但無多數"
-                f"  → 候選值={best[0]!r} conf={best[1]:.0f}，標記送 Vision"
+                f"  → 候選值={best[0]!r} conf={best[1]:.0f}"
                 f"  all={[v for v,_ in all_entries]}"
             )
     else:
@@ -407,7 +401,8 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
     return Reading(result, crops)
 
 
-def _empty_result(docx_name: str, img_name: str, docx_class: str) -> ScanResult:
+def _empty_result(docx_name: str, img_name: str,
+                  docx_class: DocxClass | None) -> ScanResult:
     """一張圖還沒讀到任何東西時的 ScanResult(也用來造佔位列)。"""
     return ScanResult(
         source_docx=docx_name,
@@ -429,6 +424,11 @@ class TierOutcome(Enum):
     第一層命中 = "第一層命中"   # 第一層就拿到 permit 多數票,沒有擴掃
     無可擴     = "無可擴"       # 第一層沒拿到,但沒有其餘的圖可擴(含 --full-scan)
     擴掃       = "擴掃"         # 第一層沒拿到、擴掃了其餘的圖
+
+    @property
+    def scan_tier(self) -> int:
+        """matches.csv scan_tier 欄的值:擴掃過為 2,其餘 1。"""
+        return 2 if self is TierOutcome.擴掃 else 1
 
 
 class LargeDocxReading(NamedTuple):
@@ -482,7 +482,7 @@ def read_large_docx(docx_name: str, images: list[tuple[str, bytes]],
 # ④ 一份 docx → 它在 matches.csv 的列
 # ═══════════════════════════════════════════════════════════════════════════
 
-SMALL_DOCX_THRESHOLD = 3   # 圖片數 ≤ 此值 → "small"
+SMALL_DOCX_THRESHOLD = 3   # 圖片數 ≤ 此值 → small
 
 # 全無命中時存哪幾張原圖(imageN 的 N)給人比對:large 是契約頁與兩張可能的許可證頁,
 # small 是契約頁與次頁。
@@ -490,9 +490,9 @@ NO_HIT_REVIEW_LARGE = frozenset({2, 5, 6})
 NO_HIT_REVIEW_SMALL = frozenset({2, 3})
 
 
-def classify_by_count(image_count: int) -> str:
-    """依圖片數量回傳 'small' 或 'large'。"""
-    return "small" if image_count <= SMALL_DOCX_THRESHOLD else "large"
+def classify_by_count(image_count: int) -> DocxClass:
+    """依圖片數量(原始張數)分 small / large。"""
+    return DocxClass.SMALL if image_count <= SMALL_DOCX_THRESHOLD else DocxClass.LARGE
 
 
 def unscannable(images: list[tuple[str, bytes]] | None) -> tuple[ResultStatus, str] | None:
@@ -508,23 +508,37 @@ def unscannable(images: list[tuple[str, bytes]] | None) -> tuple[ResultStatus, s
 
 
 class DocxScan(NamedTuple):
-    """一份 docx 的許可證掃描:它在 matches.csv 的列,與要存給人比對的原圖。"""
+    """一份 docx 的許可證掃描:它在 matches.csv 的列,與要存給人比對的原圖。
+
+    只有三種形狀,用對應的建構式造:unreadable(讀不到圖)、small、large(附分層結果)。
+    small 不收分層結果 —— 「small 配擴掃」造不出來。
+    """
     rows: list[Reading]               # 依寫出順序;至少一列。裁切圖還沒寫出
     review_images: list[tuple[str, bytes]]   # 全無命中時要存給人比對的原圖;其餘為空
-    docx_class: str                   # small / large;讀不到圖為 ""
+    docx_class: DocxClass | None      # 讀不到圖為 None
     tier: TierOutcome | None          # large 的分層結果;其餘為 None
     scanned: int                      # 實際掃了幾張圖
+
+    @classmethod
+    def unreadable(cls, placeholder: Reading) -> DocxScan:
+        return cls([placeholder], [], None, None, 0)
+
+    @classmethod
+    def small(cls, rows: list[Reading], review_images: list[tuple[str, bytes]],
+              scanned: int) -> DocxScan:
+        return cls(rows, review_images, DocxClass.SMALL, None, scanned)
+
+    @classmethod
+    def large(cls, rows: list[Reading], review_images: list[tuple[str, bytes]],
+              tier: TierOutcome, scanned: int) -> DocxScan:
+        return cls(rows, review_images, DocxClass.LARGE, tier, scanned)
 
 
 def _review_images(images: list[tuple[str, bytes]], wanted: frozenset[int]
                    ) -> list[tuple[str, bytes]]:
-    """要存給人比對的原圖:檔名裡第一串數字在 wanted 裡的(找不到對應編號者略過)。"""
-    out = []
-    for name, data in images:
-        m = re.search(r"(\d+)", name)
-        if m and int(m.group(1)) in wanted:
-            out.append((name, data))
-    return out
+    """要存給人比對的原圖:圖序在 wanted 裡的(檔名沒有數字者略過)。"""
+    return [(name, data) for name, data in images
+            if docx_images.image_index(name) in wanted]
 
 
 def scan_docx(docx_name: str, images: list[tuple[str, bytes]] | None,
@@ -537,16 +551,16 @@ def scan_docx(docx_name: str, images: list[tuple[str, bytes]] | None,
     對不到是呼叫端該先擋下的錯,這裡拋 ValueError。
 
     每份 docx 至少一列 —— 沒有列,它在 matches.csv 與 Sheets 上都不存在(#47):
-      讀不到圖     一列佔位列(docx_class 空、標讀不到圖的狀態)
+      讀不到圖     一列佔位列(沒有 small/large、標讀不到圖的狀態)
       large 有命中 每張命中圖一列;全無命中一列佔位列(擴掃過標第二層),存 image2/5/6
       small 有命中 只寫命中列;全無命中每列都寫、標 small 全無命中,存 image2/3
     """
     nothing = unscannable(images)
     if nothing:
-        placeholder = _empty_result(docx_name, "", "")
+        placeholder = _empty_result(docx_name, "", None)
         placeholder.status, placeholder.note = nothing
         logger.warning(f"  ⚠ {docx_name} {placeholder.note}")
-        return DocxScan([Reading(placeholder, [])], [], "", None, 0)
+        return DocxScan.unreadable(Reading(placeholder, []))
 
     # docx_class 一律用「原始張數」判定，必須在任何過濾之前算：把過濾後
     # 的張數丟進 classify_by_count，5 張圖的 docx 剩 3 張就會被判成
@@ -560,7 +574,7 @@ def scan_docx(docx_name: str, images: list[tuple[str, bytes]] | None,
         if not images:
             raise ValueError(f"找不到圖檔 {image_filter!r}({docx_name} 內含:{names})")
 
-    if docx_class == "small":
+    if docx_class is DocxClass.SMALL:
         return _small_rows(docx_name, images, read_small)
     return _large_rows(docx_name, images, read_large, full_scan)
 
@@ -573,7 +587,7 @@ def _small_rows(docx_name: str, images: list[tuple[str, bytes]],
     readings = [read_small(name, data) for name, data in images]
     # 有命中只寫命中列;整份全無命中則每列都寫、標 small 全無命中。
     # winner 與門檻在送審決策(ADR-0013)。
-    hits = [r for r in readings if r.result.mol or r.result.id]
+    hits = [r for r in readings if r.result.hit]
     if hits:
         rows, review = hits, []
     else:
@@ -586,24 +600,24 @@ def _small_rows(docx_name: str, images: list[tuple[str, bytes]],
             f"  [small|{r.result.hit_roi}]"
             f"  mol={r.result.mol!r}({r.result.mol_conf})"
         )
-    return DocxScan(rows, review, "small", None, len(images))
+    return DocxScan.small(rows, review, len(images))
 
 
 def _large_rows(docx_name: str, images: list[tuple[str, bytes]],
                 read_large: ReadImage, full_scan: bool) -> DocxScan:
     scan = read_large_docx(docx_name, images, read_large, full_scan=full_scan)
     if scan.readings:
-        return DocxScan(scan.readings, [], "large", scan.tier, scan.scanned)
+        return DocxScan.large(scan.readings, [], scan.tier, scan.scanned)
 
     # 全無命中：寫一列佔位列
-    placeholder = _empty_result(docx_name, images[0][0], "large")
+    placeholder = _empty_result(docx_name, images[0][0], DocxClass.LARGE)
     placeholder.note   = "large:全無命中"
     placeholder.status = ResultStatus.LARGE_NO_HIT
     # 全無命中的份不會有任何命中列,這張佔位列是它在 CSV 裡的唯一
     # 代表。擴掃過就得標 2 —— 否則「大量擴掃且仍沒命中」(規則過期
     # 最典型的表現)在 scan_tier 欄上完全看不出來。
-    placeholder.scan_tier = 2 if scan.tier is TierOutcome.擴掃 else 1
-    return DocxScan([Reading(placeholder, [])], _review_images(images, NO_HIT_REVIEW_LARGE),
-                    "large", scan.tier, scan.scanned)
+    placeholder.scan_tier = scan.tier.scan_tier
+    return DocxScan.large([Reading(placeholder, [])], _review_images(images, NO_HIT_REVIEW_LARGE),
+                          scan.tier, scan.scanned)
 
 

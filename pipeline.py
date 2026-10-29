@@ -146,7 +146,7 @@ INPUT_DIR  = Path("./docs")
 # 送審決策:每份 docx 一個去向(門檻與判斷只在那裡,#40)。
 from submission_decision import Decision, Destination, read_decisions  # noqa: E402
 import matches_csv  # noqa: E402
-from matches_csv import ScanResult  # noqa: E402
+from matches_csv import DocxClass, Roi, ScanResult  # noqa: E402
 from permit_reading import (  # noqa: E402
     ROI_REGIONS, TESS_LANG, TIER1_IMAGES, CropKind, Reading, TierOutcome,
     scan_docx, scan_image_large, scan_image_mol_only, unscannable)
@@ -718,15 +718,12 @@ def run_scan(batch: Batch, image_filter: str = "",
                 result = _write_crops(out_dir, image_bytes.get(reading.result.image_name, b""),
                                       reading)
                 writer.write(result)
-                if result.mol or result.id:
-                    hits += 1
-                if result.hit_roi == "permit_upper":
-                    upper_hits += 1
-                elif result.hit_roi == "permit_lower":
-                    lower_hits += 1
+                hits += result.hit
+                upper_hits += result.hit_roi is Roi.PERMIT_UPPER
+                lower_hits += result.hit_roi is Roi.PERMIT_LOWER
 
             total += scan.scanned
-            if scan.docx_class == "large":
+            if scan.docx_class is DocxClass.LARGE:
                 large_docs += 1
                 tier1_docs += scan.tier is TierOutcome.第一層命中
                 expanded_docs += scan.tier is TierOutcome.擴掃
@@ -1115,7 +1112,7 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--preflight-only 與 --skip-preflight 互斥")
     # 驗證 --roi（過去在 __main__ 內驗證後寫到 globals()，現於此處驗證後由 main 直接讀 opts.roi）
     if opts.roi:
-        valid_rois = list(ROI_REGIONS.keys())
+        valid_rois = [str(r) for r in ROI_REGIONS]
         if opts.roi not in valid_rois:
             parser.error(f"--roi 必須為 {valid_rois}，收到 {opts.roi!r}")
     # --image 只在單檔除錯用(#47):整批帶 --image,任何一份沒那張圖就整批不跑

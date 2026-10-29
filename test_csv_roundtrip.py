@@ -19,13 +19,15 @@ round-trip 抓不到「寫出端與讀回端一起改」——但那會讓磁碟
 """
 
 import dataclasses
+import types
 import typing
 from enum import Enum
 
 import pytest
 
 import matches_csv
-from matches_csv import FIELDS, ResultStatus, ScanResult, UnknownStatus
+from matches_csv import (FIELDS, DocxClass, ResultStatus, Roi, ScanResult, UnknownStatus,
+                         UnknownValue)
 
 
 _HINTS = typing.get_type_hints(ScanResult)
@@ -35,6 +37,8 @@ _FIELDS = list(dataclasses.fields(ScanResult))
 def _non_default(field: dataclasses.Field):
     """給欄位一個「與預設值不同、且 CSV 能原樣表達」的值。"""
     t = _HINTS[field.name]
+    if typing.get_origin(t) in (typing.Union, types.UnionType):   # X | None → X
+        [t] = [a for a in typing.get_args(t) if a is not type(None)]
     if t is bool:
         return True
     if t is int:
@@ -51,7 +55,7 @@ def _non_default(field: dataclasses.Field):
 
 def _minimal_result() -> ScanResult:
     """只填必填欄位,其餘維持預設值。"""
-    return ScanResult(source_docx="a.docx", image_name="image1.png", docx_class="large")
+    return ScanResult(source_docx="a.docx", image_name="image1.png", docx_class="small")
 
 
 def _through_csv_file(r: ScanResult, tmp_path) -> ScanResult:
@@ -183,6 +187,40 @@ def test_empty_status_is_ok():
     """沒有 status 欄的舊檔:當正常讀值。"""
     assert ScanResult.from_csv_row({"source_docx": "a.docx"}).status is ResultStatus.OK
     assert ScanResult.from_csv_row({"source_docx": "a.docx", "status": ""}).status is ResultStatus.OK
+
+
+# ─── ROI 身分與 small/large:不認得的值拋例外(#60) ────────────────────────
+
+@pytest.mark.parametrize("column, value", [("hit_roi", "permit_middle"),
+                                           ("docx_class", "medium")])
+def test_unknown_roi_or_docx_class_raises_naming_docx_and_value(column, value):
+    with pytest.raises(UnknownValue, match=rf"32503\.docx.*'{value}'"):
+        ScanResult.from_csv_row({"source_docx": "32503.docx", column: value})
+
+
+def test_known_roi_and_docx_class_are_typed():
+    r = ScanResult.from_csv_row({"source_docx": "a.docx", "docx_class": "large",
+                                 "hit_roi": "permit_lower"})
+    assert r.docx_class is DocxClass.LARGE
+    assert r.hit_roi is Roi.PERMIT_LOWER
+
+
+def test_placeholder_row_has_no_docx_class_and_no_roi():
+    """讀不到圖的佔位列:docx_class 與 hit_roi 都是空,讀回來就是「沒有」,寫出仍是空。"""
+    r = ScanResult.from_csv_row({"source_docx": "a.docx", "docx_class": "", "hit_roi": ""})
+    assert r.docx_class is None and r.hit_roi is None
+    assert r.to_csv_row()["docx_class"] == "" and r.to_csv_row()["hit_roi"] == ""
+
+
+# ─── 命中:這張圖讀到許可證號(CONTEXT「命中」) ────────────────────────────
+
+@pytest.mark.parametrize("mol, id_, hit", [("0425", "", True), ("", "0425", True),
+                                           ("", "", False)],
+                         ids=["mol", "permit", "佔位列"])
+def test_hit_is_any_permit_number_read(mol, id_, hit):
+    r = ScanResult(source_docx="a.docx", image_name="image5.jpeg",
+                   docx_class=DocxClass.LARGE, mol=mol, id=id_)
+    assert r.hit is hit
 
 
 # ─── 讀回成每份 docx 的列 ─────────────────────────────────────────────────

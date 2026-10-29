@@ -8,7 +8,7 @@
 import pytest
 
 import permit_reading as R
-from matches_csv import ResultStatus, ScanResult
+from matches_csv import DocxClass, ResultStatus, ScanResult
 
 
 def _img(n: int) -> tuple[str, bytes]:
@@ -72,9 +72,9 @@ class TestUnscannable:
         scan = _scan(images, large, small)
 
         [row] = [r.result for r in scan.rows]
-        assert (row.source_docx, row.image_name, row.docx_class) == ("a.docx", "", "")
+        assert (row.source_docx, row.image_name, row.docx_class) == ("a.docx", "", None)
         assert (row.status, row.note) == (status, note)
-        assert (scan.docx_class, scan.review_images, scan.scanned) == ("", [], 0)
+        assert (scan.docx_class, scan.tier, scan.review_images, scan.scanned) == (None, None, [], 0)
         assert large.seen == small.seen == []
 
 
@@ -82,15 +82,15 @@ class TestClassByOriginalCount:
     """small/large 用原始張數,在 --image 過濾之前算(ADR-0005)。"""
 
     def test_three_images_is_small(self):
-        assert _scan(_imgs(1, 2, 3)).docx_class == "small"
+        assert _scan(_imgs(1, 2, 3)).docx_class is DocxClass.SMALL
 
     def test_four_images_is_large(self):
-        assert _scan(_imgs(1, 2, 3, 4)).docx_class == "large"
+        assert _scan(_imgs(1, 2, 3, 4)).docx_class is DocxClass.LARGE
 
     def test_image_filter_does_not_turn_large_into_small(self):
         large, small = Reader("large"), Reader("small")
         scan = _scan(_imgs(1, 2, 3, 4, 5, 6, 7), large, small, image_filter="image5.jpeg")
-        assert scan.docx_class == "large"
+        assert scan.docx_class is DocxClass.LARGE
         assert (large.seen, small.seen) == (["image5.jpeg"], [])
 
     def test_image_filter_miss_raises(self):
@@ -111,7 +111,7 @@ class TestLarge:
         scan = _scan(_imgs(1, 2, 3, 4, 5, 6, 7))
         assert _rows(scan) == [("image1.jpeg", ResultStatus.LARGE_NO_HIT, 2)]
         [row] = [r.result for r in scan.rows]
-        assert (row.note, row.docx_class) == ("large:全無命中", "large")
+        assert (row.note, row.docx_class) == ("large:全無命中", DocxClass.LARGE)
         assert scan.tier is R.TierOutcome.擴掃
         assert scan.review_images == _imgs(2, 5, 6)
 
