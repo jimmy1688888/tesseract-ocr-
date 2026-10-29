@@ -23,9 +23,9 @@ def _row(image="image5.jpeg", cls="large", **kw):
 
 # fixture 只放掃描讀到的東西(值、信心、多數票、互證、命中狀態),不替送審決策先判。
 
-def _permit(image, value, conf, *, vote=False, partial=False, roi="permit_lower"):
+def _permit(image, value, conf, *, vote=False, partial=False, roi="permit_lower", **kw):
     return _row(image, id=value, id_conf=conf, id_from_vote=vote, hit_roi=roi,
-                status=ResultStatus.PERMIT_PARTIAL if partial else ResultStatus.OK)
+                status=ResultStatus.PERMIT_PARTIAL if partial else ResultStatus.OK, **kw)
 
 
 def _mol(image, value, conf, *, vote=False, cross=False):
@@ -371,3 +371,35 @@ def test_queue_items_carry_the_crop_roi(tmp_path):
     matches_csv.write(p, [_permit("image5.jpeg", "1234", 60, partial=True)])
     vision, manual, keyin, _ = pipeline.build_vision_queue(p)
     assert [i.hit_roi for i in vision] == ["permit_lower"]
+
+
+# ─── 讀一份 matches.csv 得出決策:截圖路徑以 CSV 所在資料夾解析(#61) ──────────
+
+class TestCropPathFromCsv:
+    """matches.csv 的截圖欄相對於它自己的資料夾;交給 Vision 的是開得了的路徑。"""
+
+    def _decide_from(self, folder, rows):
+        import matches_csv
+        from submission_decision import read_decisions
+        folder.mkdir(parents=True, exist_ok=True)
+        matches_csv.write(folder / "matches.csv", rows)
+        [d] = read_decisions(folder / "matches.csv")
+        return d
+
+    def test_relative_crop_resolves_against_the_csv_folder(self, tmp_path):
+        d = self._decide_from(tmp_path / "2026-10-29", [_permit(
+            "image5.jpeg", "1234", 60, partial=True, permit_crop="permit_crops/a_image5.png")])
+        assert d.destination is Destination.送VISION
+        assert d.img_path == str(tmp_path / "2026-10-29" / "permit_crops" / "a_image5.png")
+
+    def test_no_crop_stays_empty(self, tmp_path):
+        """拼上去會變成資料夾本身 —— exists() 為真,「沒截圖 → 人工審查」就被跳過。"""
+        d = self._decide_from(tmp_path, [_permit(
+            "image5.jpeg", "1234", 60, partial=True, permit_crop="")])
+        assert d.img_path == ""
+
+    def test_old_files_with_absolute_paths_still_open(self, tmp_path):
+        old = str(tmp_path / "elsewhere" / "permit_crops" / "a_image5.png")
+        d = self._decide_from(tmp_path / "now", [_permit(
+            "image5.jpeg", "1234", 60, partial=True, permit_crop=old)])
+        assert d.img_path == old

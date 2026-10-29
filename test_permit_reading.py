@@ -86,7 +86,7 @@ class TestScanImageLarge:
     def test_mol_vote_alone(self):
         r, crops = _large(FakeOcr().every("mol", "MOL 1234", 70.0, PERMIT_VOTE_CONFIGS))
         assert (r.mol, r.mol_conf, r.mol_from_vote, r.id) == ("1234", 70.0, True, "")
-        assert [c.kind for c in crops] == [R.CropKind.MOL]
+        assert [c.path for c in crops] == [r.mol_crop] and r.permit_crop == ""
 
     def test_roi_filter_reads_only_that_roi_for_the_first_hit(self):
         ocr = FakeOcr().every("mol", "MOL 1234", 70.0, PERMIT_VOTE_CONFIGS)

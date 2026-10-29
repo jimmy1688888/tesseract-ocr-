@@ -146,9 +146,9 @@ INPUT_DIR  = Path("./docs")
 # 送審決策:每份 docx 一個去向(門檻與判斷只在那裡,#40)。
 from submission_decision import Decision, Destination, read_decisions  # noqa: E402
 import matches_csv  # noqa: E402
-from matches_csv import DocxClass, Roi, ScanResult  # noqa: E402
+from matches_csv import DocxClass, Roi  # noqa: E402
 from permit_reading import (  # noqa: E402
-    ROI_REGIONS, TESS_LANG, TIER1_IMAGES, CropKind, Reading, TierOutcome,
+    ROI_REGIONS, TESS_LANG, TIER1_IMAGES, Crop, Reading, TierOutcome,
     scan_docx, scan_image_large, scan_image_mol_only, unscannable)
 
 
@@ -658,23 +658,17 @@ def _save_review_images(review_dir: Path, docx_path: Path,
     return saved
 
 
-def _write_crops(out_dir: Path, image_bytes: bytes, reading: Reading) -> ScanResult:
-    """把一張圖判讀出的裁切圖寫到這一批的輸出目錄,路徑填回 result 並回傳它。
+def _write_crops(out_dir: Path, image_bytes: bytes, crops: list[Crop]) -> None:
+    """把一張圖判讀出的裁切圖寫到這一批的輸出目錄(路徑掃描端已填進列,#61)。
 
     掃描只決定要寫什麼;寫檔(與它需要的解碼、轉正)只在這裡(#18)。
     """
-    result, crops = reading
     if crops:
         upright = open_upright(image_bytes)
         for c in crops:
             path = out_dir / c.path
             path.parent.mkdir(parents=True, exist_ok=True)
             crop(upright, c.roi).save(path)
-            if c.kind is CropKind.MOL:
-                result.mol_crop = str(path)
-            else:
-                result.permit_crop = str(path)
-    return result
 
 
 def run_scan(batch: Batch, image_filter: str = "",
@@ -714,9 +708,8 @@ def run_scan(batch: Batch, image_filter: str = "",
                 full_scan=full_scan, image_filter=image_filter)
 
             image_bytes = dict(images or [])
-            for reading in scan.rows:
-                result = _write_crops(out_dir, image_bytes.get(reading.result.image_name, b""),
-                                      reading)
+            for result, crops in scan.rows:
+                _write_crops(out_dir, image_bytes.get(result.image_name, b""), crops)
                 writer.write(result)
                 hits += result.hit
                 upper_hits += result.hit_roi is Roi.PERMIT_UPPER

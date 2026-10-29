@@ -201,24 +201,17 @@ def _collect_mol_votes(image_bytes: bytes, ocr: Ocr) -> list[tuple[str, float]]:
     return entries
 
 
-class CropKind(Enum):
-    """裁切圖的種類 = 寫出後路徑記在 ScanResult 的哪一格。"""
-    MOL      = "mol"        # → mol_crop
-    PERMIT   = "permit"     # → permit_crop
-
-
 class Crop(NamedTuple):
     """一張要寫出的裁切圖:掃描只決定要寫什麼,寫檔由 run_scan 做(#18)。"""
-    kind: CropKind
-    path: Path      # 相對於這一批的輸出目錄
+    path: str       # 相對於 matches.csv 所在資料夾(這一批的輸出目錄),posix
     roi: tuple      # 從轉正後的原圖裁哪一塊(相對比例)
 
 
 class Reading(NamedTuple):
     """一張圖的判讀:讀值整理(ScanResult)+ 要寫出的裁切圖。
 
-    crops 還沒寫出,result 的 mol_crop / permit_crop 是空的;
-    run_scan 寫出後才把路徑填回去。
+    result 是完成的一列:mol_crop / permit_crop 已是裁切圖寫出後的相對路徑;
+    crops 還沒寫出,run_scan 照著寫,不回填(#61)。
     """
     result: ScanResult
     crops: list[Crop]
@@ -226,6 +219,20 @@ class Reading(NamedTuple):
 
 def _crop_stem(docx_name: str, img_name: str) -> str:
     return f"{Path(docx_name).stem}_{Path(img_name).stem}"
+
+
+def _plan_crop(result: ScanResult, roi: Roi, stem: str) -> Crop:
+    """這個 ROI 的裁切圖:路徑當下就填進列(mol 或 permit 那格),回傳要寫出的裁切圖。
+
+    路徑相對 matches.csv 所在資料夾、一律 posix:整個資料夾搬到哪都能用,
+    CSV 也不因平台而異(ADR-0013 補充)。
+    """
+    path = f"{roi.field}_crops/{stem}.png"
+    if roi.is_permit:
+        result.permit_crop = path
+    else:
+        result.mol_crop = path
+    return Crop(path, ROI_REGIONS[roi])
 
 
 def _apply_mol_vote(result: ScanResult, image_bytes: bytes, stem: str,
@@ -245,7 +252,7 @@ def _apply_mol_vote(result: ScanResult, image_bytes: bytes, stem: str,
         f"  ★ mol 多數票：{vote.value}  avg_conf={vote.conf}"
         f"  ({vote.count}/{vote.total} 票)"
     )
-    return Crop(CropKind.MOL, Path("mol_crops") / f"{stem}.png", ROI_REGIONS[Roi.MOL])
+    return _plan_crop(result, Roi.MOL, stem)
 
 
 def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
@@ -279,7 +286,7 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
         result.mol_conf  = conf
         result.hit_config = cfg["name"]
         result.hit_roi   = Roi.MOL
-        crops.append(Crop(CropKind.MOL, Path("mol_crops") / f"{stem}.png", roi_coords))
+        crops.append(_plan_crop(result, Roi.MOL, stem))
         logger.debug(f"  ★ mol/{cfg['name']}  conf={conf}  mol={mol!r}")
         return Reading(result, crops)
 
@@ -303,9 +310,6 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
     crops: list[Crop] = []
     fields_found: set[str] = set()
     any_hit = False
-
-    def planned(kind: CropKind) -> bool:
-        return any(c.kind is kind for c in crops)
 
     for roi_name, roi_coords in ROI_REGIONS.items():
         if roi_filter and roi_name != roi_filter:
@@ -354,9 +358,7 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
             any_hit = True
             fields_found.add(field)
             # 對應欄位的 crop（mol 或 permit）,每欄只寫第一個命中的 ROI
-            kind = CropKind(field)
-            if not planned(kind):
-                crops.append(Crop(kind, Path(f"{field}_crops") / f"{stem}.png", roi_coords))
+            crops.append(_plan_crop(result, roi_name, stem))
             logger.debug(f"  ★ {roi_name}/{cfg['name']}  conf={conf}  id={id_!r} mol={mol!r}")
             break
 

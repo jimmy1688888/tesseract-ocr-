@@ -7,11 +7,13 @@
     <輸出目錄>/mol_crops/<docx>_<圖>.png
     <輸出目錄>/permit_crops/<docx>_<圖>.png
 
+掃描交出的列已帶這個相對路徑(posix,相對 matches.csv 所在資料夾);run_scan 照著
+寫出,不回填(#61)。matches.csv 裡因此看不到輸出目錄在哪。
+
 低信心截圖(low_conf_crops/)#58 起不再寫出:沒人看,門檻也和送審決策不一致。
 """
 import csv
 from io import BytesIO
-from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -50,23 +52,19 @@ class TestScanWritesNothing:
 
         result, crops = R.scan_image_large("32503.docx", "image5.jpeg", b"not an image", ocr=ocr)
 
-        assert crops == [
-            R.Crop(R.CropKind.PERMIT, Path("permit_crops/32503_image5.png"),
-                   R.ROI_REGIONS["permit_upper"]),
-        ]
-        assert result.permit_crop == ""
+        assert crops == [R.Crop("permit_crops/32503_image5.png", R.ROI_REGIONS["permit_upper"])]
+        assert (result.permit_crop, result.mol_crop) == ("permit_crops/32503_image5.png", "")
         assert list(tmp_path.iterdir()) == []
 
     def test_large_mol_vote_and_permit(self, ocr):
         _every_config(ocr, "mol", "MOL 1234", 70.0, R.PERMIT_VOTE_CONFIGS)
         _every_config(ocr, "permit_lower", "No. Izin 1234", 30.0)
 
-        _, crops = R.scan_image_large("a.docx", "image2.jpeg", b"", ocr=ocr)
+        result, crops = R.scan_image_large("a.docx", "image2.jpeg", b"", ocr=ocr)
 
-        assert [(c.kind, str(c.path)) for c in crops] == [
-            (R.CropKind.MOL, str(Path("mol_crops/a_image2.png"))),
-            (R.CropKind.PERMIT, str(Path("permit_crops/a_image2.png"))),
-        ]
+        assert [c.path for c in crops] == ["mol_crops/a_image2.png", "permit_crops/a_image2.png"]
+        assert (result.mol_crop, result.permit_crop) == ("mol_crops/a_image2.png",
+                                                         "permit_crops/a_image2.png")
 
     def test_small_mol_vote(self, ocr, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -75,8 +73,8 @@ class TestScanWritesNothing:
         result, crops = R.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
 
         assert result.mol_from_vote and result.mol == "1234"
-        assert crops == [R.Crop(R.CropKind.MOL, Path("mol_crops/a_image2.png"),
-                                R.ROI_REGIONS["mol"])]
+        assert crops == [R.Crop("mol_crops/a_image2.png", R.ROI_REGIONS["mol"])]
+        assert result.mol_crop == "mol_crops/a_image2.png"
         assert list(tmp_path.iterdir()) == []
 
     def test_small_single_read_low_confidence(self, ocr):
@@ -85,11 +83,12 @@ class TestScanWritesNothing:
         result, crops = R.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
 
         assert (result.mol, result.mol_from_vote) == ("1234", False)
-        assert [str(c.path) for c in crops] == [str(Path("mol_crops/a_image2.png"))]
+        assert [c.path for c in crops] == [result.mol_crop] == ["mol_crops/a_image2.png"]
 
     def test_small_nothing_read(self, ocr):
         result, crops = R.scan_image_mol_only("a.docx", "image2.png", b"", ocr=ocr)
         assert crops == []
+        assert result.mol_crop == ""
         assert result.note == "mol 無值"     # 掃描當下的事實;要不要人工是送審決策的事
 
 
@@ -101,7 +100,7 @@ def _png(w=100, h=50) -> bytes:
 
 class TestRunScanWrites:
 
-    def test_crops_land_at_the_same_paths_and_fill_the_csv(self, monkeypatch, tmp_path):
+    def test_crops_land_where_the_row_says(self, monkeypatch, tmp_path):
         roi = R.ROI_REGIONS["permit_upper"]
         monkeypatch.setattr(docx_images, "read_images",
                             lambda p: [(f"image{n}.png", _png()) for n in range(1, 8)])
@@ -110,17 +109,16 @@ class TestRunScanWrites:
             if name != "image5.png":
                 return None
             r = ScanResult(source_docx=docx, image_name=name, docx_class="large",
-                             id="1234", id_conf=70.0, id_from_vote=True)
-            return R.Reading(r, [
-                R.Crop(R.CropKind.PERMIT, Path("permit_crops/32503_image5.png"), roi),
-            ])
+                           id="1234", id_conf=70.0, id_from_vote=True,
+                           permit_crop="permit_crops/32503_image5.png")
+            return R.Reading(r, [R.Crop("permit_crops/32503_image5.png", roi)])
         out = tmp_path / "out"
 
         P.run_scan(Batch((tmp_path / "32503.docx",), source=tmp_path, output_dir=out),
                    read_large=large)
 
         [row] = csv.DictReader(open(out / "matches.csv", encoding="utf-8-sig"))
-        assert row["permit_crop"] == str(out / "permit_crops" / "32503_image5.png")
+        assert row["permit_crop"] == "permit_crops/32503_image5.png"   # 不帶輸出目錄
         assert row["mol_crop"] == ""
         written = Image.open(out / "permit_crops" / "32503_image5.png")
         assert written.size == (60, 25)     # 100x50 的 (0.40, 0.05, 1.00, 0.55)

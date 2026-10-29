@@ -96,7 +96,7 @@ def image_sources(docx_files: Iterable[Path]) -> dict[str, str]:
 def scan(docx_files: list[Path], out_dir: Path, ocr: Ocr) -> dict:
     """用指定的 Ocr 跑一次正式的許可證掃描,回傳 {matches: [列], files: {相對路徑: sha1}}。
 
-    matches.csv 裡的截圖路徑含輸出目錄,換成相對輸出目錄的路徑(/ 分隔)才能跨次比對。
+    matches.csv 的截圖欄本來就相對它自己的資料夾(#61),原樣比對即可跨次、跨機器。
     """
     import pipeline
     from batch import Batch
@@ -108,21 +108,12 @@ def scan(docx_files: list[Path], out_dir: Path, ocr: Ocr) -> dict:
         read_large=partial(scan_image_large, ocr=ocr),
         read_small=partial(scan_image_mol_only, ocr=ocr))
 
-    prefix = str(out_dir)
     with open(csv_path, encoding="utf-8-sig", newline="") as f:
-        rows = []
-        for row in csv.DictReader(f):
-            rows.append({k: _relative(v, prefix) for k, v in row.items()})
+        rows = list(csv.DictReader(f))
     files = {p.relative_to(out_dir).as_posix(): _sha1(p.read_bytes())
              for p in sorted(out_dir.rglob("*"))
              if p.is_file() and p != csv_path}
     return {"matches": rows, "files": files}
-
-
-def _relative(cell: str, prefix: str) -> str:
-    if cell.startswith(prefix):
-        return Path(cell[len(prefix):].lstrip("\\/")).as_posix()
-    return cell
 
 
 def differences(saved: dict, actual: dict, *,

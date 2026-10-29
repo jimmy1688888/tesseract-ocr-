@@ -15,7 +15,7 @@ read_decisions 讀一份 matches.csv、每份 docx 一個決定。
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 
@@ -52,7 +52,7 @@ class Decision:
     candidate_value: str
     candidate_conf: float
     image_name: str        # 被選的那張圖;全無命中時為空
-    img_path: str          # 那張圖的截圖(送 Vision 用)
+    img_path: str          # 那張圖的截圖(送 Vision 用);decide 給相對路徑,read_decisions 解析
     hit_roi: Roi | None    # 送出那張截圖屬於哪個 ROI(Vision 取號依此選 pattern)
     reason: str
 
@@ -108,8 +108,21 @@ def _earliest(rows):
 
 
 def read_decisions(csv_path: Path) -> list[Decision]:
-    """讀一份 matches.csv,每份 docx 一個送審決策(依檔名排序)。"""
-    return [decide(rows) for rows in matches_csv.read(csv_path).values()]
+    """讀一份 matches.csv,每份 docx 一個送審決策(依檔名排序)。
+
+    截圖欄相對於 matches.csv 所在資料夾(ADR-0013 補充),在這裡解析成開得了的路徑
+    交給 Vision;decide 本身不知道 CSV 在哪。
+    """
+    folder = csv_path.parent
+    return [_located(decide(rows), folder) for rows in matches_csv.read(csv_path).values()]
+
+
+def _located(d: Decision, folder: Path) -> Decision:
+    """img_path 以 CSV 所在資料夾解析。沒有截圖保持空字串 —— 拼了會變成資料夾本身,
+    Vision 那步「找不到截圖 → 人工審查」就被跳過。舊檔的絕對路徑拼了仍是它自己。"""
+    if not d.img_path:
+        return d
+    return replace(d, img_path=str(folder / d.img_path))
 
 
 def decide(rows: list[ScanResult]) -> Decision:
