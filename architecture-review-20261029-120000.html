@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>架構檢視 LinaOCR 2026-10-29(行數上限)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+<style>
+  .bar { height: 14px; border-radius: 3px; }
+  .limit { border-left: 2px dashed #dc2626; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900 font-sans">
+<main class="max-w-5xl mx-auto px-4 sm:px-6 py-12 space-y-12">
+
+<header class="space-y-4">
+  <p class="text-xs uppercase tracking-wider text-slate-500">架構檢視 · LinaOCR · 2026-10-29 · 第九次</p>
+  <h1 class="font-serif text-3xl">行數上限回溯套用:六個超標檔怎麼沿著 seam 拆</h1>
+  <p class="text-sm text-slate-600">標準:專案 CLAUDE.md「Monolith Prevention」(舊巨石不追加、分層)與「Clean Code Guidelines」(函式單一職責)。使用者 2026-10-29 決定回溯套用，並依本專案實測把上限定為<b>單檔 300 行、函式 50 行</b>(原寫 150~200;超過 50 行的函式 11 個)。新候選 AJ~AO;既有候選只標對應,不重提。</p>
+  <div class="text-xs text-slate-500 flex flex-wrap gap-4">
+    <span>實線框 = module</span><span>虛線 = seam</span><span class="text-red-600">紅 = 超標 / 洩漏</span><span class="font-semibold">深色框 = deep module</span>
+  </div>
+
+  <div class="rounded-lg border border-slate-200 bg-white p-4 space-y-1 text-xs font-mono">
+    <p class="font-sans text-xs uppercase tracking-wider text-slate-500 mb-2">非測試檔行數(虛線 = 300 行)</p>
+    <div class="grid grid-cols-[11rem_1fr_3rem] items-center gap-2"><span>pipeline.py</span><div class="relative"><div class="bar bg-red-500" style="width:100%"></div><div class="absolute top-0 h-full limit" style="left:26.8%"></div></div><span>1120</span></div>
+    <div class="grid grid-cols-[11rem_1fr_3rem] items-center gap-2"><span>employer_extract.py</span><div class="relative"><div class="bar bg-red-500" style="width:98.9%"></div><div class="absolute top-0 h-full limit" style="left:26.8%"></div></div><span>1108</span></div>
+    <div class="grid grid-cols-[11rem_1fr_3rem] items-center gap-2"><span>permit_reading.py</span><div class="relative"><div class="bar bg-red-400" style="width:55.8%"></div><div class="absolute top-0 h-full limit" style="left:26.8%"></div></div><span>625</span></div>
+    <div class="grid grid-cols-[11rem_1fr_3rem] items-center gap-2"><span>address_db.py</span><div class="relative"><div class="bar bg-red-400" style="width:55%"></div><div class="absolute top-0 h-full limit" style="left:26.8%"></div></div><span>616</span></div>
+    <div class="grid grid-cols-[11rem_1fr_3rem] items-center gap-2"><span>snapshots.py</span><div class="relative"><div class="bar bg-amber-400" style="width:32.1%"></div><div class="absolute top-0 h-full limit" style="left:26.8%"></div></div><span>360</span></div>
+    <div class="grid grid-cols-[11rem_1fr_3rem] items-center gap-2"><span>permit_lookup.py</span><div class="relative"><div class="bar bg-amber-400" style="width:30.4%"></div><div class="absolute top-0 h-full limit" style="left:26.8%"></div></div><span>341</span></div>
+    <div class="grid grid-cols-[11rem_1fr_3rem] items-center gap-2"><span>matches_csv.py</span><div class="relative"><div class="bar bg-emerald-400" style="width:24.6%"></div><div class="absolute top-0 h-full limit" style="left:26.8%"></div></div><span>275</span></div>
+    <div class="grid grid-cols-[11rem_1fr_3rem] items-center gap-2"><span>submission_decision.py</span><div class="relative"><div class="bar bg-emerald-400" style="width:23.1%"></div><div class="absolute top-0 h-full limit" style="left:26.8%"></div></div><span>259</span></div>
+    <div class="grid grid-cols-[11rem_1fr_3rem] items-center gap-2"><span>real_samples.py</span><div class="relative"><div class="bar bg-emerald-400" style="width:19.2%"></div><div class="absolute top-0 h-full limit" style="left:26.8%"></div></div><span>215</span></div>
+    <div class="grid grid-cols-[11rem_1fr_3rem] items-center gap-2"><span>vision_verification.py</span><div class="relative"><div class="bar bg-emerald-400" style="width:18.7%"></div><div class="absolute top-0 h-full limit" style="left:26.8%"></div></div><span>209</span></div>
+    <div class="grid grid-cols-[11rem_1fr_3rem] items-center gap-2 text-slate-400"><span>其餘 12 檔</span><div><div class="bar bg-emerald-400" style="width:17%"></div></div><span>≤200</span></div>
+  </div>
+  <p class="text-xs text-slate-500">超長函式(&gt;50 行共 11 個，最長幾個):scan_image_large 106 · main 105 · normalize_address 97 · verify_vision_result 86 · fill_missing_vision 80 · run_scan 71。根目錄另有 0 行的 tempCodeRunnerFile.py。</p>
+</header>
+
+<section id="candidates" class="space-y-10">
+
+<!-- AJ -->
+<article id="AJ" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-xl">AJ · 拆檔不改 interface:大 module 變 package</h2>
+    <span class="rounded-full bg-emerald-100 text-emerald-800 text-xs px-2 py-0.5">Strong</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 text-xs px-2 py-0.5">in-process</span>
+    <span class="rounded-full bg-indigo-50 text-indigo-700 text-xs px-2 py-0.5">原則卡:AK~AN 都照它拆</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">employer_extract.py · pipeline.py · permit_reading.py · address_db.py · 測試約數十處 monkeypatch.setattr(模組, "_私有名")</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before:照行數切 → 一堆 shallow module</p>
+<pre class="mermaid">
+flowchart TB
+  C[呼叫端 / 測試] --> A[a_part1.py]
+  C --> B[a_part2.py]
+  C --> D[a_part3.py]
+  T[測試 patch a._x] -. 蓋不到 .-> B
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class T leak
+</pre></div>
+    <div class="rounded-lg border border-slate-200 p-3"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After:package 的 __init__ 就是 interface</p>
+<pre class="mermaid">
+flowchart TB
+  C[呼叫端 / 測試] --> I
+  subgraph P[employer_extract/ package]
+    I[__init__:只轉發公開名字]
+    I --> x1[契約頁定位.py]
+    I --> x2[雇主區塊.py]
+    I --> x3[台仲區塊.py]
+  end
+  style P fill:#0f172a,color:#f8fafc
+</pre></div>
+  </div>
+  <p><b>Problem:</b>只為達到行數就搬函式，會把一個 deep module 拆成幾個 interface 幾乎等於 implementation 的 shallow module；而測試直接 patch 模組屬性，函式一搬進子模組，patch 就再也蓋不到子模組內部的呼叫，測試安靜地失效。</p>
+  <p><b>Solution:</b>沿著 CONTEXT 已有名字的 seam 切，大檔改成同名 package，<code>__init__</code> 只轉發原本的公開名字 —— 呼叫端零改動,「舊檔只負責引用或轉發」字面成立。依賴改由參數注入(X、AG、K)先做，才拆 patch 最多的檔。</p>
+  <ul class="list-disc pl-5 text-sm space-y-0.5"><li>呼叫端零改動</li><li>interface 不變、檔案變小</li><li>子模組可各自測</li><li>patch 私有名的測試先清掉</li></ul>
+  <div class="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm p-2">與 ADR 不衝突。ADR-0001(地址庫擁有台灣文字正規化)、0011、0012 都是「誰擁有」的決定，package 化保留擁有者。</div>
+</article>
+
+<!-- AK -->
+<article id="AK" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-xl">AK · pipeline.py 只剩入口:一條流程的各段各自成 module</h2>
+    <span class="rounded-full bg-emerald-100 text-emerald-800 text-xs px-2 py-0.5">Strong</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 text-xs px-2 py-0.5">ports &amp; adapters(Google 那幾段)</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">pipeline.py:①設定 124 · ①'重試 157 · ②讀圖 229 · ⑦佇列 247 · ⑧Vision 289 · ⑨Sheets/雇主/反查 327-640 · ⑩run_scan 642-744 · ⑨'preflight 748-975 · main/_parse_args 978-1114</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before:一個檔、七種理由會改它</p>
+      <div class="space-y-1 text-xs">
+        <div class="border-l-4 border-red-400 pl-2 py-1 bg-red-50">CLI 參數與 main(~140)</div>
+        <div class="border-l-4 border-red-400 pl-2 py-1 bg-red-50">preflight(~230)</div>
+        <div class="border-l-4 border-red-400 pl-2 py-1 bg-red-50">許可證掃描一批:run_scan、寫裁切圖、比對原圖(~110)</div>
+        <div class="border-l-4 border-red-400 pl-2 py-1 bg-red-50">雇主擷取一批:collect_employer_fields、全文素材、疑慮報表(~100)</div>
+        <div class="border-l-4 border-red-400 pl-2 py-1 bg-red-50">仲介反查:pick_agency、反查救援(~110)</div>
+        <div class="border-l-4 border-red-400 pl-2 py-1 bg-red-50">Google:重試、Vision client、Sheets 寫入(~200)</div>
+        <div class="border-l-4 border-red-400 pl-2 py-1 bg-red-50">送審佇列(~40)</div>
+      </div></div>
+    <div class="rounded-lg border border-slate-200 p-3"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After:每段對到一個候選</p>
+<pre class="mermaid">
+flowchart LR
+  M[pipeline.py<br/>main + 參數 ≤150] --> S1[許可證掃描一批<br/>AK-1 新]
+  M --> S2[雇主擷取一批<br/>AK-2 新]
+  M --> Q[送審決策 → Sheets 的列<br/>AC]
+  Q --> R[仲介反查<br/>3 + K]
+  Q --> G[Google adapter<br/>V · 2]
+  M --> PF[preflight<br/>L]
+  style M fill:#0f172a,color:#f8fafc
+</pre></div>
+  </div>
+  <p><b>Problem:</b>違反 Monolith 第 3 條與 Clean Code 6「禁止 UI、業務邏輯與 API 請求混寫」—— CLI、掃描迴圈、Google 呼叫與重試、反查決策梯同處一檔;#60 #61 也照樣往這裡加東西。</p>
+  <p><b>Solution:</b>pipeline.py 收斂到 main 與參數解析。其中兩段是<b>新的</b>、可以馬上做的純搬移:<b>AK-1 許可證掃描一批</b>(run_scan、_write_crops、_save_review_images、read_docx_images;掃描快照逐格逐檔守著，不 patch 模組屬性)與 <b>AK-2 雇主擷取一批</b>(collect_employer_fields、write_employer_texts、write_doubt_report;H~O 快照守著);其餘各段已是既有候選 V、AC、3+K、2、L、4。</p>
+  <ul class="list-disc pl-5 text-sm space-y-0.5"><li>每段一個改它的理由</li><li>AK-1 回歸網最齊</li><li>main 變瘦，候選 4 好做</li><li>既有候選有了終點</li></ul>
+</article>
+
+<!-- AL -->
+<article id="AL" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-xl">AL · 雇主擷取變 package:依 CONTEXT 的名字切</h2>
+    <span class="rounded-full bg-emerald-100 text-emerald-800 text-xs px-2 py-0.5">Strong</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 text-xs px-2 py-0.5">in-process · 要先注入 OCR(X、AG)</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">employer_extract.py:字彙常數 1-135 · 文字工具 135-182 · 契約頁定位 185-306 · 雇主區塊與三個 pick 309-524 · 名稱疑慮 537-631 · 切結書頁備援 644-686, 1064-1092 · 地址疑慮 695-824 · Vision 全文 827 · 次頁台仲區塊 871-992 · 組裝 995-1061</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before:46 個檔 import 它;仲介、地址也住在這</p>
+<pre class="mermaid">
+flowchart TB
+  EE[employer_extract.py 1108]
+  EE --- a[契約頁定位]
+  EE --- b[雇主區塊]
+  EE --- c[切結書頁備援]
+  EE --- d[地址疑慮]
+  EE --- e[次頁台仲區塊]
+  EE --- f[Vision 全文]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class d,e,f leak
+</pre></div>
+    <div class="rounded-lg border border-slate-200 p-3"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After:住對地方，剩下的成 package</p>
+<pre class="mermaid">
+flowchart TB
+  subgraph EP[employer_extract/]
+    a[契約頁定位 · B]
+    b[雇主區塊]
+    c[切結書頁備援 · AA]
+    n[雇主名稱與疑慮]
+  end
+  d[地址疑慮] --> AD[(地址庫 · Y)]
+  e[次頁台仲區塊 · S+Z] --> AG2[仲介反查 module]
+  f[Vision 全文] --> V[Vision port · V]
+  style EP fill:#0f172a,color:#f8fafc
+</pre></div>
+  </div>
+  <p><b>Problem:</b>1108 行裡有三塊根本不是雇主擷取(地址疑慮、次頁台仲區塊、Vision 全文);認頁的 Tesseract 與 Vision 寫死，測試靠 patch 私有名，直接拆會讓 patch 安靜失效。</p>
+  <p><b>Solution:</b>先讓三塊住對地方(Y、S+Z、V,都是既有候選),再把剩下的依 CONTEXT「契約頁 / 次頁」「切結書頁備援」「字數音節數檢查」切成 package 子模組。X、AG 是前置。</p>
+  <ul class="list-disc pl-5 text-sm space-y-0.5"><li>三塊回到主人身上</li><li>剩約 700 行再切三份</li><li>測試不再 patch 私有名</li></ul>
+</article>
+
+<!-- AM -->
+<article id="AM" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-xl">AM · 許可證掃描變 package:一張圖、一份 docx、Tesseract 分開</h2>
+    <span class="rounded-full bg-amber-100 text-amber-800 text-xs px-2 py-0.5">Worth exploring</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 text-xs px-2 py-0.5">in-process · Ocr 已注入</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">permit_reading.py:①分層與 Tesseract 98 · ②一張圖 → 一次判讀 155(scan_image_large 106 行) · ③分層掃描 417 · ④一份 docx → 它的列 484</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before:四節已經分好，只差檔案</p>
+      <div class="space-y-1 text-xs">
+        <div class="border-l-4 border-red-400 pl-2 py-1 bg-red-50">① Tesseract 設定與呼叫(~100,AG 要搬走)</div>
+        <div class="border-l-4 border-red-400 pl-2 py-1 bg-red-50">② 一張圖:多數票、mol / permit ROI、交叉比對(~260)</div>
+        <div class="border-l-4 border-red-400 pl-2 py-1 bg-red-50">③ 分層掃描(~70)</div>
+        <div class="border-l-4 border-red-400 pl-2 py-1 bg-red-50">④ 一份 docx → 它的列(~140)</div>
+      </div></div>
+    <div class="rounded-lg border border-slate-200 p-3"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After</p>
+<pre class="mermaid">
+flowchart LR
+  I[permit_reading/__init__<br/>scan_docx · scan_image_*] --> one[一張圖判讀<br/>每個 ROI 一個函式]
+  I --> docx[一份 docx:分層 + 寫列]
+  one --> T[Tesseract adapter · AG]
+  style I fill:#0f172a,color:#f8fafc
+</pre></div>
+  </div>
+  <p><b>Problem:</b>625 行，其中 scan_image_large 106 行把 mol 多數票、first-hit、permit 上下半多數票、交叉比對擠在一個迴圈 —— Clean Code 4「需要註解才能解釋就該拆」。</p>
+  <p><b>Solution:</b>照現有四節拆成 package;scan_image_large 依 ROI 拆成「mol 這一欄」「permit 這一欄」「兩欄互證」三步。Ocr 早已注入，測試不 patch 模組屬性，掃描快照逐格守著 —— 是 AJ 原則最好的試點。</p>
+  <ul class="list-disc pl-5 text-sm space-y-0.5"><li>剛熱的檔，回歸網最齊</li><li>拆 106 行函式</li><li>AJ 原則的試點</li></ul>
+</article>
+
+<!-- AN -->
+<article id="AN" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-xl">AN · 地址庫變 package:中文比對、英文比對、組裝</h2>
+    <span class="rounded-full bg-amber-100 text-amber-800 text-xs px-2 py-0.5">Worth exploring</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 text-xs px-2 py-0.5">local-substitutable(AllData.json)</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">address_db.py 616:fold_variants · _load / _merge_custom_roads · _match_city/_area/_road(中文) · _match_*_en / _assemble_en(英文) · _line_candidate 57 · normalize_address 97</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before</p>
+<pre class="mermaid">
+flowchart TB
+  N[normalize_address 97 行] --> zh[中文比對]
+  N --> en[英文比對]
+  N --> L[(全域 lru_cache 地址庫)]
+  EE[雇主擷取的地址疑慮] -. 讀私有 _match_city_area_en .-> en
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class EE leak
+</pre></div>
+    <div class="rounded-lg border border-slate-200 p-3"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After</p>
+<pre class="mermaid">
+flowchart TB
+  I[address_db/__init__<br/>normalize_address · fold_variants · 疑慮] --> zh[中文比對]
+  I --> en[英文比對]
+  I --> dq[地址疑慮 · Y]
+  I --> data[地址資料:可注入 · G + 5]
+  style I fill:#0f172a,color:#f8fafc
+</pre></div>
+  </div>
+  <p><b>Problem:</b>616 行，normalize_address 97 行;雇主擷取伸手拿私有的英文比對。</p>
+  <p><b>Solution:</b>與既有的 Y + G + 5 同輪做:疑慮收進來、資料可注入，順勢切成 package。ADR-0001 的擁有者不變。</p>
+  <ul class="list-disc pl-5 text-sm space-y-0.5"><li>疑慮與比對同處</li><li>不再讀私有名</li><li>換機器不大片轉紅</li></ul>
+</article>
+
+<!-- AO -->
+<article id="AO" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-xl">AO · 剛過 300 行的兩個檔，與 200~300 行的四個</h2>
+    <span class="rounded-full bg-slate-200 text-slate-700 text-xs px-2 py-0.5">Speculative</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 text-xs px-2 py-0.5">上限 300 後縮小</span>
+  </div>
+  <p class="font-mono text-sm text-slate-600">snapshots.py 360 · permit_lookup.py 341 · matches_csv.py 275 · submission_decision.py 259 · real_samples.py 215 · vision_verification.py 209</p>
+  <div class="overflow-x-auto"><table class="text-sm w-full">
+    <thead class="text-xs uppercase tracking-wider text-slate-500"><tr><th class="text-left py-1">檔</th><th class="text-left">自然的切點</th><th class="text-left">建議</th></tr></thead>
+    <tbody class="divide-y divide-slate-100">
+      <tr><td class="py-1 font-mono">snapshots.py</td><td>H~O 快照 / 送審快照 / 補 Vision 全文(fill_missing_vision 80 行)</td><td>拆三檔，併 AI</td></tr>
+      <tr><td class="py-1 font-mono">permit_lookup.py</td><td>名冊載入與補充檔 / 查表(PermitLookup)</td><td>拆兩檔，併 3+K</td></tr>
+      <tr><td class="py-1 font-mono">matches_csv.py</td><td>ScanResult 一個實體(134 行多是欄位與序列化)</td><td>上限內，不動</td></tr>
+      <tr><td class="py-1 font-mono">submission_decision.py</td><td>large / small 決策(_decide_large 57)</td><td>上限內;_decide_large 57 行拆函式</td></tr>
+      <tr><td class="py-1 font-mono">real_samples.py</td><td>素材路徑 / 核對值 / 某日掃描</td><td>上限內，不動</td></tr>
+      <tr><td class="py-1 font-mono">vision_verification.py</td><td>verify_vision_result 86 行</td><td>上限內;拆函式，併 V</td></tr>
+    </tbody></table></div>
+  <p><b>Problem:</b>上限改為 300 後，只有 snapshots(360)與 permit_lookup(341)超標;其餘四個在上限內，只剩超過 50 行的函式要拆。</p>
+  <p><b>Solution:</b>snapshots 併 AI、permit_lookup 併 3+K 順手拆;matches_csv、real_samples 不動;submission_decision 的 _decide_large、vision_verification 的 verify_vision_result 拆函式。</p>
+</article>
+
+</section>
+
+<section id="top-recommendation" class="rounded-xl border-2 border-slate-900 bg-white p-6 space-y-2">
+  <p class="text-xs uppercase tracking-wider text-slate-500">Top recommendation</p>
+  <h2 class="font-serif text-2xl"><a href="#AM" class="underline">AM</a> + <a href="#AK" class="underline">AK-1</a>:許可證側先拆</h2>
+  <p>同一段剛熱的程式(許可證掃描與它的一批迴圈),Ocr 早已注入、測試不 patch 模組屬性，掃描快照逐格逐檔守著 —— 拿它試 <a href="#AJ" class="underline">AJ</a> 的 package 做法風險最低。做完 permit_reading 與 pipeline 各少約 110~600 行，而且不依賴 V。employer_extract(AL)要等 X、AG 把 patch 清掉才拆。</p>
+  <p class="text-sm text-slate-600">對總表的影響:AJ 是原則，不單獨開票;AK 的其餘段落就是 V、AC、3+K、2、L、4 的終點;AL 併 X+AG、B+S+Z、Y、AA;AN 併 Y+G+5;AO 併進 AI、3+K、V。</p>
+</section>
+
+</main>
+</body>
+</html>
