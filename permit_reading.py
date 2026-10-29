@@ -221,7 +221,7 @@ def _crop_stem(docx_name: str, img_name: str) -> str:
     return f"{Path(docx_name).stem}_{Path(img_name).stem}"
 
 
-def _plan_crop(result: ScanResult, roi: Roi, stem: str) -> Crop:
+def _fill_crop(result: ScanResult, roi: Roi, stem: str) -> Crop:
     """這個 ROI 的裁切圖:路徑當下就填進列(mol 或 permit 那格),回傳要寫出的裁切圖。
 
     路徑相對 matches.csv 所在資料夾、一律 posix:整個資料夾搬到哪都能用,
@@ -252,7 +252,7 @@ def _apply_mol_vote(result: ScanResult, image_bytes: bytes, stem: str,
         f"  ★ mol 多數票：{vote.value}  avg_conf={vote.conf}"
         f"  ({vote.count}/{vote.total} 票)"
     )
-    return _plan_crop(result, Roi.MOL, stem)
+    return _fill_crop(result, Roi.MOL, stem)
 
 
 def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
@@ -286,7 +286,7 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
         result.mol_conf  = conf
         result.hit_config = cfg["name"]
         result.hit_roi   = Roi.MOL
-        crops.append(_plan_crop(result, Roi.MOL, stem))
+        crops.append(_fill_crop(result, Roi.MOL, stem))
         logger.debug(f"  ★ mol/{cfg['name']}  conf={conf}  mol={mol!r}")
         return Reading(result, crops)
 
@@ -358,7 +358,7 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
             any_hit = True
             fields_found.add(field)
             # 對應欄位的 crop（mol 或 permit）,每欄只寫第一個命中的 ROI
-            crops.append(_plan_crop(result, roi_name, stem))
+            crops.append(_fill_crop(result, roi_name, stem))
             logger.debug(f"  ★ {roi_name}/{cfg['name']}  conf={conf}  id={id_!r} mol={mol!r}")
             break
 
@@ -599,7 +599,7 @@ def _small_rows(docx_name: str, images: list[tuple[str, bytes]],
     for r in rows:
         logger.info(
             f"★ {docx_name} / {r.result.image_name}"
-            f"  [small|{r.result.hit_roi}]"
+            f"  [small|{r.result.hit_roi or ''}]"
             f"  mol={r.result.mol!r}({r.result.mol_conf})"
         )
     return DocxScan.small(rows, review, len(images))

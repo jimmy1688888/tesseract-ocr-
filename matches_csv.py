@@ -222,29 +222,23 @@ class ScanResult:
 
 
 def _status(row: dict[str, str]) -> ResultStatus:
-    """status 欄 → ResultStatus。空字串是沒有這欄的舊檔,當正常;不認得的值拋例外。
+    """status 欄 → ResultStatus。空字串是沒有這欄的舊檔,當正常。
 
     以前不認得的值安靜當成正常(OK),壞檔或未來格式的佔位列就會被當成讀值去決策。
     """
-    value = row.get("status", "")
-    if not value:
-        return ResultStatus.OK
-    try:
-        return ResultStatus(value)
-    except ValueError:
-        raise UnknownStatus(
-            f"matches.csv 的 status 不認得:{row.get('source_docx', '')} 的 {value!r}") from None
+    return _member(row, "status", ResultStatus, empty=ResultStatus.OK, unknown=UnknownStatus)
 
 
-def _member(row: dict[str, str], column: str, enum: type[StrEnum]):
-    """欄位 → 型別;空字串為 None,不認得的值拋例外(帶 docx 名與值)。"""
+def _member(row: dict[str, str], column: str, enum: type[Enum], *,
+            empty=None, unknown: type[UnknownValue] = UnknownValue):
+    """欄位 → 型別;空字串為 empty,不認得的值拋 unknown(帶 docx 名與值)。"""
     value = row.get(column, "")
     if not value:
-        return None
+        return empty
     try:
         return enum(value)
     except ValueError:
-        raise UnknownValue(
+        raise unknown(
             f"matches.csv 的 {column} 不認得:{row.get('source_docx', '')} 的 {value!r}") from None
 
 
