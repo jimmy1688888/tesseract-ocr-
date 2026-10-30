@@ -14,7 +14,7 @@ from pathlib import Path
 from permit_patterns import permit_in_text
 from sheet_row import SheetRow, SheetStatus
 from submission_decision import Decision
-from vision_reader import VisionReader
+from vision_reader import VisionCallFailed, VisionReader
 
 logger = logging.getLogger(__name__)
 
@@ -32,36 +32,47 @@ def run_vision_items(decisions: list[Decision], vision: VisionReader
     雙引擎完全一致才自動寫入;其餘進人工審查(交叉比對見 verify_vision_result)。
     """
     auto: list[SheetRow] = []    # 雙引擎一致(CONFIRMED) → 自動寫
-    review: list[SheetRow] = []  # 任何不一致 → 人工審查
+    review: list[SheetRow] = []  # 任何不一致、沒驗成 → 人工審查
     for d in decisions:
-        # 截圖不在:舊做法 continue,整份 docx 從 Sheets 消失(#39)。改進人工審查,
-        # 比照 Vision 沒讀到值:B 欄留 Tesseract 候選值、理由只講事實。
-        if not d.img_path or not Path(d.img_path).exists():
-            logger.warning(f"  ⚠ 找不到圖檔：{d.img_path}（{d.source_docx}）→ 人工審查")
-            review.append(SheetRow(
-                d.source_docx, d.candidate_value, SheetStatus.MANUAL_REVIEW,
-                f"[送Vision原因] {d.reason} ／ 截圖檔不在,未送 Vision"))
-            continue
-        vision_value = permit_in_text(vision.read_sparse(Path(d.img_path).read_bytes()), d.hit_roi)
-        verified = verify_vision_result(
-            vision_value=vision_value,
-            tesseract_candidate=d.candidate_value,
-            tesseract_conf=d.candidate_conf,
-        )
-        logger.info(
-            f"  Vision → {d.source_docx} / {d.image_name}"
-            f"  candidate={d.candidate_value!r}(conf={d.candidate_conf:.1f})"
-            f"  vision={vision_value!r}"
-            f"  → {verified.level.value}(keyin={verified.should_keyin})"
-        )
-        reason = f"[送Vision原因] {d.reason} ／ [Vision結果] {verified.rationale}"
-        if verified.should_keyin:
-            auto.append(SheetRow(d.source_docx, verified.final_value,
-                                 SheetStatus.KEYED_IN, reason))
-        else:
-            review.append(SheetRow(d.source_docx, verified.final_value,
-                                   SheetStatus.MANUAL_REVIEW, reason))
+        row = _verify(d, vision)
+        (auto if row.status is SheetStatus.KEYED_IN else review).append(row)
     return auto, review
+
+
+def _verify(d: Decision, vision: VisionReader) -> SheetRow:
+    """一個送 Vision 的決定 → 它的那一列。"""
+    # 截圖不在:舊做法 continue,整份 docx 從 Sheets 消失(#39)。改進人工審查,
+    # 比照 Vision 沒讀到值:B 欄留 Tesseract 候選值、理由只講事實。
+    if not d.img_path or not Path(d.img_path).exists():
+        logger.warning(f"  ⚠ 找不到圖檔：{d.img_path}（{d.source_docx}）→ 人工審查")
+        return _unverified(d, "截圖檔不在,未送 Vision")
+    try:
+        text = vision.read_sparse(Path(d.img_path).read_bytes())
+    except VisionCallFailed as e:
+        # 沒問到 ≠ 沒取到號(ADR-0015):只影響這一份,其他份照常驗。
+        logger.warning(f"  ⚠ {d.source_docx} {e} → 人工審查")
+        return _unverified(d, "Vision 呼叫失敗,未驗證")
+    vision_value = permit_in_text(text, d.hit_roi)
+    verified = verify_vision_result(
+        vision_value=vision_value,
+        tesseract_candidate=d.candidate_value,
+        tesseract_conf=d.candidate_conf,
+    )
+    logger.info(
+        f"  Vision → {d.source_docx} / {d.image_name}"
+        f"  candidate={d.candidate_value!r}(conf={d.candidate_conf:.1f})"
+        f"  vision={vision_value!r}"
+        f"  → {verified.level.value}(keyin={verified.should_keyin})"
+    )
+    status = SheetStatus.KEYED_IN if verified.should_keyin else SheetStatus.MANUAL_REVIEW
+    return SheetRow(d.source_docx, verified.final_value, status,
+                    f"[送Vision原因] {d.reason} ／ [Vision結果] {verified.rationale}")
+
+
+def _unverified(d: Decision, fact: str) -> SheetRow:
+    """沒驗成的那一份:人工審查,B 欄留 Tesseract 候選值,理由只講事實。"""
+    return SheetRow(d.source_docx, d.candidate_value, SheetStatus.MANUAL_REVIEW,
+                    f"[送Vision原因] {d.reason} ／ {fact}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

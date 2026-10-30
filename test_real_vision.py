@@ -56,3 +56,17 @@ def test_read_document_reads_the_checked_employer_name_of_33703(real_ocr):
     result = extract_employer_from_docx(str(rs.sample("33703.docx")), GoogleVisionReader())
 
     assert result.values.雇主名稱_中 == expected
+
+
+def test_broken_image_is_a_vision_call_failure_not_an_empty_reading():
+    """#65:Google 拒收的圖(截斷的 PNG)是「沒問到」—— raise VisionCallFailed,
+    不是空字串(那會被判成沒取到號),也不是讓整批中止的例外。"""
+    from vision_reader import VisionCallFailed
+
+    crop = next(rs.ROOT.glob("permit_scan/*/permit_crops/30768_*.png"), None)
+    if crop is None:
+        pytest.skip("沒有 30768 的許可證截圖")
+    truncated = crop.read_bytes()[:64]
+
+    with pytest.raises(VisionCallFailed):
+        GoogleVisionReader().read_sparse(truncated)

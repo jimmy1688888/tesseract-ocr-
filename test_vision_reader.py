@@ -11,6 +11,7 @@ import pytest
 
 from conftest import module_sources
 import vision_reader
+from google.api_core import exceptions as gax_exceptions
 from vision_reader import GoogleVisionReader, VisionCallFailed, VisionReader
 
 PNG = b"\x89PNG fake"
@@ -23,18 +24,22 @@ def _response(text: str = "", error: str = ""):
 
 
 class _FakeClient:
-    """記下呼叫了哪個 feature、送了什麼 bytes;回傳指定的回應。"""
+    """記下呼叫了哪個 feature、送了什麼 bytes;依序丟出 errors 裡的例外,之後回傳 response。"""
 
-    def __init__(self, response):
-        self.response, self.calls = response, []
+    def __init__(self, response, errors=()):
+        self.response, self.errors, self.calls = response, list(errors), []
+
+    def _answer(self, feature, image):
+        self.calls.append((feature, image.content))
+        if self.errors:
+            raise self.errors.pop(0)
+        return self.response
 
     def text_detection(self, image):
-        self.calls.append(("text_detection", image.content))
-        return self.response
+        return self._answer("text_detection", image)
 
     def document_text_detection(self, image):
-        self.calls.append(("document_text_detection", image.content))
-        return self.response
+        return self._answer("document_text_detection", image)
 
 
 class TestEachReadUsesItsOwnFeature:
@@ -53,15 +58,74 @@ class TestEachReadUsesItsOwnFeature:
         assert getattr(GoogleVisionReader(_FakeClient(_response())), read)(PNG) == ""
 
 
-class TestErrorReportedInTheResponse:
-    """#64 只換路徑、不改行為:兩條讀法對 API 回報的錯誤仍各走今天的路(改在 #65)。"""
+READS = ["read_sparse", "read_document"]
 
-    def test_sparse_still_returns_empty(self):
-        assert GoogleVisionReader(_FakeClient(_response(error="Bad image data"))).read_sparse(PNG) == ""
 
-    def test_document_raises_vision_call_failed(self):
+def _reader(errors=(), response=None):
+    """不真的睡的 reader;回傳 (reader, client, 等過的秒數)。"""
+    slept: list[float] = []
+    client = _FakeClient(response or _response("No jin:1234"), errors)
+    return GoogleVisionReader(client, sleep=slept.append), client, slept
+
+
+class TestVisionCallFailed:
+    """錯誤怎麼分(ADR-0015):換下一份會不會一樣失敗。兩種讀法同一套。"""
+
+    @pytest.mark.parametrize("read", READS)
+    def test_error_in_the_response_fails_without_retry(self, read):
+        """Google 已經回答了這張圖;再送一次結果也一樣。以前 read_sparse 回空字串、
+        被判成「Vision 沒取到號」。"""
+        reader, client, slept = _reader(response=_response(error="Bad image data"))
         with pytest.raises(VisionCallFailed, match="Bad image data"):
-            GoogleVisionReader(_FakeClient(_response(error="Bad image data"))).read_document(PNG)
+            getattr(reader, read)(PNG)
+        assert (len(client.calls), slept) == (1, [])
+
+    @pytest.mark.parametrize("read", READS)
+    @pytest.mark.parametrize("error", [
+        gax_exceptions.ServiceUnavailable("503"), gax_exceptions.ResourceExhausted("429"),
+        gax_exceptions.DeadlineExceeded("逾時"), ConnectionError("斷線"), TimeoutError("逾時")])
+    def test_transient_errors_retry_four_times_then_fail(self, read, error):
+        reader, client, slept = _reader(errors=[error] * 4)
+        with pytest.raises(VisionCallFailed):
+            getattr(reader, read)(PNG)
+        assert len(client.calls) == 4
+        assert slept == [2.0, 4.0, 8.0]
+
+    @pytest.mark.parametrize("read", READS)
+    def test_transient_error_that_clears_is_not_a_failure(self, read):
+        reader, client, _ = _reader(errors=[gax_exceptions.ServiceUnavailable("503")])
+        assert getattr(reader, read)(PNG) == "No jin:1234"
+        assert len(client.calls) == 2
+
+    @pytest.mark.parametrize("read", READS)
+    @pytest.mark.parametrize("error", [
+        gax_exceptions.InvalidArgument("圖壞了"), gax_exceptions.InternalServerError("500")])
+    def test_other_google_errors_fail_without_retry(self, read, error):
+        reader, client, slept = _reader(errors=[error])
+        with pytest.raises(VisionCallFailed):
+            getattr(reader, read)(PNG)
+        assert (len(client.calls), slept) == (1, [])
+
+    @pytest.mark.parametrize("read", READS)
+    @pytest.mark.parametrize("error", [
+        gax_exceptions.PermissionDenied("403"), gax_exceptions.Unauthenticated("401")])
+    def test_identity_refused_is_not_a_vision_call_failure(self, read, error):
+        """換下一份也一樣失敗:往上拋,整批中止。"""
+        reader, client, _ = _reader(errors=[error])
+        with pytest.raises(type(error)):
+            getattr(reader, read)(PNG)
+        assert len(client.calls) == 1
+
+    @pytest.mark.parametrize("read", READS)
+    def test_bugs_are_not_caught(self, read):
+        reader, _, _ = _reader(errors=[KeyError("程式寫錯")])
+        with pytest.raises(KeyError):
+            getattr(reader, read)(PNG)
+
+    def test_vision_call_failed_is_never_an_empty_string(self):
+        """空字串只代表「讀到了、沒有字」。"""
+        reader, _, _ = _reader(response=_response())
+        assert reader.read_sparse(PNG) == "" and reader.read_document(PNG) == ""
 
 
 def test_google_adapter_satisfies_the_port():
