@@ -99,6 +99,15 @@ class TestScanImageLarge:
         assert "mol" not in ocr.read_rois
         assert r.id == "1234"
 
+    def test_roi_filter_mol_still_cross_checks_against_the_permit_vote(self):
+        """--roi mol 時 permit 不跑 first-hit,但缺欄的多數票照跑,與 mol 相同就是吻合。"""
+        ocr = (FakeOcr().every("mol", "MOL 1234", 70.0, PERMIT_VOTE_CONFIGS)
+               .every("permit_upper", "No. Izin: 1234", 60.0))
+
+        r, _ = _large(ocr, roi_filter="mol")
+
+        assert r.cross_match
+
 
 NON_VOTE = [c for c in FIRST_HIT if c not in PERMIT_VOTE_CONFIGS]
 
