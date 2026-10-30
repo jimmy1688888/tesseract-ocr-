@@ -5,14 +5,17 @@
 真的沒填」分不出來。雇主區塊未錨定時切結書頁救回中文名 → H 有值、L 只寫「取自
 切結書頁」,看不出整個區塊其實沒錨到;日誌卻印「H~O 留空」。資料全部捏造。
 """
+import io
 import logging
 
 import pytest
+from PIL import Image
 
 from conftest import FakeVision
 import employer_extract as ee
 from contract_template import Template
-from employer_result import EmployerExtraction, ExtractionStatus
+from employer_result import EmployerExtraction, EmployerValues, ExtractionStatus
+from vision_reader import VisionCallFailed
 
 _NO_ANCHOR = "勞動契約 監護工\n仲介公司 某某人力"
 
@@ -27,6 +30,7 @@ class TestReasonInLColumn:
         (ExtractionStatus.雇主區塊未錨定, "H~O:契約頁雇主區塊未錨定,未擷取"),
         (ExtractionStatus.找不到契約頁, "H~O:找不到契約頁,未擷取"),
         (ExtractionStatus.docx無內嵌圖, "H~O:docx 無內嵌圖,未擷取"),
+        (ExtractionStatus.契約頁Vision呼叫失敗, "H~O:契約頁 Vision 呼叫失敗,未擷取"),
         (ExtractionStatus.擷取失敗, "H~O:雇主擷取失敗(例外),未擷取"),
     ])
     def test_each_status_states_why(self, status, l_column):
@@ -86,6 +90,68 @@ class TestRescueAlongsideTheReason:
             Batch.from_file(tmp_path / "99996.docx", output_dir=tmp_path))
         assert calls == []
         assert got["99996.docx"].疑慮標示 == "H~O:雇主擷取失敗(例外),未擷取"
+
+
+class TestContractPageVisionCallFailed:
+    """契約頁沒問到:自己一種擷取狀況,不和程式例外混在「擷取失敗」(#66、ADR-0015)。"""
+
+    @staticmethod
+    def _failing(image):
+        raise VisionCallFailed("503")
+
+    def test_has_its_own_status_and_keeps_the_page(self, monkeypatch):
+        monkeypatch.setattr(ee, "_scored_pages", lambda p: [(99, "image2.jpeg", b"x")])
+        r = ee.extract_employer_from_docx("x.docx", FakeVision(document=self._failing),
+                                          roi=None, deink=False)
+        assert r.status is ExtractionStatus.契約頁Vision呼叫失敗
+        assert r.values == EmployerValues()
+        assert r.source.image == "image2.jpeg"        # 截圖照樣留著,人工看得到
+        assert r.疑慮標示 == "H~O:契約頁 Vision 呼叫失敗,未擷取"
+
+    def test_pledge_rescue_does_not_run(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(ee, "_scored_pages", lambda p: [(99, "image2.jpeg", b"x")])
+        monkeypatch.setattr(ee, "rescue_name_from_pledge",
+                            lambda p, vision: calls.append(p) or ("姜信安", "image5.jpeg"))
+        ee.extract_employer_from_docx("x.docx", FakeVision(document=self._failing),
+                                      roi=None, deink=False)
+        assert calls == []
+
+    def test_one_failure_does_not_touch_the_others(self, tmp_path, monkeypatch):
+        import pipeline
+        from batch import Batch
+        (tmp_path / "bad.docx").write_bytes(b"")
+        (tmp_path / "ok.docx").write_bytes(b"")
+        page = io.BytesIO()
+        Image.new("RGB", (40, 40), "white").save(page, format="PNG")
+        monkeypatch.setattr(ee, "_scored_pages",
+                            lambda p: [(99, "image2.jpeg", page.getvalue())])
+        text = "\n".join(["甲方名稱: 王小明", "Nama Majikan: WANG XIAO MING",
+                          "SELANJUTNYA DISEBUT PIHAK PERTAMA"])
+        reads = []
+
+        def read(image):                        # 一批依檔名排序:bad.docx 先讀
+            reads.append(image)
+            if len(reads) == 1:
+                raise VisionCallFailed("503")
+            return text
+        got = pipeline.collect_employer_fields(
+            Batch.from_dir(tmp_path, output_dir=tmp_path / "out"), FakeVision(document=read))
+        assert got["bad.docx"].status is ExtractionStatus.契約頁Vision呼叫失敗
+        assert got["ok.docx"].values.雇主名稱_中 == "王小明"
+
+    def test_identity_refused_aborts_the_run(self, tmp_path, monkeypatch):
+        """403/401 換下一份也一樣:不吞成擷取失敗,往上拋讓整批中止。"""
+        import pipeline
+        from batch import Batch
+        from google.api_core.exceptions import PermissionDenied
+
+        def refused(*a, **k):
+            raise PermissionDenied("403")
+        monkeypatch.setattr("employer_extract.extract_employer_from_docx", refused)
+        with pytest.raises(PermissionDenied):
+            pipeline.collect_employer_fields(
+                Batch.from_file(tmp_path / "99994.docx", output_dir=tmp_path), FakeVision())
 
 
 class TestTemplateDoubtIsAboutTheWholeDocx:

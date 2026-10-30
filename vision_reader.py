@@ -20,7 +20,7 @@ import google_clients
 from retry import is_retryable_google_error, with_retry
 
 
-__all__ = ["VisionCallFailed", "VisionReader", "GoogleVisionReader"]
+__all__ = ["VisionCallFailed", "VisionReader", "GoogleVisionReader", "IDENTITY_REFUSED"]
 
 
 class VisionCallFailed(Exception):
@@ -34,7 +34,7 @@ class VisionReader(Protocol):
 
 
 # 換下一份也一樣失敗:身分或權限被拒,往上拋讓整批中止,不算 Vision 呼叫失敗(ADR-0015)。
-_IDENTITY_REFUSED = (gax_exceptions.PermissionDenied, gax_exceptions.Unauthenticated)
+IDENTITY_REFUSED = (gax_exceptions.PermissionDenied, gax_exceptions.Unauthenticated)
 # 打 Vision 時會出現的錯誤;重試用盡(或不值得重試)就是 Vision 呼叫失敗。
 # 其餘例外(程式寫錯、拿不到憑證)不攔。
 _CALL_ERRORS = (ConnectionError, TimeoutError,
@@ -66,7 +66,7 @@ class GoogleVisionReader:
     def _read(self, feature: str, image: bytes) -> str:
         try:
             response = self._annotate_with_retry(feature, image)
-        except _IDENTITY_REFUSED:
+        except IDENTITY_REFUSED:
             raise
         except _CALL_ERRORS as e:
             raise VisionCallFailed(f"Vision 呼叫失敗: {e!r}") from e

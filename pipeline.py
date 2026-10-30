@@ -186,7 +186,7 @@ def build_vision_queue(csv_path: Path) -> SubmissionQueue:
 # ⑧ Google Vision(驗證在 vision_verification、讀字在 vision_reader)
 # ═══════════════════════════════════════════════════════════════════════════
 
-from vision_reader import GoogleVisionReader, VisionReader  # noqa: E402
+from vision_reader import IDENTITY_REFUSED, GoogleVisionReader, VisionReader  # noqa: E402
 from vision_verification import run_vision_items  # noqa: E402
 
 
@@ -268,6 +268,8 @@ def collect_employer_fields(batch: Batch, vision: VisionReader | None = None
         try:
             result = extract_employer_from_docx(
                 str(dp), vision, crop_dir=str(batch.employer_crop_dir))
+        except IDENTITY_REFUSED:
+            raise                       # 換下一份也一樣失敗:整批中止(ADR-0015)
         except Exception as e:
             logger.warning(f"  ⚠ {name}: 雇主擷取失敗({e!r}),該列 H~O 留空")
             employer_by_docx[name] = EmployerExtraction(ExtractionStatus.擷取失敗, detail=repr(e))

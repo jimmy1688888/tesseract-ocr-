@@ -23,6 +23,7 @@ import employer_extract as ee
 from contract_template import Template
 from employer_extract import _pledge_name
 from employer_result import EmployerExtraction, EmployerValues, ExtractionStatus, Source
+from vision_reader import VisionCallFailed
 
 # 32572 實況:中英分行
 _TWO_LINE = ("perihal No. IV ini. 中華民國雇主:張鈺珠 "
@@ -136,16 +137,19 @@ class TestRescueFromPledge:
         ee.rescue_name_from_pledge(p, vision)
         assert vision.document_reads == [b"image5.jpeg"]          # 命中就停,不白花第二次
 
-    def test_vision_failure_does_not_propagate(self, tmp_path, pledge_front,
-                                               monkeypatch):
-        """憑證/額度/網路問題不得讓整批掛掉——救援失敗只是少一格值。"""
+    def test_vision_call_failure_stops_without_trying_the_next_page(self, tmp_path,
+                                                                    pledge_front):
+        """Vision 呼叫失敗多半是服務那一端,換一張再打多半一樣;交給呼叫端寫疑慮(#66)。"""
         pledge_front("image4.jpeg")
-        p = _make_docx(tmp_path / "g.docx", ["image4.jpeg", "image5.jpeg"])
+        p = _make_docx(tmp_path / "g.docx", [f"image{n}.jpeg" for n in range(1, 8)])
 
         def _boom(b):
-            raise RuntimeError("403 quota")
+            raise VisionCallFailed("503")
 
-        assert ee.rescue_name_from_pledge(p, FakeVision(document=_boom)) == ("", "")
+        vision = FakeVision(document=_boom)
+        with pytest.raises(VisionCallFailed):
+            ee.rescue_name_from_pledge(p, vision)
+        assert vision.document_reads == [b"image5.jpeg"]
 
 
 class TestApplyRescue:
@@ -184,6 +188,16 @@ class TestApplyRescue:
         f = ee._apply_pledge_rescue(f, "x.docx", FakeVision())
         assert "取自切結書頁" in f.疑慮標示
         assert "音節" not in f.疑慮標示
+
+    def test_vision_call_failure_is_stated_beside_the_missing_name(self, monkeypatch):
+        """沒問到 ≠ 救不回:H 欄維持空,L 欄另加一條,兩條並列(#66、ADR-0015)。"""
+        def _failed(p, vision):
+            raise VisionCallFailed("503")
+        monkeypatch.setattr(ee, "rescue_name_from_pledge", _failed)
+        f = ee._apply_pledge_rescue(self._fields(), "x.docx", FakeVision())
+        assert f.values.雇主名稱_中 == ""
+        assert f.status is ExtractionStatus.擷取成功
+        assert f.疑慮標示 == "H:未擷取到中文名；H:切結書頁 Vision 呼叫失敗"
 
     def test_failed_rescue_changes_nothing(self, monkeypatch):
         """救不回來時 H 欄維持空、L 欄維持「未擷取到」。

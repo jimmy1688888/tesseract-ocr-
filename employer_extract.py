@@ -29,6 +29,8 @@ from employer_result import (VALUE_KEYS, WHOLE, Doubt, EmployerExtraction, Emplo
                              ExtractionStatus, Source)
 from tw_phone import phones_in
 
+from vision_reader import VisionCallFailed
+
 if TYPE_CHECKING:
     from vision_reader import VisionReader
 
@@ -664,7 +666,8 @@ def _pledge_name(text: str) -> str:
 
 def rescue_name_from_pledge(docx_path: str, vision: VisionReader,
                             max_pages: int = 2) -> tuple[str, str]:
-    """契約頁抽不到中文名時,改從切結書頁取。回傳 (名字, 圖檔名),失敗回 ("", "")。
+    """契約頁抽不到中文名時,改從切結書頁取。回傳 (名字, 圖檔名),救不回回 ("", "");
+    Vision 呼叫失敗往上拋(VisionCallFailed),由 _apply_pledge_rescue 寫進 L 欄。
 
     **用 Vision 而不是本機 Tesseract**,這是這條管道能不能用的關鍵。同一格實測:
 
@@ -679,11 +682,9 @@ def rescue_name_from_pledge(docx_path: str, vision: VisionReader,
     (上一批 21 份會觸發 4 次)。
     """
     for name, raw in pledge_name_pages(docx_path, max_pages):
-        try:
-            got = _pledge_name(vision.read_document(raw))
-        except Exception as e:                       # 憑證/額度/網路問題
-            logger.warning(f"  ⚠ 切結書頁 Vision 失敗({name}):{e!r}")
-            return "", ""
+        # Vision 呼叫失敗就往上拋、不換下一頁再打:多半是服務那一端,換一張也一樣
+        # (ADR-0015);沒問到要寫在 L 欄,由 _apply_pledge_rescue 接。
+        got = _pledge_name(vision.read_document(raw))
         if got:
             return got, name
     return "", ""
@@ -743,6 +744,8 @@ def _city_mismatch_doubt(city_cn: str, en_text: str) -> str:
 _NAME_CN = "雇主名稱_中"
 _ADDR_STD = "地址_中_標準"
 _NAME_MISSING = Doubt(_NAME_CN, "未擷取到中文名")
+# 沒問到 ≠ 救不回:兩條並列,審查的人知道重跑也許能補回來(ADR-0015)。
+_PLEDGE_VISION_FAILED = Doubt(_NAME_CN, "切結書頁 Vision 呼叫失敗")
 
 def _doubts(field: str, fact: str) -> tuple[Doubt, ...]:
     """有事實才成一條疑慮;空字串代表沒有。"""
@@ -1043,7 +1046,13 @@ def extract_employer_from_docx(docx_path: str, vision: VisionReader, deink: bool
         content = deink_red_stamp(content)
     # 全文一併傳出:它是這條流程唯一花錢買來的東西,而每一次解析修正都要拿它
     # 當素材。丟掉的話,改一次名稱/地址的抽取規則就得再跑一輪 Vision 才驗得了。
-    text = vision.read_document(content)
+    try:
+        text = vision.read_document(content)
+    except VisionCallFailed as e:
+        # 沒問到 ≠ 擷取失敗(程式或檔案的問題):自己一種狀況,切結書頁也不跑(ADR-0015)。
+        logger.warning(f"  ⚠ {Path(docx_path).name} 契約頁 {e}")
+        return EmployerExtraction(ExtractionStatus.契約頁Vision呼叫失敗,
+                                  source=Source(image=name, crop=crop_name), detail=str(e))
     result = extract_employer_fields(text)
     if not result.values.雇主名稱_中:
         result = _apply_pledge_rescue(result, docx_path, vision)
@@ -1064,21 +1073,31 @@ def _apply_pledge_rescue(result: EmployerExtraction, docx_path: str,
     """
     from pathlib import Path
 
-    got, page = rescue_name_from_pledge(docx_path, vision)
+    try:
+        got, page = rescue_name_from_pledge(docx_path, vision)
+    except VisionCallFailed as e:
+        logger.warning(f"  ⚠ 切結書頁 {e}({Path(docx_path).name})")
+        # 「未擷取到中文名」仍然是真的:保留,緊接著並列「沒問到」。
+        return replace(result, doubts=_at_missing_name(
+            result.doubts, (_NAME_MISSING, _PLEDGE_VISION_FAILED)))
     if not got:
         logger.info(f"  切結書頁未取得中文名:{Path(docx_path).name}")
         return result
     count = _name_doubt(got, result.values.雇主名稱_英, result.source.template)
     rescued = (*_doubts(_NAME_CN, f"中文名取自切結書頁({page})"), *_doubts(_NAME_CN, count))
     # 「未擷取到中文名」已經變成假的:原位換成救援這兩條,其他疑慮不動。
-    old = result.doubts
-    if _NAME_MISSING in old:
-        i = old.index(_NAME_MISSING)
-        doubts = old[:i] + rescued + old[i + 1:]
-    else:
-        doubts = old + rescued
+    doubts = _at_missing_name(result.doubts, rescued)
     logger.info(f"  ★ 切結書頁救回中文名:{got}({Path(docx_path).name}/{page})")
     return replace(result, values=replace(result.values, 雇主名稱_中=got), doubts=doubts)
+
+
+def _at_missing_name(doubts: tuple[Doubt, ...],
+                     replacement: tuple[Doubt, ...]) -> tuple[Doubt, ...]:
+    """「未擷取到中文名」那一條原位換成 replacement;沒有那一條就接在最後。"""
+    if _NAME_MISSING not in doubts:
+        return doubts + replacement
+    i = doubts.index(_NAME_MISSING)
+    return doubts[:i] + replacement + doubts[i + 1:]
 
 
 if __name__ == "__main__":

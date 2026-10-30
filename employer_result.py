@@ -18,12 +18,13 @@ from tw_phone import display_form
 
 
 class ExtractionStatus(Enum):
-    """擷取狀況,五選一。除了擷取成功,其餘四種的 H~O 一律未擷取,L 欄必寫原因。"""
+    """擷取狀況,六選一。除了擷取成功,其餘五種的 H~O 一律未擷取,L 欄必寫原因。"""
     擷取成功 = "擷取成功"
     雇主區塊未錨定 = "雇主區塊未錨定"
     找不到契約頁 = "找不到契約頁"
     docx無內嵌圖 = "docx 無內嵌圖"
-    擷取失敗 = "擷取失敗"          # 擷取時拋例外
+    契約頁Vision呼叫失敗 = "契約頁 Vision 呼叫失敗"  # 沒問到;重跑可能就好(ADR-0015)
+    擷取失敗 = "擷取失敗"          # 擷取時拋例外(Vision 呼叫失敗以外的)
 
 
 # 一條疑慮講的是一整份時,「哪一格」寫這個(L 欄冠 H~O)。
@@ -34,6 +35,7 @@ _NOT_EXTRACTED = {
     ExtractionStatus.雇主區塊未錨定: "契約頁雇主區塊未錨定,未擷取",
     ExtractionStatus.找不到契約頁: "找不到契約頁,未擷取",
     ExtractionStatus.docx無內嵌圖: "docx 無內嵌圖,未擷取",
+    ExtractionStatus.契約頁Vision呼叫失敗: "契約頁 Vision 呼叫失敗,未擷取",
     ExtractionStatus.擷取失敗: "雇主擷取失敗(例外),未擷取",
 }
 
