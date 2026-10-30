@@ -69,7 +69,7 @@ import identity
 import google_clients
 
 # 許可證 → 機構資料(名稱／地址／電話)查表(來源:data.gov.tw 6682 名冊)
-from permit_lookup import PermitLookup
+from permit_lookup import PermitLookup, load_roster
 
 # 一批:這次要處理哪些 docx(完整路徑)。只是設定,結果不放進去(ADR-0009)。
 from batch import Batch
@@ -88,25 +88,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-
-# 名冊查表器惰性單例:整個 pipeline 只載一次;載入失敗則降級為 None(機構欄留空,不中斷)。
-_PERMIT_LOOKUP: "PermitLookup | bool | None" = None
-
-
-def _permit_lookup() -> "PermitLookup | None":
-    global _PERMIT_LOOKUP
-    if _PERMIT_LOOKUP is None:
-        try:
-            _PERMIT_LOOKUP = PermitLookup()
-            logger.info(
-                f"  ✔ 載入仲介名冊:母公司 {len(_PERMIT_LOOKUP.main_index)} 筆"
-                f"／分支 {len(_PERMIT_LOOKUP.branch_index)} 筆"
-            )
-        except Exception as e:
-            logger.warning(f"  ⚠ 名冊載入失敗,機構名稱/地址/電話欄將留空:{e!r}")
-            _PERMIT_LOOKUP = False   # 降級標記,避免每列重試
-    return _PERMIT_LOOKUP or None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -219,10 +200,9 @@ def _sheets_append_atomic(values: list[list[str]]) -> None:
     ).execute()
 
 
-def _agency_cols(permit_value: str) -> list[str]:
-    """依許可證查名冊,回傳 [機構名稱, 機構地址, 電話];查無或無值 → 三個空字串。"""
-    pl = _permit_lookup()
-    info = pl.lookup(permit_value) if (pl and permit_value) else None
+def _agency_cols(permit_value: str, roster: PermitLookup | None) -> list[str]:
+    """依許可證查名冊,回傳 [機構名稱, 機構地址, 電話];查無、無值或名冊降級 → 三個空字串。"""
+    info = roster.lookup(permit_value) if (roster and permit_value) else None
     if not info:
         return ["", "", ""]
     return [info["機構名稱"], info["機構地址"], info["電話"]]
@@ -427,7 +407,7 @@ def _next_page_block(read_block, docx_path: Path, vision: VisionReader) -> dict 
 
 
 def rescue_manual_review_via_agency_phone(
-        batch: Batch, rows: list[SheetRow],
+        batch: Batch, rows: list[SheetRow], roster: PermitLookup | None,
         vision: VisionReader | None = None) -> list[SheetRow]:
     """仲介反查救援:整頁 OCR 契約次一頁(1 次 Vision),以『台灣仲介』欄位標籤
     錨定區塊(台仲在左在右皆可,靠標籤非位置),取其「電話／名稱／地址」反查名冊
@@ -441,8 +421,7 @@ def rescue_manual_review_via_agency_phone(
     名冊/Vision 缺失時安靜跳過,不影響主流程。
     要開的 docx 跟 batch 查完整路徑(列只帶檔名),見 Batch.path_of。
     同一 docx 的次頁只送一次 Vision(block_cache),多列共用不重複計費。"""
-    pl = _permit_lookup()
-    if pl is None or not rows:
+    if roster is None or not rows:
         return list(rows)
     try:
         from employer_extract import agency_block_from_next_page
@@ -467,7 +446,7 @@ def rescue_manual_review_via_agency_phone(
             # 沒救 ≠ 救不回:救不回不註明,沒問到要說(CONTEXT「反查救援」、ADR-0015)
             out.append(replace(row, reason=f"{row.reason}{RESCUE_NOT_DONE}"))
             continue
-        pick = pick_agency(block_cache[docx_name], pl)
+        pick = pick_agency(block_cache[docx_name], roster)
         if pick.note:
             # 要人工擇一時沒有許可證:B 欄留種子值(全無命中是空、單一判讀是候選值)
             row = replace(row, permit=pick.permit or row.permit,
@@ -486,7 +465,8 @@ def _employer_cols(docx: str, employer_by_docx: dict[str, EmployerExtraction]) -
 
 
 def _row_to_sheet_values(row: SheetRow,
-                         employer_by_docx: dict[str, EmployerExtraction]) -> list[str]:
+                         employer_by_docx: dict[str, EmployerExtraction],
+                         roster: PermitLookup | None) -> list[str]:
     """把一列轉成 Sheets 的十五欄(A~D 即 SheetRow、E~G 機構、H~O 雇主)。十五欄的對應只在這裡。
 
     E~G 欄由 B 欄的許可證值查名冊補上;H~O 為雇主欄位,依 source_docx 查
@@ -494,11 +474,12 @@ def _row_to_sheet_values(row: SheetRow,
     資料而是疑慮標示,說明中文標準地址(J)為何留空(見 ADR-0003)。
     """
     return ([row.source_docx, row.permit, row.status.value, row.reason]
-            + _agency_cols(row.permit) + _employer_cols(row.source_docx, employer_by_docx))
+            + _agency_cols(row.permit, roster) + _employer_cols(row.source_docx, employer_by_docx))
 
 
 def write_sheets_batched(rows: list[SheetRow],
-                         employer_by_docx: dict[str, EmployerExtraction]) -> int:
+                         employer_by_docx: dict[str, EmployerExtraction],
+                         roster: PermitLookup | None) -> int:
     """
     一次性把所有列 atomic 寫入 Google Sheets(依 rows 的順序;status 在列上)。
 
@@ -506,11 +487,12 @@ def write_sheets_batched(rows: list[SheetRow],
       1. 合併成一次 API 呼叫 → 中途網路失敗時不會出現「半成功」狀態。
       2. 5xx / 429 / 連線錯誤自動退避重試；4xx 直接拋出。
 
-    employer_by_docx 是 collect_employer_fields() 的回傳值，用來填 H~O 欄。
+    employer_by_docx 是 collect_employer_fields() 的回傳值，用來填 H~O 欄;
+    roster 是 main 載的名冊,用來填 E~G 欄(降級為 None 時 E~G 留空)。
 
     回傳實際寫入 Sheets 的列數。
     """
-    values = [_row_to_sheet_values(r, employer_by_docx) for r in rows]
+    values = [_row_to_sheet_values(r, employer_by_docx, roster) for r in rows]
 
     if not values:
         logger.info("  （此次無新資料需寫入 Sheets）")
@@ -680,17 +662,17 @@ def _check_input(batch: Batch) -> "CheckResult":
     return CheckResult("輸入資料", False, problem, fix)
 
 
-def _warn_if_roster_unavailable() -> None:
+def _warn_if_roster_unavailable(roster: PermitLookup | None) -> None:
     """名冊載不起來就說出來，但不擋。
 
     為什麼這不是一個 CheckResult：preflight 的結果列只放「不通過就不該開跑」的
-    項目，而名冊不屬於那一類。_permit_lookup 的降級設計、_agency_cols 查無時回
+    項目，而名冊不屬於那一類。load_roster 的降級設計、_agency_cols 查無時回
     三個空字串、以及這行訊息本身，三處都承諾「E~G 留空但不中斷」——把它放進結果
     列會讓 run_preflight 回傳 False、main 直接 return，整批不跑，與承諾相反。
 
     但降級也不等於沉默：E~G 會整欄是空的，人得先知道，否則會以為是名冊查無此證。
     """
-    if _permit_lookup() is None:
+    if roster is None:
         logger.warning(
             "  ⚠ 仲介名冊載入失敗：機構名稱／地址／電話（E~G 欄）本批將留空。"
             "許可證判讀不受影響，整批照常處理。"
@@ -710,7 +692,7 @@ def _skipped(name: str, because: str) -> "CheckResult":
     return CheckResult(name, True, f"（因{because}而略過）", skipped=True)
 
 
-def run_preflight(batch: Batch) -> bool:
+def run_preflight(batch: Batch, roster: PermitLookup | None) -> bool:
     """依序執行所有檢查，全部通過回傳 True。
 
     憑證相關的檢查是有順序相依的（沒有 ADC 就談不上換權杖，換不到權杖就談不上
@@ -743,7 +725,7 @@ def run_preflight(batch: Batch) -> bool:
 
     # 降級提醒不是檢查項（見 _warn_if_roster_unavailable），但人要在開跑前看到。
     # 即使 --file 指定單一檔案也照印——E~G 一樣會留空。
-    _warn_if_roster_unavailable()
+    _warn_if_roster_unavailable(roster)
 
     if not passed:
         logger.error("preflight 未通過：排除後重跑；只想重新檢查可用 --preflight-only")
@@ -774,12 +756,14 @@ def main(opts: argparse.Namespace, vision: VisionReader | None = None) -> None:
     拿不到憑證時誰中止、誰降級照舊(見 test_no_credentials.py)。"""
     # 一批:這次要掃哪些 docx。指定 --file 時就是那一份,不看 ./docs。
     batch = Batch.from_file(Path(opts.file)) if opts.file else Batch.from_dir(INPUT_DIR)
+    # 名冊一批載一次、往下傳(#69);載不起來是 None,E~G 留空、反查救援跳過,不擋。
+    roster = load_roster()
 
     # ── 步驟 0：preflight ──────────────────────────────────────────────────
     # 放在最前面的理由：掃描階段可能跑數十分鐘，跑完才發現 Sheets 沒權限、
     # 結果寫不進去，等於整批白做。憑證問題要在花時間之前就攔下來。
     if not opts.skip_preflight:
-        if not run_preflight(batch):
+        if not run_preflight(batch, roster):
             return
     if opts.preflight_only:
         return
@@ -851,13 +835,13 @@ def main(opts: argparse.Namespace, vision: VisionReader | None = None) -> None:
     # 救回的許可證、_agency_cols 補 E~G,仍標 manual_review、D 欄註明,供人工快速核對。
     if rescue_rows:
         logger.info("── 步驟 4b 前置②：反查救援 → 次頁台仲區塊反查名冊 ──")
-        rescue_rows = rescue_manual_review_via_agency_phone(batch, rescue_rows, vision)
+        rescue_rows = rescue_manual_review_via_agency_phone(batch, rescue_rows, roster, vision)
 
     logger.info("── 步驟 4b：合併批次寫入 Google Sheets（atomic）──")
     auto_keyin_rows = keyin_rows + vision_auto_keyin
     # 讀不到圖(direct_review):B 空,D 是事實;E~G 跟著空
     review_rows = vision_review_rows + rescue_rows + direct_review
-    written = write_sheets_batched(auto_keyin_rows + review_rows, employer_by_docx)
+    written = write_sheets_batched(auto_keyin_rows + review_rows, employer_by_docx, roster)
     logger.info(
         f"  本次寫入彙總:auto_keyin={len(auto_keyin_rows)} 筆"
         f"(其中 Tesseract 直接 {len(keyin_rows)} 筆 + Vision 確認 {len(vision_auto_keyin)} 筆) "

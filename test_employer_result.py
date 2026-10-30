@@ -61,7 +61,7 @@ class TestExtractionFailureIsAResult:
         r = got["99997.docx"]
         assert r.status is ExtractionStatus.擷取失敗
         row = pipeline._row_to_sheet_values(
-            SheetRow("99997.docx", "", SheetStatus.MANUAL_REVIEW, ""), got)
+            SheetRow("99997.docx", "", SheetStatus.MANUAL_REVIEW, ""), got, None)
         assert row[7:11] + row[12:15] == [""] * 7         # H~O 照舊留空
         assert row[11] == "H~O:雇主擷取失敗(例外),未擷取"   # L 寫原因(#46)
 
@@ -74,7 +74,7 @@ class TestSheetsRowPhone:
         got = {"99996.docx": EmployerExtraction(ExtractionStatus.擷取成功,
                                                 EmployerValues(電話="0920875667"))}
         row = pipeline._row_to_sheet_values(
-            SheetRow("99996.docx", "", SheetStatus.MANUAL_REVIEW, ""), got)
+            SheetRow("99996.docx", "", SheetStatus.MANUAL_REVIEW, ""), got, None)
         assert row[14] == "0920-875-667"                  # O 欄
         assert got["99996.docx"].values.電話 == "0920875667"
 

@@ -135,15 +135,15 @@ def world(monkeypatch, tmp_path):
                               地址_中="某市某路1號", 地址_中_標準="某市某路1號",
                               地址_英="No.1, X Rd.", 郵遞區號="999", 電話="0912345678"))}
 
-    sheets = []
+    sheets, roster_loads = [], []
     monkeypatch.setattr(P, "run_scan", fake_scan)
     monkeypatch.setattr(submission_decision, "decide", lambda rows: by_name[rows[0].source_docx])
     monkeypatch.setattr(P, "collect_employer_fields", lambda batch, vision: employer)
-    monkeypatch.setattr(P, "_permit_lookup", lambda: FakeRoster())
+    monkeypatch.setattr(P, "load_roster", lambda: roster_loads.append(1) or FakeRoster())
     monkeypatch.setattr(employer_extract, "agency_block_from_next_page",
                         lambda path, vision: BLOCKS[path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]])
     monkeypatch.setattr(P, "_sheets_append_atomic", sheets.extend)
-    return sheets, FakeVision(sparse=lambda b: texts[b])
+    return sheets, FakeVision(sparse=lambda b: texts[b]), roster_loads
 
 
 def _opts():
@@ -199,15 +199,22 @@ BEFORE_12 = [
 
 
 def test_fifteen_columns_cell_by_cell(world):
-    sheets, vision = world
+    sheets, vision, _ = world
     P.main(_opts(), vision)
     assert sheets == BEFORE_12
+
+
+def test_roster_is_loaded_once_per_run(world):
+    """#69:名冊由 main 載一次往下傳(E~G 與反查救援共用),不再各自惰性載入。"""
+    sheets, vision, roster_loads = world
+    P.main(_opts(), vision)
+    assert roster_loads == [1]
 
 
 def test_identity_refused_writes_nothing(world):
     """#65:403/401 從送 Vision 那一步一路中止,Sheets 一列都不寫。"""
     from google.api_core.exceptions import PermissionDenied
-    sheets, _ = world
+    sheets, _, _ = world
 
     def refused(image):
         raise PermissionDenied("403")

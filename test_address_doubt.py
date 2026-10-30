@@ -267,7 +267,7 @@ class TestSheetWiring:
         import pipeline
         from sheet_row import SheetRow, SheetStatus
         return pipeline._row_to_sheet_values(
-            SheetRow(docx, "2340", SheetStatus.KEYED_IN, ""), {docx: result})
+            SheetRow(docx, "2340", SheetStatus.KEYED_IN, ""), {docx: result}, None)
 
     def test_row_is_fifteen_columns(self):
         assert len(self._row("a.docx", _result())) == 15
@@ -300,7 +300,7 @@ class TestSheetWiring:
         import pipeline
         from sheet_row import SheetRow, SheetStatus
         row = pipeline._row_to_sheet_values(
-            SheetRow("never-seen.docx", "", SheetStatus.MANUAL_REVIEW, ""), {})
+            SheetRow("never-seen.docx", "", SheetStatus.MANUAL_REVIEW, ""), {}, None)
         assert len(row) == 15 and row[self.L] == ""
 
 

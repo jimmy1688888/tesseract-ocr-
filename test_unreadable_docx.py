@@ -200,7 +200,7 @@ def world(monkeypatch, tmp_path):
         calls["vision"].extend(items)
         return [], []
 
-    def fake_rescue(batch, rows, vision=None):
+    def fake_rescue(batch, rows, roster, vision=None):
         calls["rescue"].extend(rows)
         return rows
 
@@ -213,7 +213,7 @@ def world(monkeypatch, tmp_path):
     monkeypatch.setattr(P, "run_vision_items", fake_vision)
     monkeypatch.setattr(P, "rescue_manual_review_via_agency_phone", fake_rescue)
     monkeypatch.setattr(P, "collect_employer_fields", counting_collect)
-    monkeypatch.setattr(P, "_permit_lookup", lambda: None)
+    monkeypatch.setattr(P, "load_roster", lambda: None)
     monkeypatch.setattr(P, "_sheets_append_atomic", lambda values: calls["sheets"].extend(values))
     monkeypatch.setattr(google_clients, "vision_client", lambda: object())
     return calls

@@ -326,6 +326,19 @@ class PermitLookup:
         return _best_match(_norm_addr(address), self._addr_records, min_ratio)
 
 
+def load_roster(path: Path = ROSTER_PATH) -> PermitLookup | None:
+    """一批載一次名冊(main 呼叫,往下傳)。載不起來降級成 None:E~G 留空、反查救援
+    跳過,一批照常跑 —— 名冊是降級來源,不是閘門(test_preflight)。"""
+    try:
+        roster = PermitLookup(fetch_roster(path))
+    except Exception as e:
+        logger.warning(f"  ⚠ 名冊載入失敗,機構名稱/地址/電話欄將留空:{e!r}")
+        return None
+    logger.info(f"  ✔ 載入仲介名冊:母公司 {len(roster.main_index)} 筆"
+                f"／分支 {len(roster.branch_index)} 筆")
+    return roster
+
+
 if __name__ == "__main__":
     import sys
 

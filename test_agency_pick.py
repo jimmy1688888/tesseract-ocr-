@@ -164,7 +164,6 @@ class TestRescueReturnsNewRows:
         for s in seeds:
             (tmp_path / s.source_docx).write_bytes(b"x")
         roster = Roster(phone={"0211111111": ["1111"], "0244444444": ["4444", "5555"]})
-        monkeypatch.setattr(pipeline, "_permit_lookup", lambda: roster)
         monkeypatch.setattr(google_clients, "vision_client", lambda: object())
         reads = []
 
@@ -175,7 +174,7 @@ class TestRescueReturnsNewRows:
                 raise blocks[name]
             return blocks[name]
         monkeypatch.setattr(employer_extract, "agency_block_from_next_page", next_page)
-        got = rescue_manual_review_via_agency_phone(Batch.from_dir(tmp_path), seeds)
+        got = rescue_manual_review_via_agency_phone(Batch.from_dir(tmp_path), seeds, roster)
         return (got, reads) if with_reads else got
 
     def test_rescued_and_not_rescued(self, monkeypatch, tmp_path):

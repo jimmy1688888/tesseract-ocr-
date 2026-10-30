@@ -136,7 +136,6 @@ class TestRescueReasonUsesStandardForm:
 
         roster = PermitLookup([{"許可證": "2340", "機構名稱": "測試仲介", "機構地址": "地址",
                                 "電話": "(02)2727-6999#12", "廢止許可日期": "", "終止營業日期": ""}])
-        monkeypatch.setattr(pipeline, "_permit_lookup", lambda: roster)
         monkeypatch.setattr(google_clients, "vision_client", lambda: object())
         monkeypatch.setattr(employer_extract, "_agency_block_lines",
                             lambda path, vision: ["電話:02-2727-6999,傳真:02-2727-6000"])
@@ -144,7 +143,7 @@ class TestRescueReasonUsesStandardForm:
         docx.write_bytes(b"x")
         seed = [SheetRow("32417.docx", "", SheetStatus.MANUAL_REVIEW, "全無命中")]
 
-        [row] = pipeline.rescue_manual_review_via_agency_phone(Batch.from_file(docx), seed)
+        [row] = pipeline.rescue_manual_review_via_agency_phone(Batch.from_file(docx), seed, roster)
         assert row.permit == "2340"
         assert "台仲電話 0227276999 " in row.reason
         assert "02-2727-6999" not in row.reason

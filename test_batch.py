@@ -125,7 +125,6 @@ class TestRescueOpensTheBatchFile:
             paths.append(Path(path))
             return {"phones": ["02-1234-5678"], "name": "", "address": ""}
 
-        monkeypatch.setattr(pipeline, "_permit_lookup", lambda: _OneAgencyRoster())
         monkeypatch.setattr(google_clients, "vision_client", lambda: object())
         monkeypatch.setattr(employer_extract, "agency_block_from_next_page", fake_next_page)
         return paths
@@ -146,7 +145,7 @@ class TestRescueOpensTheBatchFile:
 
     def test_opens_the_file_given_by_path(self, opened, elsewhere):
         [row] = pipeline.rescue_manual_review_via_agency_phone(
-            Batch.from_file(elsewhere), self._seed())
+            Batch.from_file(elsewhere), self._seed(), _OneAgencyRoster())
         assert opened == [elsewhere]
         assert row.permit == "2340"
 
@@ -154,7 +153,7 @@ class TestRescueOpensTheBatchFile:
         """修好前:./docs 沒有同名檔就靜默跳過。"""
         (elsewhere.parent.parent / "docs" / "32417.docx").unlink()
         [row] = pipeline.rescue_manual_review_via_agency_phone(
-            Batch.from_file(elsewhere), self._seed())
+            Batch.from_file(elsewhere), self._seed(), _OneAgencyRoster())
         assert row.permit == "2340"
         assert opened == [elsewhere]
 
@@ -178,6 +177,7 @@ class TestMainStopsWhenNothingToProcess:
             raise _Stop      # 本檔只關心「有沒有開跑、跑哪幾份」,後面的步驟不走
 
         monkeypatch.setattr(pipeline, "run_scan", fake_run_scan)
+        monkeypatch.setattr(pipeline, "load_roster", lambda: None)   # 不讀真的名冊檔
         monkeypatch.setattr(docx_images, "read_images", lambda p: [])
         return calls
 

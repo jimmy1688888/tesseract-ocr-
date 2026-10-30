@@ -34,11 +34,10 @@ def settle(monkeypatch, decisions, batch, vision, roster, next_page):
     from vision_verification import run_vision_items
 
     monkeypatch.setattr(pipeline, "read_decisions", lambda _path: decisions)
-    monkeypatch.setattr(pipeline, "_permit_lookup", lambda: roster)
     monkeypatch.setattr(employer_extract, "agency_block_from_next_page", next_page)
     queue = pipeline.build_vision_queue(batch.output_dir / "matches.csv")
     vision_auto, vision_review = run_vision_items(queue.vision, vision)
-    rescued = pipeline.rescue_manual_review_via_agency_phone(batch, queue.rescue, vision)
+    rescued = pipeline.rescue_manual_review_via_agency_phone(batch, queue.rescue, roster, vision)
     return queue.keyin + vision_auto + vision_review + rescued + queue.direct_review
 
 

@@ -51,12 +51,11 @@ def test_33703_next_page_failure_is_stated_in_d(real_ocr, monkeypatch):
     from batch import Batch
     from sheet_row import SheetRow, SheetStatus
 
-    monkeypatch.setattr(pipeline, "_permit_lookup", lambda: object())  # 名冊在,才走得到次頁
     vision = FakeVision(document=_fail)
     seed = SheetRow("33703.docx", "", SheetStatus.MANUAL_REVIEW, "large:全無命中")
 
     [row] = pipeline.rescue_manual_review_via_agency_phone(
-        Batch.from_file(rs.sample("33703.docx")), [seed], vision)
+        Batch.from_file(rs.sample("33703.docx")), [seed], object(), vision)   # 名冊在,才走得到次頁
 
     assert len(vision.document_reads) == 1                       # 真的走到次頁那一次
     assert (row.permit, row.status) == ("", SheetStatus.MANUAL_REVIEW)
