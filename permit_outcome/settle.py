@@ -72,21 +72,26 @@ def settle(decisions: list[Decision], batch: Batch, vision: VisionReader,
     logger.info("── 步驟 4a：Google Vision 判讀 + 交叉比對 ──")
     checks = run_vision_items(by_destination[Destination.送VISION], vision)
 
-    seeds = [SheetRow(d.source_docx, d.candidate_value, SheetStatus.MANUAL_REVIEW, d.reason)
+    seeds = [_decision_row(d, d.candidate_value, SheetStatus.MANUAL_REVIEW)
              for d in by_destination[Destination.反查救援]]
     if seeds:
         logger.info("── 步驟 4b：反查救援 → 次頁台仲區塊反查名冊 ──")
     rescued = rescue_from_next_page(batch, seeds, roster, vision)
 
     return PermitOutcomes(
-        keyin=[SheetRow(d.source_docx, d.candidate_value, SheetStatus.KEYED_IN, d.reason)
+        keyin=[_decision_row(d, d.candidate_value, SheetStatus.KEYED_IN)
                for d in by_destination[Destination.直接KEYIN]],
         vision_confirmed=[_vision_row(c) for c in checks if c.keyin],
         vision_review=[_vision_row(c) for c in checks if not c.keyin],
         rescue=rescued,
-        direct_review=[SheetRow(d.source_docx, "", SheetStatus.MANUAL_REVIEW, d.reason)
+        direct_review=[_decision_row(d, "", SheetStatus.MANUAL_REVIEW)
                        for d in by_destination[Destination.直接人工審查]],
     )
+
+
+def _decision_row(decision: Decision, permit: str, status: SheetStatus) -> SheetRow:
+    """不經 Vision 的列:D 欄就是送審決策自己的理由。"""
+    return SheetRow(decision.source_docx, permit, status, decision.reason)
 
 
 def _vision_row(check: VisionCheck) -> SheetRow:
