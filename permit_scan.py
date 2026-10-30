@@ -15,6 +15,7 @@ import logging
 import time
 import zipfile
 import zlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -22,9 +23,9 @@ from typing import Callable
 import docx_images
 import matches_csv
 from batch import Batch
-from matches_csv import DocxClass, Roi
+from matches_csv import DocxClass, Roi, ScanResult
 from permit_reading import (
-    TIER1_IMAGES, Crop, Reading, TierOutcome, scan_docx, scan_image_large, scan_image_mol_only)
+    TIER1_IMAGES, Crop, DocxScan, Reading, TierOutcome, scan_docx, scan_image_large, scan_image_mol_only)
 # 像素前處理(轉正、裁切)也只有一份,與 employer_extract 共用(#16)。
 from pixels import crop, open_upright
 
@@ -91,15 +92,11 @@ def run_scan(batch: Batch, image_filter: str = "",
     read_large / read_small：一張圖 → 判讀,預設 permit_reading 的 Tesseract 版本。
                   測試傳假的進來,就不必跑 Tesseract。
     """
-    out_dir = batch.output_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = batch.matches_csv
-
-    total = hits = upper_hits = lower_hits = 0
-    large_docs = tier1_docs = expanded_docs = 0
+    batch.output_dir.mkdir(parents=True, exist_ok=True)
+    tally = _ScanTally()
     t0 = time.time()
 
-    with matches_csv.writer(csv_path) as writer:
+    with matches_csv.writer(batch.matches_csv) as writer:
         for docx_path in batch.docx_files:
             docx_name = docx_path.name
             images = read_docx_images(docx_path)
@@ -109,39 +106,61 @@ def run_scan(batch: Batch, image_filter: str = "",
                                                          roi_filter=roi_filter),
                 read_small=lambda name, data: read_small(docx_name, name, data),
                 full_scan=full_scan, image_filter=image_filter)
+            _write_docx_scan(writer.write, batch, docx_path, images, scan)
+            tally.add(scan)
 
-            image_bytes = dict(images or [])
-            for result, crops in scan.rows:
-                _write_crops(out_dir, image_bytes.get(result.image_name, b""), crops)
-                writer.write(result)
-                hits += result.hit
-                upper_hits += result.hit_roi is Roi.PERMIT_UPPER
-                lower_hits += result.hit_roi is Roi.PERMIT_LOWER
+    tally.log(round(time.time() - t0, 1), full_scan)
+    return batch.matches_csv
 
-            total += scan.scanned
-            if scan.docx_class is DocxClass.LARGE:
-                large_docs += 1
-                tier1_docs += scan.tier is TierOutcome.第一層命中
-                expanded_docs += scan.tier is TierOutcome.擴掃
 
-            if scan.review_images:
-                saved = _save_review_images(batch.no_hit_review_dir, docx_path,
-                                            scan.review_images)
-                logger.info(
-                    f"  ⚠ {docx_name} {scan.docx_class}全無命中"
-                    f"，存原圖供比對 {saved}"
-                )
+def _write_docx_scan(write_row: Callable[[ScanResult], None], batch: Batch, docx_path: Path,
+                     images: list[tuple[str, bytes]] | None, scan: DocxScan) -> None:
+    """一份 docx 的掃描寫出去:每列的裁切圖與 matches.csv 那列;全無命中時存原圖。"""
+    image_bytes = dict(images or [])
+    for result, crops in scan.rows:
+        _write_crops(batch.output_dir, image_bytes.get(result.image_name, b""), crops)
+        write_row(result)
 
-    elapsed = round(time.time() - t0, 1)
-    logger.info(f"掃描完成：{total} 張圖，命中 {hits} 張，耗時 {elapsed}s")
-    if upper_hits + lower_hits > 0:
-        logger.info(f"  permit 上半命中：{upper_hits} 張 / 下半命中：{lower_hits} 張")
-    if large_docs:
-        # 這行是分層規則的體檢報告：命中率一旦崩掉,代表文件版面變了、第一層
-        # 押錯位置,此時每份都會擴掃、總時間反而比全掃更長(ADR-0005)。
-        mode = "全掃模式" if full_scan else f"第一層{sorted(TIER1_IMAGES)}"
+    if scan.review_images:
+        saved = _save_review_images(batch.no_hit_review_dir, docx_path,
+                                    scan.review_images)
         logger.info(
-            f"  {mode}：{tier1_docs}/{large_docs} 份一次命中，"
-            f"擴掃 {expanded_docs} 份"
+            f"  ⚠ {docx_path.name} {scan.docx_class}全無命中"
+            f"，存原圖供比對 {saved}"
         )
-    return csv_path
+
+
+@dataclass
+class _ScanTally:
+    """一批掃完要印的統計:張數、命中、permit 上下半,與 large 的第一層命中率。"""
+    images: int = 0
+    hits: int = 0
+    upper_hits: int = 0
+    lower_hits: int = 0
+    large_docs: int = 0
+    tier1_docs: int = 0
+    expanded_docs: int = 0
+
+    def add(self, scan: DocxScan) -> None:
+        self.images += scan.scanned
+        for result, _ in scan.rows:
+            self.hits += result.hit
+            self.upper_hits += result.hit_roi is Roi.PERMIT_UPPER
+            self.lower_hits += result.hit_roi is Roi.PERMIT_LOWER
+        if scan.docx_class is DocxClass.LARGE:
+            self.large_docs += 1
+            self.tier1_docs += scan.tier is TierOutcome.第一層命中
+            self.expanded_docs += scan.tier is TierOutcome.擴掃
+
+    def log(self, elapsed: float, full_scan: bool) -> None:
+        logger.info(f"掃描完成：{self.images} 張圖，命中 {self.hits} 張，耗時 {elapsed}s")
+        if self.upper_hits + self.lower_hits > 0:
+            logger.info(f"  permit 上半命中：{self.upper_hits} 張 / 下半命中：{self.lower_hits} 張")
+        if self.large_docs:
+            # 這行是分層規則的體檢報告：命中率一旦崩掉,代表文件版面變了、第一層
+            # 押錯位置,此時每份都會擴掃、總時間反而比全掃更長(ADR-0005)。
+            mode = "全掃模式" if full_scan else f"第一層{sorted(TIER1_IMAGES)}"
+            logger.info(
+                f"  {mode}：{self.tier1_docs}/{self.large_docs} 份一次命中，"
+                f"擴掃 {self.expanded_docs} 份"
+            )
