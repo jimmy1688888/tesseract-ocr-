@@ -186,7 +186,8 @@ def build_vision_queue(csv_path: Path) -> SubmissionQueue:
 # ⑧ Google Vision(驗證在 vision_verification、讀字在 vision_reader)
 # ═══════════════════════════════════════════════════════════════════════════
 
-from vision_reader import IDENTITY_REFUSED, GoogleVisionReader, VisionReader  # noqa: E402
+from vision_reader import (IDENTITY_REFUSED, GoogleVisionReader, VisionCallFailed,  # noqa: E402
+                           VisionReader)
 from vision_verification import run_vision_items  # noqa: E402
 
 
@@ -406,6 +407,25 @@ def pick_agency(block: dict, roster) -> AgencyPick:
     return AgencyPick()
 
 
+RESCUE_NOT_DONE = "；反查救援未完成:次頁 Vision 呼叫失敗"
+_NO_BLOCK = {"phones": [], "name": "", "address": ""}
+
+
+def _next_page_block(read_block, docx_path: Path, vision: VisionReader) -> dict | None:
+    """一份 docx 的次頁台仲區塊;Vision 呼叫失敗回 None,其他失敗當作沒有區塊。
+    身分或權限被拒往上拋(整批中止)。"""
+    try:
+        return read_block(str(docx_path), vision)
+    except IDENTITY_REFUSED:
+        raise
+    except VisionCallFailed as e:
+        logger.warning(f"  ⚠ {docx_path.name} 次頁 {e}")
+        return None
+    except Exception as e:
+        logger.warning(f"  ⚠ {docx_path.name} 次頁仲介區塊擷取失敗:{e!r}")
+        return dict(_NO_BLOCK)
+
+
 def rescue_manual_review_via_agency_phone(
         batch: Batch, rows: list[SheetRow],
         vision: VisionReader | None = None) -> list[SheetRow]:
@@ -432,7 +452,8 @@ def rescue_manual_review_via_agency_phone(
         return list(rows)
     out: list[SheetRow] = []
     rescued = 0
-    block_cache: dict[str, dict] = {}   # source_docx → {phones,name,address}(避免重複送 Vision)
+    # source_docx → {phones,name,address};None = 次頁 Vision 呼叫失敗(避免重複送 Vision)
+    block_cache: dict[str, dict | None] = {}
     for row in rows:
         docx_name = row.source_docx
         docx_path = batch.path_of(docx_name)
@@ -440,11 +461,12 @@ def rescue_manual_review_via_agency_phone(
             out.append(row)
             continue
         if docx_name not in block_cache:
-            try:
-                block_cache[docx_name] = agency_block_from_next_page(str(docx_path), vision)
-            except Exception as e:
-                logger.warning(f"  ⚠ {docx_name} 次頁仲介區塊擷取失敗:{e!r}")
-                block_cache[docx_name] = {"phones": [], "name": "", "address": ""}
+            block_cache[docx_name] = _next_page_block(
+                agency_block_from_next_page, docx_path, vision)
+        if block_cache[docx_name] is None:
+            # 沒救 ≠ 救不回:救不回不註明,沒問到要說(CONTEXT「反查救援」、ADR-0015)
+            out.append(replace(row, reason=f"{row.reason}{RESCUE_NOT_DONE}"))
+            continue
         pick = pick_agency(block_cache[docx_name], pl)
         if pick.note:
             # 要人工擇一時沒有許可證:B 欄留種子值(全無命中是空、單一判讀是候選值)

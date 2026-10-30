@@ -7,6 +7,8 @@
 
 名冊與台仲區塊全部捏造。
 """
+import pytest
+
 from pipeline import AgencyPick, pick_agency, rescue_manual_review_via_agency_phone
 from sheet_row import SheetRow, SheetStatus
 
@@ -146,11 +148,14 @@ class TestNothing:
         assert pick_agency(_block(["0299999999"], name="查無", address="查無"), Roster()) == AgencyPick()
 
 
+NOT_DONE = "；反查救援未完成:次頁 Vision 呼叫失敗"
+
+
 class TestRescueReturnsNewRows:
     """救援:列進、列出,不改傳入的列。"""
 
     @staticmethod
-    def _run(monkeypatch, tmp_path, blocks, seeds):
+    def _run(monkeypatch, tmp_path, blocks, seeds, with_reads=False):
         import employer_extract
         import google_clients
         import pipeline
@@ -161,9 +166,17 @@ class TestRescueReturnsNewRows:
         roster = Roster(phone={"0211111111": ["1111"], "0244444444": ["4444", "5555"]})
         monkeypatch.setattr(pipeline, "_permit_lookup", lambda: roster)
         monkeypatch.setattr(google_clients, "vision_client", lambda: object())
-        monkeypatch.setattr(employer_extract, "agency_block_from_next_page",
-                            lambda path, client: blocks[path.replace("\\", "/").rsplit("/", 1)[-1]])
-        return rescue_manual_review_via_agency_phone(Batch.from_dir(tmp_path), seeds)
+        reads = []
+
+        def next_page(path, vision):
+            name = path.replace("\\", "/").rsplit("/", 1)[-1]
+            reads.append(name)
+            if isinstance(blocks[name], Exception):
+                raise blocks[name]
+            return blocks[name]
+        monkeypatch.setattr(employer_extract, "agency_block_from_next_page", next_page)
+        got = rescue_manual_review_via_agency_phone(Batch.from_dir(tmp_path), seeds)
+        return (got, reads) if with_reads else got
 
     def test_rescued_and_not_rescued(self, monkeypatch, tmp_path):
         seeds = [SheetRow("a.docx", "", SheetStatus.MANUAL_REVIEW, "large:全無命中"),
@@ -186,3 +199,47 @@ class TestRescueReturnsNewRows:
         assert got.permit == "9999"
         assert got.reason == ("單一判讀低信心；[電話反查·需人工擇一] 台仲電話 0244444444 "
                               "命中2 家:4444／丁仲介、5555／戊仲介")
+
+
+class TestNextPageVisionCallFailed:
+    """沒救 ≠ 救不回(#67、ADR-0015):次頁沒問到要寫在 D 欄;真的救不回仍不註明。"""
+
+    _run = staticmethod(TestRescueReturnsNewRows._run)
+
+    def test_states_it_on_the_row_and_keeps_the_seed(self, monkeypatch, tmp_path):
+        from vision_reader import VisionCallFailed
+        seeds = [SheetRow("a.docx", "", SheetStatus.MANUAL_REVIEW, "large:全無命中"),
+                 SheetRow("b.docx", "9999", SheetStatus.MANUAL_REVIEW, "單一判讀低信心")]
+        got = self._run(monkeypatch, tmp_path, {"a.docx": VisionCallFailed("503"),
+                                                "b.docx": VisionCallFailed("503")}, seeds)
+        assert got == [SheetRow("a.docx", "", SheetStatus.MANUAL_REVIEW, "large:全無命中" + NOT_DONE),
+                       SheetRow("b.docx", "9999", SheetStatus.MANUAL_REVIEW, "單一判讀低信心" + NOT_DONE)]
+
+    def test_nothing_found_is_still_not_stated(self, monkeypatch, tmp_path):
+        seed = SheetRow("a.docx", "", SheetStatus.MANUAL_REVIEW, "large:全無命中")
+        [got] = self._run(monkeypatch, tmp_path, {"a.docx": _block()}, [seed])
+        assert got is seed
+
+    def test_one_docx_is_read_once_and_every_row_is_stated(self, monkeypatch, tmp_path):
+        from vision_reader import VisionCallFailed
+        seeds = [SheetRow("a.docx", "", SheetStatus.MANUAL_REVIEW, "x"),
+                 SheetRow("a.docx", "", SheetStatus.MANUAL_REVIEW, "y")]
+        got, reads = self._run(monkeypatch, tmp_path, {"a.docx": VisionCallFailed("503")},
+                               seeds, with_reads=True)
+        assert reads == ["a.docx"]
+        assert [r.reason for r in got] == ["x" + NOT_DONE, "y" + NOT_DONE]
+
+    def test_others_are_still_rescued(self, monkeypatch, tmp_path):
+        from vision_reader import VisionCallFailed
+        seeds = [SheetRow("a.docx", "", SheetStatus.MANUAL_REVIEW, "large:全無命中"),
+                 SheetRow("b.docx", "", SheetStatus.MANUAL_REVIEW, "large:全無命中")]
+        got = self._run(monkeypatch, tmp_path, {"a.docx": VisionCallFailed("503"),
+                                                "b.docx": _block(["0211111111"])}, seeds)
+        assert got[0].reason.endswith(NOT_DONE)
+        assert got[1].permit == "1111"
+
+    def test_identity_refused_aborts_the_run(self, monkeypatch, tmp_path):
+        from google.api_core.exceptions import PermissionDenied
+        seed = SheetRow("a.docx", "", SheetStatus.MANUAL_REVIEW, "large:全無命中")
+        with pytest.raises(PermissionDenied):
+            self._run(monkeypatch, tmp_path, {"a.docx": PermissionDenied("403")}, [seed])

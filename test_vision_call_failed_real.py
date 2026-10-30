@@ -43,3 +43,21 @@ def test_30766_pledge_page_failure_stops_at_the_first_page(real_ocr):
     assert len(reads) == 2
     assert result.values.雇主名稱_中 == ""
     assert "H:未擷取到中文名；H:切結書頁 Vision 呼叫失敗" in result.疑慮標示
+
+
+def test_33703_next_page_failure_is_stated_in_d(real_ocr, monkeypatch):
+    """#67:反查救援讀真實 docx 的次頁(真 Tesseract 認契約頁)時沒問到 → D 欄註明。"""
+    import pipeline
+    from batch import Batch
+    from sheet_row import SheetRow, SheetStatus
+
+    monkeypatch.setattr(pipeline, "_permit_lookup", lambda: object())  # 名冊在,才走得到次頁
+    vision = FakeVision(document=_fail)
+    seed = SheetRow("33703.docx", "", SheetStatus.MANUAL_REVIEW, "large:全無命中")
+
+    [row] = pipeline.rescue_manual_review_via_agency_phone(
+        Batch.from_file(rs.sample("33703.docx")), [seed], vision)
+
+    assert len(vision.document_reads) == 1                       # 真的走到次頁那一次
+    assert (row.permit, row.status) == ("", SheetStatus.MANUAL_REVIEW)
+    assert row.reason == "large:全無命中；反查救援未完成:次頁 Vision 呼叫失敗"
