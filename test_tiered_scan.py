@@ -10,12 +10,13 @@ image1 與 image7 從來沒讀出過任何東西。掃全部 134 張要 2h51m,�
 一定會擴掃」的保證,以及兩個會讓它失效的坑。
 """
 import csv
+import logging
 
 import pytest
 
 import docx_images
 import permit_reading as R
-from matches_csv import ResultStatus, ScanResult
+from matches_csv import ResultStatus, Roi, ScanResult
 from submission_decision import CONF_VOTE_MIN
 import pipeline as P
 from permit_scan import run_scan
@@ -316,3 +317,42 @@ class TestOutputFollowsBatch:
         assert sorted(p.name for p in (out / "no_hit_review").iterdir()) == [
             "32512_image2.jpeg", "32512_image5.jpeg", "32512_image6.jpeg"]
         assert not (tmp_path / "scan_results").exists()
+
+
+class TestScanSummaryLog:
+    """掃完印的統計:第一層命中率是分層規則唯一看得見的體檢報告(ADR-0005)。
+
+    版面一變、第一層押錯位置,每份都會擴掃而結果一格不變 —— 只有這行會露出來。
+    """
+
+    def _summary(self, scan_env, tmp_path, caplog, large_result, **kw):
+        scanned = scan_env([_img(n) for n in range(1, 8)], large_result=large_result)
+        docs = tuple(tmp_path / n for n in ("a.docx", "b.docx"))
+        with caplog.at_level(logging.INFO, logger="permit_scan"):
+            scanned.run(Batch(docs, source=tmp_path, output_dir=tmp_path), **kw)
+        return [r.getMessage() for r in caplog.records]
+
+    @staticmethod
+    def _a_hits_upper_in_first_tier(docx, name):
+        """a.docx 在 image5 拿到上半多數票(一次命中);b.docx 全無命中(擴掃)。"""
+        if docx != "a.docx" or name != "image5.jpeg":
+            return None
+        r = _vote_row(docx, name)
+        r.hit_roi = Roi.PERMIT_UPPER
+        return r
+
+    def test_counts_images_hits_and_first_tier_rate(self, scan_env, tmp_path, caplog):
+        lines = self._summary(scan_env, tmp_path, caplog, self._a_hits_upper_in_first_tier)
+        # a 掃 3 張(第一層),b 掃 7 張(擴掃)
+        assert any(m.startswith("掃描完成：10 張圖，命中 1 張") for m in lines)
+        assert "  permit 上半命中：1 張 / 下半命中：0 張" in lines
+        assert "  第一層[2, 5, 6]：1/2 份一次命中，擴掃 1 份" in lines
+
+    def test_full_scan_labels_the_mode(self, scan_env, tmp_path, caplog):
+        lines = self._summary(scan_env, tmp_path, caplog, self._a_hits_upper_in_first_tier,
+                              full_scan=True)
+        assert "  全掃模式：1/2 份一次命中，擴掃 0 份" in lines
+
+    def test_no_permit_hit_prints_no_half_breakdown(self, scan_env, tmp_path, caplog):
+        lines = self._summary(scan_env, tmp_path, caplog, lambda docx, name: None)
+        assert not any("permit 上半命中" in m for m in lines)
