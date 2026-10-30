@@ -1,6 +1,6 @@
 # 超過行數上限的 module 改成同名 package,`__init__` 只轉發原本的公開名字
 
-CLAUDE.md 的 Monolith Prevention 把上限定在單檔 300 行、函式 50 行,而且回溯套用到既有檔
+CLAUDE.md 的 Monolith Prevention 把上限定在單檔 300 行(函式 50 行是訊號、依功能拆,只做一件事的長函式算合格),而且回溯套用到既有檔
 (2026-10-29,當時超標 6 檔:pipeline、employer_extract、permit_reading、address_db、snapshots、
 permit_lookup)。照行數切很容易造出 shallow module —— 為了湊行數把函式搬到別處,呼叫端反而
 要多認識幾個檔。**決定:超標的 module 改成同名 package,子檔沿 CONTEXT.md 已有名字的 seam 切;
@@ -22,7 +22,7 @@ permit_lookup)。照行數切很容易造出 shallow module —— 為了湊行�
 
 ## 搬檔與改寫分開 commit
 
-先純搬移:快照(掃描快照、送審快照、H~O 快照)要一格不差;再改寫(拆超過 50 行的函式、
+先純搬移:快照(掃描快照、送審快照、H~O 快照)要一格不差;再改寫(拆擠著兩件以上事情的函式、
 合併重複)。兩者混在一起,快照紅了分不出是搬壞還是改壞。
 
 ## Considered Options
@@ -32,7 +32,7 @@ permit_lookup)。照行數切很容易造出 shallow module —— 為了湊行�
 - **`__init__` 轉發子檔裡的一切(`from .image import *`)。** 否決:私有名與別人的名字(例如
   permit_patterns 的 `find_permits`)會被轉手出去,#59「名字回到主人身上」又被打破。
 - **放寬上限、不拆既有檔。** 否決:只管新檔的話規則形同虛設 —— #60 #61 就是往 625 行的
-  permit_reading 裡加。上限已依實測調成 300 / 50,單一高聚合實體(matches_csv、
+  permit_reading 裡加。上限已依實測調成 300(函式 50 為訊號),單一高聚合實體(matches_csv、
   submission_decision)自然落在 250~280,不必拆。
 
 ## Consequences
