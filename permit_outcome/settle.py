@@ -29,15 +29,16 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class PermitOutcomes:
     """一批的許可證判讀結果,依從哪個去向定下來分組;rows 是寫入順序。"""
-    keyin: list[SheetRow]             # 直接 key-in
+    tesseract_keyin: list[SheetRow]   # 直接 key-in(Tesseract 高信心,不送 Vision)
     vision_confirmed: list[SheetRow]  # 送 Vision、雙引擎一致
     vision_review: list[SheetRow]     # 送 Vision、未過或沒驗成
     rescue: list[SheetRow]            # 反查救援(救回、要人工擇一、救不回)
     direct_review: list[SheetRow]     # 讀不到圖,直接人工審查
 
     @property
-    def keyed_in(self) -> list[SheetRow]:
-        return self.keyin + self.vision_confirmed
+    def after_vision_keyin(self) -> list[SheetRow]:
+        """走完 Vision 之後自動 key-in 的全部列:直接 key-in + Vision 確認。"""
+        return self.tesseract_keyin + self.vision_confirmed
 
     @property
     def review(self) -> list[SheetRow]:
@@ -46,11 +47,11 @@ class PermitOutcomes:
     @property
     def rows(self) -> list[SheetRow]:
         """寫進 Sheets 的順序:自動寫入組在前、人工審查組在後。"""
-        return self.keyed_in + self.review
+        return self.after_vision_keyin + self.review
 
     def summary(self) -> str:
-        return (f"auto_keyin={len(self.keyed_in)} 筆"
-                f"(其中 Tesseract 直接 {len(self.keyin)} 筆 + Vision 確認 {len(self.vision_confirmed)} 筆) "
+        return (f"auto_keyin={len(self.after_vision_keyin)} 筆"
+                f"(其中 Tesseract 直接 {len(self.tesseract_keyin)} 筆 + Vision 確認 {len(self.vision_confirmed)} 筆) "
                 f"/ manual_review={len(self.review)} 筆"
                 f"(其中 Vision 交叉比對失敗 {len(self.vision_review)} 筆 "
                 f"+ 反查救援 {len(self.rescue)} 件 "
@@ -86,8 +87,8 @@ def settle(decisions: list[Decision], batch: Batch, vision: VisionReader,
     rescued = rescue_from_next_page(batch, seeds, roster, vision)
 
     return PermitOutcomes(
-        keyin=[_decision_row(d, d.candidate_value, SheetStatus.KEYED_IN)
-               for d in by_destination[Destination.直接KEYIN]],
+        tesseract_keyin=[_decision_row(d, d.candidate_value, SheetStatus.KEYED_IN)
+                         for d in by_destination[Destination.直接KEYIN]],
         vision_confirmed=[_vision_row(c) for c in checks if c.keyin],
         vision_review=[_vision_row(c) for c in checks if not c.keyin],
         rescue=rescued,

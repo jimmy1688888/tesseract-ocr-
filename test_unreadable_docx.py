@@ -158,7 +158,7 @@ class TestDirectManualReview:
 
         got = settle(read_decisions(csv_path), Batch((p,), source=tmp_path, output_dir=tmp_path),
                      FakeVision(), _AnyRoster())
-        assert (got.keyin, got.vision_confirmed, got.vision_review, got.rescue) == ([], [], [], [])
+        assert (got.tesseract_keyin, got.vision_confirmed, got.vision_review, got.rescue) == ([], [], [], [])
         assert got.direct_review == [SheetRow(p.name, "", SheetStatus.MANUAL_REVIEW, reason)]
 
 
