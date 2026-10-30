@@ -24,6 +24,7 @@ def with_retry(
     max_wait: float = 30.0,
     retryable_exceptions: tuple = (Exception,),
     should_retry: Optional[Callable[[BaseException], bool]] = None,
+    sleep: Callable[[float], None] = time.sleep,
 ):
     """指數退避重試 decorator（純 stdlib，無需 tenacity）。
 
@@ -34,9 +35,15 @@ def with_retry(
       max_wait             ：等待時間上限。
       retryable_exceptions ：哪些 exception 才會觸發重試。
       should_retry         ：額外的判斷函數；回傳 False 表示此次例外不重試（直接 raise）。
+      sleep                ：等待的方式;測試換成只記下秒數的函式,不必真的睡。
+
+    max_attempts 小於 1 直接拒絕:迴圈一次都不跑會安靜回 None,呼叫端會當成正常結果。
 
     生產環境建議改用 tenacity 套件；此處用 stdlib 是為了不新增相依。
     """
+    if max_attempts < 1:
+        raise ValueError(f"max_attempts 至少要 1(含第一次),收到 {max_attempts}")
+
     def decorator(fn: Callable) -> Callable:
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
@@ -56,7 +63,7 @@ def with_retry(
                         f"{fn.__name__} 第 {attempt}/{max_attempts} 次失敗：{e!r}；"
                         f"{wait:.1f}s 後重試"
                     )
-                    time.sleep(wait)
+                    sleep(wait)
                     wait = min(wait * backoff_factor, max_wait)
         return wrapper
     return decorator
