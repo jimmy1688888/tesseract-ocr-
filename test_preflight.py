@@ -80,7 +80,7 @@ class TestRosterFailureDegrades:
     def test_broken_roster_file_degrades_to_none(self, caplog, tmp_path):
         broken = tmp_path / "agency_roster.json"
         broken.write_text("{ 這不是合法的 JSON", encoding="utf-8")
-        with caplog.at_level(logging.WARNING, logger=permit_lookup.logger.name):
+        with caplog.at_level(logging.WARNING, logger="permit_lookup"):
             assert permit_lookup.load_roster(broken) is None
         assert any("名冊載入失敗" in r.message for r in caplog.records)
 

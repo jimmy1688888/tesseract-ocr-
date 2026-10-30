@@ -29,8 +29,8 @@ from openpyxl.utils import get_column_letter
 
 # 私有函式刻意直接引用:衍生欄的意義就是「與 pipeline 反查同一套規則」,
 # 若在此重寫一份,名冊判斷與實際反查就會各走各的。
-from permit_lookup import (ROSTER_PATH, _is_active, fetch_roster,
-                           split_phone_field)
+from permit_lookup import ROSTER_PATH, fetch_roster, split_phone_field
+from permit_lookup.roster import _is_active
 
 logger = logging.getLogger(__name__)
 

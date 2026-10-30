@@ -126,7 +126,7 @@ gcloud auth application-default login
 
 ## 仲介名冊設定
 
-許可證 → 機構名稱／地址／電話 由 `permit_lookup.py` 查本地名冊，需手動下載一次：
+許可證 → 機構名稱／地址／電話 由 `permit_lookup/` 查本地名冊，需手動下載一次：
 
 1. 瀏覽器開啟（來源：data.gov.tw dataset 6682「跨國人力仲介公司許可名冊」JSON）：
    `https://apiservice.mol.gov.tw/OdService/download/A17000000J-020001-QHy`
@@ -145,7 +145,7 @@ gcloud auth application-default login
 ```
 專案根目錄/
 ├── pipeline.py                 # 主程式
-├── permit_lookup.py            # 許可證 → 機構資料 查表
+├── permit_lookup/              # 許可證 → 機構資料 查表
 ├── docs/                       # 放要處理的 .docx
 │   └── *.docx
 ├── data/
@@ -254,11 +254,11 @@ vision_submit 分流
 **原理**：仲介機構是特許行業，勞動部名冊完整收錄，許可證號是唯一鍵。
 查表 100% 準確（前提是 B 欄號碼對），所以**刻意不對仲介框做 OCR**。
 
-流程（`permit_lookup.py` + `pipeline._agency_cols`）：
+流程（`permit_lookup/` + `pipeline._agency_cols`）：
 
 1. **資料來源**：`data/agency_roster.json` = data.gov.tw dataset 6682 官方 JSON。
    - **只讀本地檔、不連網**（mol.gov.tw 憑證常被 Python SSL 擋）。更新方式：
-     瀏覽器開 `permit_lookup.py` 開頭的 `ROSTER_JSON_URL` 下載，覆蓋該檔。
+     瀏覽器開 `permit_lookup/roster.py` 開頭的 `ROSTER_JSON_URL` 下載，覆蓋該檔。
      超過 30 天未更新只記提示，照常執行。
    - **必須用 JSON，不可用 Excel 匯出的 CSV**：Excel 會把分支證號
      `1-73` 判成日期（Jan-73）、把 `0234` 吃成 `234`，資料就毀了。
@@ -478,7 +478,7 @@ SA_EMAIL       = "..."               # 要模擬的服務帳號
 GCP_PROJECT_ID = "..."               # 用量記到哪個 GCP 專案
 ```
 
-`permit_lookup.py` 的仲介反查門檻：
+`permit_lookup/matching.py` 的仲介反查門檻：
 
 ```python
 NAME_MATCH_MIN = 0.78    # 名稱相似度門檻（反查名冊機構名稱）
@@ -492,7 +492,7 @@ ADDR_MATCH_MIN = 0.72    # 地址相似度門檻（反查名冊機構地址）
 
 ```
 pipeline.py            # 主程式（prefilter→scan→vision_submit→Sheets）
-permit_lookup.py       # 許可證 → 機構名稱/地址/電話 查表
+permit_lookup/         # 許可證 → 機構名稱/地址/電話 查表
 employer_extract.py    # 契約 OCR → 雇主名稱/地址/電話（Google Vision）
 address_db.py          # 地址標準化：用官方地址庫校正 OCR 地址、補中英譯名+郵遞區號
 test_*.py, conftest.py # pytest 測試（decide / verify / aggregate / helpers）

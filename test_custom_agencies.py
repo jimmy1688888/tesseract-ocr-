@@ -10,6 +10,7 @@ import json
 import pytest
 
 import permit_lookup as pl
+from permit_lookup.roster import _is_active, _parse_permit
 
 _OFFICIAL = [
     {"許可證": "0001", "機構名稱": "官方甲", "機構地址": "臺北市A路1號",
@@ -64,14 +65,14 @@ class TestDefaultsAndFailures:
         p = _write(tmp_path, [{"許可證": "9001", "機構名稱": "自訂丙",
                                "機構地址": "高雄市C路3號", "電話": "07-33333333"}])
         out = pl.merge_custom_agencies(_OFFICIAL, p)
-        assert pl._is_active(out[-1])
+        assert _is_active(out[-1])
 
     def test_explicitly_terminated_custom_entry_is_inactive(self, tmp_path):
         p = _write(tmp_path, [{"許可證": "9001", "機構名稱": "自訂丙",
                                "機構地址": "x", "電話": "07-33333333",
                                "終止營業日期": "20250101"}])
         out = pl.merge_custom_agencies(_OFFICIAL, p)
-        assert not pl._is_active(out[-1])
+        assert not _is_active(out[-1])
 
     @pytest.mark.parametrize("content", ['{"不是": "清單"}', "壞掉的 json", "[]"])
     def test_bad_or_empty_file_leaves_roster_untouched(self, tmp_path, content):
@@ -125,4 +126,4 @@ class TestShippedFileIsValid:
         for e in data:
             for k in ("許可證", "機構名稱", "機構地址", "電話"):
                 assert e.get(k), f"{e.get('許可證')!r} 缺 {k}"
-            assert pl._parse_permit(str(e["許可證"])), f"許可證格式無法解析:{e!r}"
+            assert _parse_permit(str(e["許可證"])), f"許可證格式無法解析:{e!r}"

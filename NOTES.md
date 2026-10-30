@@ -37,7 +37,7 @@
 
 ## 已完成：許可證 → 仲介機構查表
 
-- `permit_lookup.py`：讀本地 `data/agency_roster.json`，依許可證查 機構名稱/地址/電話。
+- `permit_lookup/`：讀本地 `data/agency_roster.json`，依許可證查 機構名稱/地址/電話。
   - 分支感知：`2340` → 母公司；`2340-2` → 該分公司（不回退母公司）；查無即查無。
 - `pipeline.py` 的 `_row_to_sheet_values`：Sheets 由 4 欄擴為 **7 欄**
   - A=來源 B=許可證 C=status D=reason **E=機構名稱 F=機構地址 G=電話**

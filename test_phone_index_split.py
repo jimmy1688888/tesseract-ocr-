@@ -13,7 +13,8 @@
 """
 import pytest
 
-from permit_lookup import PHONE_MIN_LEN, build_phone_index, split_phone_field
+from permit_lookup import build_phone_index, split_phone_field
+from tw_phone import PHONE_MIN_LEN
 
 
 class TestSplitPhoneField:
