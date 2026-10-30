@@ -10,7 +10,7 @@
 import pytest
 
 from permit_lookup import AgencyPick, pick_agency
-from pipeline import rescue_manual_review_via_agency_phone
+from permit_outcome.rescue import RESCUE_NOT_DONE, rescue_from_next_page
 from sheet_row import SheetRow, SheetStatus
 
 
@@ -149,7 +149,7 @@ class TestNothing:
         assert pick_agency(_block(["0299999999"], name="查無", address="查無"), Roster()) == AgencyPick()
 
 
-NOT_DONE = "；反查救援未完成:次頁 Vision 呼叫失敗"
+NOT_DONE = RESCUE_NOT_DONE
 
 
 class TestRescueReturnsNewRows:
@@ -158,14 +158,11 @@ class TestRescueReturnsNewRows:
     @staticmethod
     def _run(monkeypatch, tmp_path, blocks, seeds, with_reads=False):
         import employer_extract
-        import google_clients
-        import pipeline
         from batch import Batch
 
         for s in seeds:
             (tmp_path / s.source_docx).write_bytes(b"x")
         roster = Roster(phone={"0211111111": ["1111"], "0244444444": ["4444", "5555"]})
-        monkeypatch.setattr(google_clients, "vision_client", lambda: object())
         reads = []
 
         def next_page(path, vision):
@@ -175,7 +172,7 @@ class TestRescueReturnsNewRows:
                 raise blocks[name]
             return blocks[name]
         monkeypatch.setattr(employer_extract, "agency_block_from_next_page", next_page)
-        got = rescue_manual_review_via_agency_phone(Batch.from_dir(tmp_path), seeds, roster)
+        got = rescue_from_next_page(Batch.from_dir(tmp_path), seeds, roster, object())
         return (got, reads) if with_reads else got
 
     def test_rescued_and_not_rescued(self, monkeypatch, tmp_path):

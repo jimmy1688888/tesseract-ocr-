@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-import google_clients
+import employer_extract
 import permit_reading as R
 from matches_csv import ResultStatus, ScanResult
 import pipeline as P
@@ -29,7 +29,9 @@ from permit_scan import run_scan
 from batch import Batch
 from employer_result import DOUBT_KEY, EMPLOYER_COLUMNS
 from sheet_row import SheetRow, SheetStatus
-from submission_decision import Destination, decide
+from conftest import FakeVision
+from permit_outcome import settle
+from submission_decision import Destination, decide, read_decisions
 
 NO_IMAGES_REASON = "docx 無可讀的內嵌圖(word/media 底下沒有 png/jpg/bmp/tif/gif)"
 UNREADABLE_REASON = "docx 無法開啟(不是有效的 docx 檔)"
@@ -154,9 +156,10 @@ class TestDirectManualReview:
         p = make(tmp_path)
         csv_path = run_scan(Batch((p,), source=tmp_path, output_dir=tmp_path))
 
-        q = P.build_vision_queue(csv_path)
-        assert (q.vision, q.rescue, q.keyin) == ([], [], [])
-        assert q.direct_review == [SheetRow(p.name, "", SheetStatus.MANUAL_REVIEW, reason)]
+        got = settle(read_decisions(csv_path), Batch((p,), source=tmp_path, output_dir=tmp_path),
+                     FakeVision(), _AnyRoster())
+        assert (got.keyin, got.vision_confirmed, got.vision_review, got.rescue) == ([], [], [], [])
+        assert got.direct_review == [SheetRow(p.name, "", SheetStatus.MANUAL_REVIEW, reason)]
 
 
 # ─── 不變式:一批 N 份 → matches.csv 恰好 N 份、送審決策恰好 N 個 ─────────
@@ -172,8 +175,7 @@ def test_every_docx_in_the_batch_is_accounted_for(mol_hit, tmp_path):
 
     names = sorted(p.name for p in docs)
     assert sorted({r["source_docx"] for r in _csv_rows(csv_path)}) == names
-    q = P.build_vision_queue(csv_path)
-    decided = [r.source_docx for r in q.vision + q.keyin + q.rescue + q.direct_review]
+    decided = [d.source_docx for d in read_decisions(csv_path)]
     assert sorted(decided) == names
 
 
@@ -186,23 +188,20 @@ def _opts(**kw):
     return argparse.Namespace(**base)
 
 
+class _AnyRoster:
+    """名冊在:救援若真的走到,就會去讀次頁(world 會記下來)。"""
+
+
 @pytest.fixture
 def world(monkeypatch, tmp_path):
-    """外部邊界全替身:Vision、反查救援、名冊、Sheets。雇主擷取走真的(這幾份都不會送 Vision)。
+    """外部邊界全替身:Vision(被呼叫就是錯)、名冊、次頁、Sheets。雇主擷取走真的
+    (這幾份都不會送 Vision)。
 
     cwd 換到 tmp:main 的輸入 ./docs 與輸出 ./scan_results 都是相對路徑。
     """
     monkeypatch.chdir(tmp_path)
     (tmp_path / "docs").mkdir()
-    calls = {"vision": [], "rescue": [], "sheets": [], "employer": 0}
-
-    def fake_vision(items, vision):
-        calls["vision"].extend(items)
-        return [], []
-
-    def fake_rescue(batch, rows, roster, vision=None):
-        calls["rescue"].extend(rows)
-        return rows
+    calls = {"next_page": [], "sheets": [], "employer": 0, "vision": FakeVision()}
 
     real_collect = P.collect_employer_fields
 
@@ -210,12 +209,11 @@ def world(monkeypatch, tmp_path):
         calls["employer"] += 1
         return real_collect(batch, vision)
 
-    monkeypatch.setattr(P, "run_vision_items", fake_vision)
-    monkeypatch.setattr(P, "rescue_manual_review_via_agency_phone", fake_rescue)
     monkeypatch.setattr(P, "collect_employer_fields", counting_collect)
-    monkeypatch.setattr(P, "load_roster", lambda: None)
+    monkeypatch.setattr(P, "load_roster", lambda: _AnyRoster())
+    monkeypatch.setattr(employer_extract, "agency_block_from_next_page",
+                        lambda path, vision: calls["next_page"].append(path))
     monkeypatch.setattr(P, "_sheets_append_atomic", lambda values: calls["sheets"].extend(values))
-    monkeypatch.setattr(google_clients, "vision_client", lambda: object())
     return calls
 
 
@@ -228,7 +226,7 @@ class TestMainWritesOneRowEach:
         for make in (no_media, emf_only, not_zip):
             make(tmp_path / "docs")
 
-        P.main(_opts())
+        P.main(_opts(), world["vision"])
 
         rows = {r[0]: r for r in world["sheets"]}
         assert sorted(rows) == ["emf_only.docx", "no_media.docx", "not_zip.docx"]
@@ -246,10 +244,10 @@ class TestMainWritesOneRowEach:
         for make in (no_media, emf_only, not_zip):
             make(tmp_path / "docs")
 
-        P.main(_opts())
+        P.main(_opts(), world["vision"])
 
-        assert world["vision"] == []
-        assert world["rescue"] == []
+        assert world["vision"].sparse_reads == world["vision"].document_reads == []
+        assert world["next_page"] == []
 
 
 # ─── --image 對不到:直接結束 ────────────────────────────────────────────
@@ -263,7 +261,7 @@ class TestImageFilterMiss:
 
     def _run(self, caplog, f, image):
         with caplog.at_level(logging.ERROR, logger=P.logger.name):
-            P.main(_opts(file=str(f), image=image))
+            P.main(_opts(file=str(f), image=image), FakeVision())
         return " ".join(r.message for r in caplog.records if r.levelno >= logging.ERROR)
 
     def test_stops_before_employer_and_sheets(self, world, caplog, tmp_path):

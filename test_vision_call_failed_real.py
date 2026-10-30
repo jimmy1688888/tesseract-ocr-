@@ -47,14 +47,14 @@ def test_30766_pledge_page_failure_stops_at_the_first_page(real_ocr):
 
 def test_33703_next_page_failure_is_stated_in_d(real_ocr, monkeypatch):
     """#67:反查救援讀真實 docx 的次頁(真 Tesseract 認契約頁)時沒問到 → D 欄註明。"""
-    import pipeline
     from batch import Batch
+    from permit_outcome.rescue import rescue_from_next_page
     from sheet_row import SheetRow, SheetStatus
 
     vision = FakeVision(document=_fail)
     seed = SheetRow("33703.docx", "", SheetStatus.MANUAL_REVIEW, "large:全無命中")
 
-    [row] = pipeline.rescue_manual_review_via_agency_phone(
+    [row] = rescue_from_next_page(
         Batch.from_file(rs.sample("33703.docx")), [seed], object(), vision)   # 名冊在,才走得到次頁
 
     assert len(vision.document_reads) == 1                       # 真的走到次頁那一次

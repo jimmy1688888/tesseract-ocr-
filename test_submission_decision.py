@@ -13,7 +13,8 @@ import pytest
 
 from matches_csv import ResultStatus, ScanResult
 from submission_decision import (CONF_KEY_IN, CONF_MOL_VOTE_MIN, CONF_NOVOTE_RESCUE_MAX,
-                                 CONF_VOTE_MIN, Destination, decide, is_permit_vote)
+                                 CONF_VOTE_MIN, Destination, decide, is_permit_vote,
+                                 read_decisions)
 from sheet_row import SheetStatus
 from conftest import FakeVision
 from vision_verification import run_vision_items
@@ -357,23 +358,22 @@ class TestVotePredicate:
 def test_queue_has_one_item_per_docx(tmp_path):
     """matches.csv 一份 docx 兩列(兩張圖都需送 Vision)→ 佇列只有一筆。"""
     import matches_csv
-    import pipeline
     p = tmp_path / "matches.csv"
     matches_csv.write(p, [_permit("image5.jpeg", "1234", 52, partial=True),
                           _permit("image6.jpeg", "1284", 60, partial=True)])
-    vision, manual, keyin, _ = pipeline.build_vision_queue(p)
-    assert [(i.source_docx, i.image_name) for i in vision + keyin] == [("a.docx", "image6.jpeg")]
-    assert manual == []
+    [d] = read_decisions(p)
+    assert (d.source_docx, d.image_name) == ("a.docx", "image6.jpeg")
+    assert d.destination in (Destination.送VISION, Destination.直接KEYIN)
 
 
 def test_queue_items_carry_the_crop_roi(tmp_path):
     """送 Vision 的項目帶著截圖屬於哪個 ROI(#41 依此選取號 pattern)。"""
     import matches_csv
-    import pipeline
     p = tmp_path / "matches.csv"
     matches_csv.write(p, [_permit("image5.jpeg", "1234", 60, partial=True)])
-    vision, manual, keyin, _ = pipeline.build_vision_queue(p)
-    assert [i.hit_roi for i in vision] == ["permit_lower"]
+    [d] = read_decisions(p)
+    assert d.destination is Destination.送VISION
+    assert d.hit_roi == "permit_lower"
 
 
 # ─── 讀一份 matches.csv 得出決策:截圖路徑以 CSV 所在資料夾解析(#61) ──────────

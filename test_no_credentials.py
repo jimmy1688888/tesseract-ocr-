@@ -4,20 +4,24 @@
 以前 employer_extract 自己延遲 import pipeline 拿 Vision client,憑證失敗會從
 「import 時」搬到「第一次呼叫時」、被雇主擷取的 try/except 吞成一行 warning;
 許可證那一側卻是整批中止。同一條 seam 的兩個方向錯誤模式不對稱,而兩側都沒寫下來。
-#3 之後三處都跟 google_clients 要 client,這裡把現況釘住:
+#3 之後三處都跟 google_clients 要 client;#71 起 main 一批只建一個 Vision reader,
+三處共用,這裡把現況釘住:
 
-  許可證判讀(步驟 4a 送 Vision)  → 不降級,例外往上拋,整批中止(還沒寫 Sheets)
-  雇主欄位(步驟 4b 前置)         → 不降級,例外往上拋,整批中止(還沒寫 Sheets)
-  次頁電話反查救援(4b 前置②③)  → 降級:記 warning、救回 0 筆,各列維持原樣
+  許可證判讀(送 Vision)          → 不降級,例外往上拋,整批中止(還沒寫 Sheets)
+  雇主欄位                        → 不降級,例外往上拋,整批中止(還沒寫 Sheets)
+  一次執行(main)                → reader 在掃描後、送審決策之前建;建不起來整批中止,
+                                     Sheets 一列都不寫 —— 次頁反查救援因此不會走到
 
-前兩者寧可整批不寫,也不要寫一批「B 欄沒驗、H~O 全空」看起來正常的列;正常情況下
+寧可整批不寫,也不要寫一批「B 欄沒驗、H~O 全空」看起來正常的列;正常情況下
 preflight 的憑證檢查會在掃描前先攔下來,這裡是 --skip-preflight 或憑證中途失效時的
-最後一道。救援本來就是「救得回幾筆算幾筆」,少了它各列仍是人工審查,不會錯值。
+最後一道。救援以前自己建 reader、建不起來就降級成救回 0 筆 —— 在 main 裡那條路
+走不到(送 Vision 那步先建 reader、先中止),#71 刪掉。
 """
+import argparse
+
 import pytest
 
 import identity
-from sheet_row import SheetRow, SheetStatus
 from submission_decision import Decision, Destination
 import pipeline as P
 from batch import Batch
@@ -57,7 +61,16 @@ def test_employer_fields_abort_the_run(tmp_path):
         P.collect_employer_fields(Batch.from_dir(tmp_path))
 
 
-def test_agency_rescue_degrades_to_nothing_rescued(tmp_path, monkeypatch):
-    rows = [SheetRow("a.docx", "", SheetStatus.MANUAL_REVIEW, "全無命中")]
-    assert P.rescue_manual_review_via_agency_phone(
-        Batch.from_dir(tmp_path), rows, object()) == rows   # 名冊在,才走得到 client
+def test_run_aborts_before_writing_sheets(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "a.docx").write_bytes(b"x")
+    sheets = []
+    monkeypatch.setattr(P, "run_scan", lambda batch, **kw: tmp_path / "matches.csv")
+    monkeypatch.setattr(P, "load_roster", lambda: None)
+    monkeypatch.setattr(P, "_sheets_append_atomic", sheets.extend)
+    opts = argparse.Namespace(file="", image="", roi="", full_scan=False,
+                              preflight_only=False, skip_preflight=True)
+    with pytest.raises(NoCredentials):
+        P.main(opts)
+    assert sheets == []

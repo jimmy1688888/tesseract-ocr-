@@ -204,6 +204,16 @@ def test_fifteen_columns_cell_by_cell(world):
     assert sheets == BEFORE_12
 
 
+def test_one_vision_reader_per_run(world, monkeypatch):
+    """#71:main 一批只建一個 Vision reader,許可證驗證、反查救援、雇主擷取共用。"""
+    sheets, vision, _ = world
+    built = []
+    monkeypatch.setattr(P, "GoogleVisionReader", lambda: built.append(vision) or vision)
+    P.main(_opts())
+    assert built == [vision]
+    assert sheets == BEFORE_12
+
+
 def test_roster_is_loaded_once_per_run(world):
     """#69:名冊由 main 載一次往下傳(E~G 與反查救援共用),不再各自惰性載入。"""
     sheets, vision, roster_loads = world

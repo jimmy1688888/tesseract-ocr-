@@ -32,10 +32,11 @@ def real_vision():
 
 
 def test_read_sparse_keys_in_the_checked_permit_of_30768():
-    import pipeline
+    from submission_decision import Destination, read_decisions
     from vision_verification import run_vision_items
 
-    vision_decisions = pipeline.build_vision_queue(rs.permit_scan_csv()).vision
+    vision_decisions = [d for d in read_decisions(rs.permit_scan_csv())
+                        if d.destination is Destination.送VISION]
     items = [d for d in vision_decisions if Path(d.source_docx).stem == "30768"]
     if not items or not Path(items[0].img_path).exists():
         pytest.skip("30768 送 Vision 的截圖不在最新的某日掃描")

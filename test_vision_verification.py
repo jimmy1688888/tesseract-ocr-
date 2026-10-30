@@ -117,10 +117,11 @@ class TestRealVisionReplay:
     def test_replayed_vision_texts_key_in_the_checked_permit(self):
         from pathlib import Path
 
-        import pipeline
         import real_samples as rs
+        from submission_decision import Destination, read_decisions
         texts = rs.permit_vision_texts()
-        vision_decisions, _, _, _ = pipeline.build_vision_queue(rs.permit_scan_csv())
+        vision_decisions = [d for d in read_decisions(rs.permit_scan_csv())
+                            if d.destination is Destination.送VISION]
         items = [d for d in vision_decisions if Path(d.img_path).name in texts]
         # 存過 Vision 全文的截圖,就是當初送 Vision 的那幾張:不在佇列裡是送審決策變了,不是缺素材。
         assert sorted(Path(i.img_path).name for i in items) == sorted(texts)

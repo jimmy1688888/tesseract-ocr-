@@ -54,7 +54,7 @@ import logging
 import argparse
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 import pytesseract
 
@@ -69,13 +69,13 @@ import identity
 import google_clients
 
 # 許可證 → 機構資料(名稱／地址／電話)查表(來源:data.gov.tw 6682 名冊)
-from permit_lookup import PermitLookup, load_roster, pick_agency
+from permit_lookup import PermitLookup, load_roster
 
 # 一批:這次要處理哪些 docx(完整路徑)。只是設定,結果不放進去(ADR-0009)。
 from batch import Batch
 from employer_result import EMPLOYER_COLUMNS, EmployerExtraction, ExtractionStatus
 # 寫進 Sheets 的一列(A~D),結果在哪一步確定就在哪一步建好(#12)。
-from sheet_row import SheetRow, SheetStatus
+from sheet_row import SheetRow
 
 if TYPE_CHECKING:   # 只給型別標註看;執行期在 preflight 的函式裡才 import(見該段說明)
     from gcp_identity.checks import CheckResult
@@ -113,8 +113,9 @@ INPUT_DIR  = Path("./docs")
 #   許可證判讀(ROI、多數票、分層掃描、一份 docx → 它的列)  permit_reading
 #   送審決策與門檻              submission_decision
 #   Vision 驗證                 vision_verification
+#   許可證判讀結果(送審決策走完去向 → A~D、反查救援)  permit_outcome
 # 送審決策:每份 docx 一個去向(門檻與判斷只在那裡,#40)。
-from submission_decision import Decision, Destination, read_decisions  # noqa: E402
+from submission_decision import read_decisions  # noqa: E402
 from permit_reading import ROI_REGIONS, TESS_LANG, TIER1_IMAGES, unscannable  # noqa: E402
 from permit_scan import read_docx_images, run_scan  # noqa: E402
 from retry import is_retryable_google_error, with_retry  # noqa: E402
@@ -122,54 +123,12 @@ from retry import is_retryable_google_error, with_retry  # noqa: E402
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ⑦ 送審決策（每份 docx 一個決定，見 submission_decision）
+# ⑦⑧ 送審決策 → 許可證判讀結果(permit_outcome;Vision 驗證在 vision_verification、
+#     讀字在 vision_reader)
 # ═══════════════════════════════════════════════════════════════════════════
 
-class SubmissionQueue(NamedTuple):
-    """一批的送審決策依去向分好(build_vision_queue 的回傳)。每份 docx 恰好在其中一處。"""
-    vision: list[Decision]          # 送 Google Vision 的決定(只有去向是送 Vision 的)
-    rescue: list[SheetRow]          # 反查救援的種子列:B 欄是候選值(單一判讀低信心)或空(全無命中)
-    keyin: list[SheetRow]           # 直接 key-in:結果已定,列已建好
-    direct_review: list[SheetRow]   # docx 讀不到圖,直接人工審查(不送 Vision、不反查)
-
-
-def build_vision_queue(csv_path: Path) -> SubmissionQueue:
-    """
-    讀取 matches.csv,每份 docx 做一個送審決策(submission_decision.decide),依去向分好
-    回傳(見 SubmissionQueue)。
-
-    一份 docx 只有一個決定(一份契約只有一個許可證,Sheets 上只有一列)。
-    """
-    vision_decisions: list[Decision] = []
-    keyin_rows:       list[SheetRow] = []
-    rescue_rows:      list[SheetRow] = []
-    direct_review:    list[SheetRow] = []
-
-    for d in read_decisions(csv_path):
-        if d.destination is Destination.直接KEYIN:
-            keyin_rows.append(SheetRow(d.source_docx, d.candidate_value,
-                                       SheetStatus.KEYED_IN, d.reason))
-            continue
-        if d.destination is Destination.直接人工審查:
-            direct_review.append(SheetRow(d.source_docx, "", SheetStatus.MANUAL_REVIEW, d.reason))
-            continue
-        if d.destination is Destination.反查救援:
-            # 種子列:救不回就照原樣寫(B 欄是候選值或空)
-            rescue_rows.append(SheetRow(d.source_docx, d.candidate_value,
-                                        SheetStatus.MANUAL_REVIEW, d.reason))
-            continue
-        vision_decisions.append(d)
-
-    return SubmissionQueue(vision_decisions, rescue_rows, keyin_rows, direct_review)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# ⑧ Google Vision(驗證在 vision_verification、讀字在 vision_reader)
-# ═══════════════════════════════════════════════════════════════════════════
-
-from vision_reader import (IDENTITY_REFUSED, GoogleVisionReader, VisionCallFailed,  # noqa: E402
-                           VisionReader)
-from vision_verification import run_vision_items  # noqa: E402
+from vision_reader import IDENTITY_REFUSED, GoogleVisionReader, VisionReader  # noqa: E402
+from permit_outcome import PermitOutcomes, settle  # noqa: E402
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -322,77 +281,6 @@ def write_doubt_report(batch: Batch, employer_by_docx: dict[str, EmployerExtract
         return len(rows)
     logger.info(f"  疑慮標示 {len(rows)} 筆 → {batch.doubt_report_csv}")
     return len(rows)
-
-
-RESCUE_NOT_DONE = "；反查救援未完成:次頁 Vision 呼叫失敗"
-_NO_BLOCK = {"phones": [], "name": "", "address": ""}
-
-
-def _next_page_block(read_block, docx_path: Path, vision: VisionReader) -> dict | None:
-    """一份 docx 的次頁台仲區塊;Vision 呼叫失敗回 None,其他失敗當作沒有區塊。
-    身分或權限被拒往上拋(整批中止)。"""
-    try:
-        return read_block(str(docx_path), vision)
-    except IDENTITY_REFUSED:
-        raise
-    except VisionCallFailed as e:
-        logger.warning(f"  ⚠ {docx_path.name} 次頁 {e}")
-        return None
-    except Exception as e:
-        logger.warning(f"  ⚠ {docx_path.name} 次頁仲介區塊擷取失敗:{e!r}")
-        return dict(_NO_BLOCK)
-
-
-def rescue_manual_review_via_agency_phone(
-        batch: Batch, rows: list[SheetRow], roster: PermitLookup | None,
-        vision: VisionReader | None = None) -> list[SheetRow]:
-    """仲介反查救援:整頁 OCR 契約次一頁(1 次 Vision),以『台灣仲介』欄位標籤
-    錨定區塊(台仲在左在右皆可,靠標籤非位置),取其「電話／名稱／地址」反查名冊
-    回推許可證(挑哪一家見 pick_agency)。列進、列出:回傳與 rows 同序的列 —— 救回
-    或要人工擇一的換成新列(B 欄換成救回的許可證、D 欄接上反查管道),救不回的原列
-    照回;不改傳入的列。_agency_cols 會據許可證補 E~G。
-
-    種子列是送審決策判成反查救援的 docx:B 欄是候選值(單一判讀低信心)或空(全無命中),
-    救回就換成救回的許可證,救不回就留著。
-
-    名冊/Vision 缺失時安靜跳過,不影響主流程。
-    要開的 docx 跟 batch 查完整路徑(列只帶檔名),見 Batch.path_of。
-    同一 docx 的次頁只送一次 Vision(block_cache),多列共用不重複計費。"""
-    if roster is None or not rows:
-        return list(rows)
-    try:
-        from employer_extract import agency_block_from_next_page
-        vision = vision or GoogleVisionReader()
-    except Exception as e:
-        logger.warning(f"  ⚠ 電話反查救援不可用(略過):{e!r}")
-        return list(rows)
-    out: list[SheetRow] = []
-    rescued = 0
-    # source_docx → {phones,name,address};None = 次頁 Vision 呼叫失敗(避免重複送 Vision)
-    block_cache: dict[str, dict | None] = {}
-    for row in rows:
-        docx_name = row.source_docx
-        docx_path = batch.path_of(docx_name)
-        if docx_path is None:
-            out.append(row)
-            continue
-        if docx_name not in block_cache:
-            block_cache[docx_name] = _next_page_block(
-                agency_block_from_next_page, docx_path, vision)
-        if block_cache[docx_name] is None:
-            # 沒救 ≠ 救不回:救不回不註明,沒問到要說(CONTEXT「反查救援」、ADR-0015)
-            out.append(replace(row, reason=f"{row.reason}{RESCUE_NOT_DONE}"))
-            continue
-        pick = pick_agency(block_cache[docx_name], roster)
-        if pick.note:
-            # 要人工擇一時沒有許可證:B 欄留種子值(全無命中是空、單一判讀是候選值)
-            row = replace(row, permit=pick.permit or row.permit,
-                          reason=f"{row.reason}；{pick.note}")
-            rescued += bool(pick.permit)
-            logger.info(f"  {'↻' if pick.permit else '⚠'} {docx_name} {pick.note}")
-        out.append(row)
-    logger.info(f"  反查救回 {rescued}/{len(rows)} 筆(填許可證+機構欄)")
-    return out
 
 
 def _employer_cols(docx: str, employer_by_docx: dict[str, EmployerExtraction]) -> list[str]:
@@ -686,11 +574,19 @@ def _image_filter_miss(docx_files: list[Path], image: str) -> str | None:
     return None
 
 
+def _log_review_list(outcomes: PermitOutcomes) -> None:
+    """人工審查清單印在 log 尾,方便人逐份確認(原因在 D 欄)。"""
+    if outcomes.review:
+        logger.info(f"── 人工審查清單(共 {len(outcomes.review)} 件,reason 欄已標註原因)：")
+        for row in outcomes.review:
+            logger.info(f"    {row.source_docx}: {row.reason}")
+
+
 def main(opts: argparse.Namespace, vision: VisionReader | None = None) -> None:
     """主流程。接收已解析的 CLI options，不再依賴 module-level 全域變數。
 
-    vision 不給就用 GoogleVisionReader(測試換假的);各步驟在自己那一步才建,
-    拿不到憑證時誰中止、誰降級照舊(見 test_no_credentials.py)。"""
+    vision 不給就在掃描之後建一個 GoogleVisionReader(測試換假的),許可證與雇主兩側
+    共用;拿不到憑證就整批中止、不寫 Sheets(見 test_no_credentials.py)。"""
     # 一批:這次要掃哪些 docx。指定 --file 時就是那一份,不看 ./docs。
     batch = Batch.from_file(Path(opts.file)) if opts.file else Batch.from_dir(INPUT_DIR)
     # 名冊一批載一次、往下傳(#69);載不起來是 None,E~G 留空、反查救援跳過,不擋。
@@ -730,70 +626,25 @@ def main(opts: argparse.Namespace, vision: VisionReader | None = None) -> None:
                         full_scan=opts.full_scan)
     logger.info(f"  matches.csv 已輸出：{csv_path.resolve()}")
 
-    # ── 步驟 3：送審決策 ─────────────────────────────────────────────────
+    # ── 步驟 3、4a、4b：送審決策 → 許可證判讀結果(Vision 驗證、反查救援)──
+    # Vision reader 一批只建一個,許可證與雇主兩側共用;拿不到憑證就在這裡整批中止,
+    # 還沒寫 Sheets(test_no_credentials)。
     logger.info("── 步驟 3：送審決策 ──")
-    queue = build_vision_queue(csv_path)
-    vision_decisions, rescue_rows, keyin_rows = queue.vision, queue.rescue, queue.keyin
-    direct_review = queue.direct_review
-    logger.info(f"  直接 key-in：{len(keyin_rows)} 筆")
-    logger.info(f"  送 Vision  ：{len(vision_decisions)} 筆")
-    logger.info(f"  反查救援   ：{len(rescue_rows)} 件")
-    logger.info(f"  直接人工審查(讀不到圖):{len(direct_review)} 件")
+    vision = vision or GoogleVisionReader()
+    outcomes = settle(read_decisions(csv_path), batch, vision, roster)
 
-    # ── 步驟 4a：送 Google Vision + 交叉比對 ──────────────────────────
-    # 雙引擎(Tesseract + Vision)完全一致才自動 key-in;其餘進人工審查批次,
-    # 避免任何單一 OCR 引擎的判讀直接決定資料寫入。
-    #
-    # 額外規則(LIKELY_OCR_CONFUSION):兩引擎差 1 字元時,不自動填任何值,
-    # 一律標人工審查、由人工輸入(兩候選與信心寫進 reason 供參考)。
-    logger.info("── 步驟 4a：Google Vision 判讀 + 交叉比對 ──")
-    vision_auto_keyin, vision_review_rows = run_vision_items(
-        vision_decisions, vision or GoogleVisionReader())
-
-    # ── 步驟 4b：統一寫入 Google Sheets ────────────────────────────────────
-    # 簡化為兩個 status,理由欄(reason)負責歸因:
-    #   KEYED_IN      = Tesseract 直接 key-in(高信心)  +  Vision-CONFIRMED(雙引擎一致)
-    #   MANUAL_REVIEW = Vision 交叉比對失敗(各種不一致)  +  反查救援  +  讀不到圖(#47)
-    #
-    # 設計動機:自動 vs 人工的二分讓使用者只需依 status 篩選即可知道「哪些要看」。
-    # 每列來源(Tesseract 直接 / Vision 確認 / 差 1 字元 / 僅 Vision / 無命中)
-    # 都寫進 reason 欄,審查時看 reason 就知道 context。
-    # ── 步驟 4b 前置①：雇主資料擷取（H~O 欄）──────────────────────────────
+    # ── 步驟 4c：雇主資料擷取（H~O 欄）─────────────────────────────────────
     # 每份 docx 一次 Vision 呼叫(契約頁偵測是本機 Tesseract,不花 API)。
     # 這裡對「本次要寫入的所有 docx」都擷取,含 manual_review 列——
     # 許可證待人工複核不代表雇主資料無效,先填好可省一次人工查找。
-    logger.info("── 步驟 4b 前置①：雇主資料擷取（契約頁 OCR → H~O 欄）──")
+    logger.info("── 步驟 4c：雇主資料擷取（契約頁 OCR → H~O 欄）──")
     employer_by_docx = collect_employer_fields(batch, vision)
     write_doubt_report(batch, employer_by_docx)
 
-    # ── 步驟 4b 前置②：反查救援（次頁台仲區塊 → 反查名冊 → 回推許可證）──
-    # 全無命中或單一判讀低信心:整頁 OCR 契約次一頁(1 次 Vision)、以『台灣仲介』標籤
-    # 錨定取電話／名稱／地址(台仲在左在右皆可),反查名冊回推許可證。救回者 B 欄換成
-    # 救回的許可證、_agency_cols 補 E~G,仍標 manual_review、D 欄註明,供人工快速核對。
-    if rescue_rows:
-        logger.info("── 步驟 4b 前置②：反查救援 → 次頁台仲區塊反查名冊 ──")
-        rescue_rows = rescue_manual_review_via_agency_phone(batch, rescue_rows, roster, vision)
-
-    logger.info("── 步驟 4b：合併批次寫入 Google Sheets（atomic）──")
-    auto_keyin_rows = keyin_rows + vision_auto_keyin
-    # 讀不到圖(direct_review):B 空,D 是事實;E~G 跟著空
-    review_rows = vision_review_rows + rescue_rows + direct_review
-    written = write_sheets_batched(auto_keyin_rows + review_rows, employer_by_docx, roster)
-    logger.info(
-        f"  本次寫入彙總:auto_keyin={len(auto_keyin_rows)} 筆"
-        f"(其中 Tesseract 直接 {len(keyin_rows)} 筆 + Vision 確認 {len(vision_auto_keyin)} 筆) "
-        f"/ manual_review={len(review_rows)} 筆"
-        f"(其中 Vision 交叉比對失敗 {len(vision_review_rows)} 筆 "
-        f"+ 反查救援 {len(rescue_rows)} 件 "
-        f"+ 讀不到圖 {len(direct_review)} 件)"
-        f"(實際寫入 Sheets:{written} 筆)"
-    )
-
-    # ── 步驟 4c：列出人工審查清單，方便人類確認 ────────────────────────────
-    if review_rows:
-        logger.info(f"── 人工審查清單(共 {len(review_rows)} 件,reason 欄已標註原因)：")
-        for row in review_rows:
-            logger.info(f"    {row.source_docx}: {row.reason}")
+    logger.info("── 步驟 4d：合併批次寫入 Google Sheets（atomic）──")
+    written = write_sheets_batched(outcomes.rows, employer_by_docx, roster)
+    logger.info(f"  本次寫入彙總:{outcomes.summary()}(實際寫入 Sheets:{written} 筆)")
+    _log_review_list(outcomes)
 
     logger.info("── 全部完成 ──")
 

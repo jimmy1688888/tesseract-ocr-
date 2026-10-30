@@ -124,26 +124,24 @@ class TestValuesFromMangledBlock:
 
 class TestRescueReasonUsesStandardForm:
     """D 欄反查理由裡的台仲電話來自 OCR,跟著寫成電話標準形(#48)。
-    替身只放在外部邊界:次頁 Vision 讀出的行、Vision client;名冊用注入的假名冊。"""
+    替身只放在外部邊界:次頁 Vision 讀出的行;名冊用注入的假名冊。"""
 
     def test_reason_shows_standard_form(self, monkeypatch, tmp_path):
         import employer_extract
-        import google_clients
-        import pipeline
         from batch import Batch
+        from permit_outcome.rescue import rescue_from_next_page
         from permit_lookup import PermitLookup
         from sheet_row import SheetRow, SheetStatus
 
         roster = PermitLookup([{"許可證": "2340", "機構名稱": "測試仲介", "機構地址": "地址",
                                 "電話": "(02)2727-6999#12", "廢止許可日期": "", "終止營業日期": ""}])
-        monkeypatch.setattr(google_clients, "vision_client", lambda: object())
         monkeypatch.setattr(employer_extract, "_agency_block_lines",
                             lambda path, vision: ["電話:02-2727-6999,傳真:02-2727-6000"])
         docx = tmp_path / "32417.docx"
         docx.write_bytes(b"x")
         seed = [SheetRow("32417.docx", "", SheetStatus.MANUAL_REVIEW, "全無命中")]
 
-        [row] = pipeline.rescue_manual_review_via_agency_phone(Batch.from_file(docx), seed, roster)
+        [row] = rescue_from_next_page(Batch.from_file(docx), seed, roster, object())
         assert row.permit == "2340"
         assert "台仲電話 0227276999 " in row.reason
         assert "02-2727-6999" not in row.reason

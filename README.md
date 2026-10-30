@@ -395,7 +395,7 @@ B 欄 = 2674，E~G 由 2674 查名冊自動補上。
 （`agency_roster.json`）本來就有每家仲介的這三項。於是多開一條**與許可證數字無關**
 的獨立管道：**讀仲介電話（或名稱／地址）→ 反查名冊 → 回推許可證**。
 
-流程（`pipeline.rescue_manual_review_via_agency_phone` + `employer_extract.agency_block_from_next_page`）：
+流程（`permit_outcome/rescue.py` + `permit_lookup.pick_agency` + `employer_extract.agency_block_from_next_page`）：
 
 1. 找契約頁的**次一頁**，**去紅章前處理後**整頁送 Vision OCR（**每件僅 1 次** Vision；
    按張計費，整頁與裁切同額度），一次取回台仲區塊的**電話、名稱、地址**三項。
@@ -534,7 +534,7 @@ Tesseract 沒裝或路徑不對。確認已安裝，並檢查 `pipeline.py` 頂�
 名冊檔 `data/agency_roster.json` 不存在或許可證查無。前者請依「仲介名冊設定」下載。
 
 **Q5：想重跑後段而不重掃**
-`scan_results/matches.csv` 已保留 Tesseract 結果，可只跑 vision_submit → Sheets 段落（見程式內 `build_vision_queue`）。
+`scan_results/matches.csv` 已保留 Tesseract 結果，可只跑 vision_submit → Sheets 段落（見 `submission_decision.read_decisions` → `permit_outcome.settle`）。
 
 **Q6：J 欄（標準地址）空白但 K 欄有值——路名不在官方庫怎麼辦？**
 

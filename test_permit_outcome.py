@@ -28,17 +28,12 @@ UNREADABLE_WHY = "docx 無法開啟(不是有效的 docx 檔)"
 
 
 def settle(monkeypatch, decisions, batch, vision, roster, next_page):
-    """一批送審決策 → 依寫入順序的 A~D 列。重構時只換這一個轉接處。"""
+    """一批送審決策 → 依寫入順序的 A~D 列。次頁台仲區塊在外部邊界換掉。"""
     import employer_extract
-    import pipeline
-    from vision_verification import run_vision_items
+    import permit_outcome
 
-    monkeypatch.setattr(pipeline, "read_decisions", lambda _path: decisions)
     monkeypatch.setattr(employer_extract, "agency_block_from_next_page", next_page)
-    queue = pipeline.build_vision_queue(batch.output_dir / "matches.csv")
-    vision_auto, vision_review = run_vision_items(queue.vision, vision)
-    rescued = pipeline.rescue_manual_review_via_agency_phone(batch, queue.rescue, roster, vision)
-    return queue.keyin + vision_auto + vision_review + rescued + queue.direct_review
+    return permit_outcome.settle(decisions, batch, vision, roster).rows
 
 
 # ── 各去向的送審決策 ────────────────────────────────────────────────────────

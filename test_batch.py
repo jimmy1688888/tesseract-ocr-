@@ -12,10 +12,10 @@ from pathlib import Path
 import pytest
 
 import employer_extract
-import google_clients
 import docx_images
 import pipeline
 from batch import Batch
+from permit_outcome.rescue import rescue_from_next_page
 from sheet_row import SheetRow, SheetStatus
 
 
@@ -118,14 +118,13 @@ class TestRescueOpensTheBatchFile:
 
     @pytest.fixture
     def opened(self, monkeypatch):
-        """記下救援真正送去讀次頁的路徑。替身只放在外部邊界:名冊、Vision、次頁擷取。"""
+        """記下救援真正送去讀次頁的路徑。替身只放在外部邊界:名冊、次頁擷取。"""
         paths: list[Path] = []
 
         def fake_next_page(path, vision):
             paths.append(Path(path))
             return {"phones": ["02-1234-5678"], "name": "", "address": ""}
 
-        monkeypatch.setattr(google_clients, "vision_client", lambda: object())
         monkeypatch.setattr(employer_extract, "agency_block_from_next_page", fake_next_page)
         return paths
 
@@ -144,16 +143,16 @@ class TestRescueOpensTheBatchFile:
         return [SheetRow("32417.docx", "", SheetStatus.MANUAL_REVIEW, "全無命中")]
 
     def test_opens_the_file_given_by_path(self, opened, elsewhere):
-        [row] = pipeline.rescue_manual_review_via_agency_phone(
-            Batch.from_file(elsewhere), self._seed(), _OneAgencyRoster())
+        [row] = rescue_from_next_page(
+            Batch.from_file(elsewhere), self._seed(), _OneAgencyRoster(), object())
         assert opened == [elsewhere]
         assert row.permit == "2340"
 
     def test_rescues_even_when_docs_has_no_such_file(self, opened, elsewhere):
         """修好前:./docs 沒有同名檔就靜默跳過。"""
         (elsewhere.parent.parent / "docs" / "32417.docx").unlink()
-        [row] = pipeline.rescue_manual_review_via_agency_phone(
-            Batch.from_file(elsewhere), self._seed(), _OneAgencyRoster())
+        [row] = rescue_from_next_page(
+            Batch.from_file(elsewhere), self._seed(), _OneAgencyRoster(), object())
         assert row.permit == "2340"
         assert opened == [elsewhere]
 
