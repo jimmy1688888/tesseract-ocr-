@@ -56,6 +56,13 @@ class PermitOutcomes:
                 f"+ 反查救援 {len(self.rescue)} 件 "
                 f"+ 讀不到圖 {len(self.direct_review)} 件)")
 
+    def log_review_list(self) -> None:
+        """人工審查清單印在 log 尾,方便人逐份確認(原因在 D 欄)。"""
+        if self.review:
+            logger.info(f"── 人工審查清單(共 {len(self.review)} 件,reason 欄已標註原因)：")
+            for row in self.review:
+                logger.info(f"    {row.source_docx}: {row.reason}")
+
 
 def settle(decisions: list[Decision], batch: Batch, vision: VisionReader,
            roster: PermitLookup | None) -> PermitOutcomes:

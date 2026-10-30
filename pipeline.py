@@ -128,7 +128,7 @@ from retry import is_retryable_google_error, with_retry  # noqa: E402
 # ═══════════════════════════════════════════════════════════════════════════
 
 from vision_reader import IDENTITY_REFUSED, GoogleVisionReader, VisionReader  # noqa: E402
-from permit_outcome import PermitOutcomes, settle  # noqa: E402
+from permit_outcome import settle  # noqa: E402
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -574,14 +574,6 @@ def _image_filter_miss(docx_files: list[Path], image: str) -> str | None:
     return None
 
 
-def _log_review_list(outcomes: PermitOutcomes) -> None:
-    """人工審查清單印在 log 尾,方便人逐份確認(原因在 D 欄)。"""
-    if outcomes.review:
-        logger.info(f"── 人工審查清單(共 {len(outcomes.review)} 件,reason 欄已標註原因)：")
-        for row in outcomes.review:
-            logger.info(f"    {row.source_docx}: {row.reason}")
-
-
 def main(opts: argparse.Namespace, vision: VisionReader | None = None) -> None:
     """主流程。接收已解析的 CLI options，不再依賴 module-level 全域變數。
 
@@ -644,7 +636,7 @@ def main(opts: argparse.Namespace, vision: VisionReader | None = None) -> None:
     logger.info("── 步驟 4d：合併批次寫入 Google Sheets（atomic）──")
     written = write_sheets_batched(outcomes.rows, employer_by_docx, roster)
     logger.info(f"  本次寫入彙總:{outcomes.summary()}(實際寫入 Sheets:{written} 筆)")
-    _log_review_list(outcomes)
+    outcomes.log_review_list()
 
     logger.info("── 全部完成 ──")
 
