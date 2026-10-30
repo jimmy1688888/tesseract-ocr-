@@ -6,7 +6,8 @@ OCR 由參數注入,所以這裡全部不跑 Tesseract、不需要真的影像,�
 在 run_scan 外面把四個模組屬性換掉才碰得到。
 """
 import permit_reading as R
-from permit_reading import PERMIT_VOTE_CONFIGS, ROI_REGIONS, ScanResult
+from matches_csv import ResultStatus, Roi, ScanResult
+from permit_reading import PERMIT_VOTE_CONFIGS, ROI_REGIONS
 from submission_decision import CONF_VOTE_MIN
 
 ROI_NAME = {v: k for k, v in ROI_REGIONS.items()}
@@ -76,7 +77,7 @@ class TestScanImageLarge:
 
         r, _ = _large(ocr)
 
-        assert r.status is R.ResultStatus.PERMIT_PARTIAL
+        assert r.status is ResultStatus.PERMIT_PARTIAL
         # 候選值是多數票那 6 組設定裡信心最高的(不是 first-hit 讀到的第一個)
         i = max(FIRST_HIT.index(c) for c in PERMIT_VOTE_CONFIGS)
         assert i != 0
@@ -130,7 +131,7 @@ class TestFirstHitPerField:
 
         r, _ = _large(ocr)
 
-        assert (r.hit_config, r.hit_roi) == (NON_VOTE[0]["name"], R.Roi.MOL)
+        assert (r.hit_config, r.hit_roi) == (NON_VOTE[0]["name"], Roi.MOL)
         assert (r.mol, r.mol_conf, r.mol_from_vote) == ("1234", 55.0, False)
         assert (r.id, r.id_conf, r.id_from_vote) == ("1284", 65.0, False)
 
@@ -243,6 +244,15 @@ def test_permit_reading_does_not_import_pipeline():
                      if isinstance(n, ast.ImportFrom) and n.module}
     assert "pipeline" not in imported
     assert not {m for m in imported if m.startswith("google")}
+
+
+def test_package_init_only_forwards_its_own_submodules():
+    """__init__ 只轉發 permit_reading 自己子模組的名字,不轉手別人的(#59、ADR-0014)。"""
+    import ast
+    from pathlib import Path
+    tree = ast.parse(Path(R.__file__).read_text(encoding="utf-8"))
+    imports = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+    assert imports and all(isinstance(n, ast.ImportFrom) and n.level == 1 for n in imports)
 
 
 def test_only_the_vote_predicate_comes_from_submission_decision():

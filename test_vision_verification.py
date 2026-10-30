@@ -52,8 +52,8 @@ class TestPermitInText:
 
     def test_same_patterns_as_the_tesseract_scan(self):
         """Tesseract 掃描與 Vision 取號用的是同一份 pattern 與同一個函式。"""
-        import permit_reading
-        assert permit_reading.find_permits is permit_patterns.find_permits
+        from permit_reading import image
+        assert image.find_permits is permit_patterns.find_permits
 
 
 def _item(tmp_path, *, value="1234", roi="permit_lower", crop=True, **kw):

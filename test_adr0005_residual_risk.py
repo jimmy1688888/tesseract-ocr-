@@ -15,7 +15,7 @@ ADR 的例子:mol@image2 = 1234,image4 也印著 1234,image5 多數票讀成 128
 走的是真的分層掃描(read_large_docx)與真的送審決策(decide),只有讀圖是假的。
 """
 import permit_reading as R
-from permit_reading import ScanResult
+from matches_csv import ResultStatus, ScanResult
 from submission_decision import Destination, decide
 
 IMAGES = [(f"image{n}.jpeg", b"") for n in range(1, 8)]
@@ -33,7 +33,7 @@ def _permit_vote(name, value, conf=70.0):
 
 def _partial(name, value, conf=40.0):
     return ScanResult("a.docx", name, "large", id=value, id_conf=conf,
-                      status=R.ResultStatus.PERMIT_PARTIAL, hit_roi="permit_lower",
+                      status=ResultStatus.PERMIT_PARTIAL, hit_roi="permit_lower",
                       permit_crop="p.png")
 
 
