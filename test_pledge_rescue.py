@@ -230,3 +230,25 @@ class TestApplyRescue:
         monkeypatch.setattr(ee, "_scored_pages", lambda p: [])
         ee.extract_employer_from_docx(str(tmp_path / "h.docx"), FakeVision(), roi=None)
         assert calls == []                       # 無內嵌圖就提早返回,更不會救援
+
+
+class TestPledgeVisionFailureShape:
+    """#66 review:沒問到只加自己那一條;非 Vision 的例外照舊不拖垮契約頁的值。"""
+
+    def test_not_extracted_status_gets_only_the_failure_line(self, monkeypatch):
+        """找不到契約頁時本來就沒有「未擷取到中文名」,不該被補上。"""
+        def _failed(p, vision):
+            raise VisionCallFailed("503")
+        monkeypatch.setattr(ee, "rescue_name_from_pledge", _failed)
+        f = ee._apply_pledge_rescue(EmployerExtraction(ExtractionStatus.找不到契約頁),
+                                    "x.docx", FakeVision())
+        assert f.疑慮標示 == "H~O:找不到契約頁,未擷取；H:切結書頁 Vision 呼叫失敗"
+
+    def test_other_errors_still_give_up_quietly(self, tmp_path, pledge_front):
+        pledge_front("image4.jpeg")
+        p = _make_docx(tmp_path / "k.docx", ["image4.jpeg", "image5.jpeg"])
+
+        def _boom(b):
+            raise RuntimeError("讀圖壞了")
+
+        assert ee.rescue_name_from_pledge(p, FakeVision(document=_boom)) == ("", "")

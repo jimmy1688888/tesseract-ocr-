@@ -202,3 +202,15 @@ def test_fifteen_columns_cell_by_cell(world):
     sheets, vision = world
     P.main(_opts(), vision)
     assert sheets == BEFORE_12
+
+
+def test_identity_refused_writes_nothing(world):
+    """#65:403/401 從送 Vision 那一步一路中止,Sheets 一列都不寫。"""
+    from google.api_core.exceptions import PermissionDenied
+    sheets, _ = world
+
+    def refused(image):
+        raise PermissionDenied("403")
+    with pytest.raises(PermissionDenied):
+        P.main(_opts(), FakeVision(sparse=refused))
+    assert sheets == []

@@ -15,6 +15,7 @@ import time
 from typing import Callable, Protocol, runtime_checkable
 
 from google.api_core import exceptions as gax_exceptions
+from google.cloud import vision as gvision
 
 import google_clients
 from retry import is_retryable_google_error, with_retry
@@ -75,12 +76,7 @@ class GoogleVisionReader:
         return _full_text(response)
 
     def _annotate(self, feature: str, image: bytes):
-        return getattr(self._client, feature)(image=_image(image))
-
-
-def _image(content: bytes):
-    from google.cloud import vision as gvision
-    return gvision.Image(content=content)
+        return getattr(self._client, feature)(image=gvision.Image(content=image))
 
 
 def _full_text(response) -> str:

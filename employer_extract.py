@@ -29,7 +29,7 @@ from employer_result import (VALUE_KEYS, WHOLE, Doubt, EmployerExtraction, Emplo
                              ExtractionStatus, Source)
 from tw_phone import phones_in
 
-from vision_reader import VisionCallFailed
+from vision_reader import IDENTITY_REFUSED, VisionCallFailed
 
 if TYPE_CHECKING:
     from vision_reader import VisionReader
@@ -683,8 +683,15 @@ def rescue_name_from_pledge(docx_path: str, vision: VisionReader,
     """
     for name, raw in pledge_name_pages(docx_path, max_pages):
         # Vision 呼叫失敗就往上拋、不換下一頁再打:多半是服務那一端,換一張也一樣
-        # (ADR-0015);沒問到要寫在 L 欄,由 _apply_pledge_rescue 接。
-        got = _pledge_name(vision.read_document(raw))
+        # (ADR-0015);沒問到要寫在 L 欄,由 _apply_pledge_rescue 接。其他例外只是
+        # 少一格值,不該連契約頁讀到的 H~O 一起變成擷取失敗(ADR-0006)。
+        try:
+            got = _pledge_name(vision.read_document(raw))
+        except (VisionCallFailed, *IDENTITY_REFUSED):
+            raise
+        except Exception as e:
+            logger.warning(f"  ⚠ 切結書頁讀取失敗({name}):{e!r}")
+            return "", ""
         if got:
             return got, name
     return "", ""
@@ -1077,9 +1084,15 @@ def _apply_pledge_rescue(result: EmployerExtraction, docx_path: str,
         got, page = rescue_name_from_pledge(docx_path, vision)
     except VisionCallFailed as e:
         logger.warning(f"  ⚠ 切結書頁 {e}({Path(docx_path).name})")
-        # 「未擷取到中文名」仍然是真的:保留,緊接著並列「沒問到」。
-        return replace(result, doubts=_at_missing_name(
-            result.doubts, (_NAME_MISSING, _PLEDGE_VISION_FAILED)))
+        # 「未擷取到中文名」仍然是真的:保留,緊接著並列「沒問到」;沒有那一條
+        # (整份沒擷取)就只加「沒問到」。
+        doubts = result.doubts
+        if _NAME_MISSING in doubts:
+            i = doubts.index(_NAME_MISSING) + 1
+            doubts = doubts[:i] + (_PLEDGE_VISION_FAILED,) + doubts[i:]
+        else:
+            doubts += (_PLEDGE_VISION_FAILED,)
+        return replace(result, doubts=doubts)
     if not got:
         logger.info(f"  切結書頁未取得中文名:{Path(docx_path).name}")
         return result
