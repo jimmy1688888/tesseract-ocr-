@@ -183,7 +183,7 @@ def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
 
     不碰硬碟:命中的裁切圖放在回傳的 crops,由 run_scan 寫出(#18)。
     """
-    result = _empty_result(docx_name, img_name, DocxClass.SMALL)
+    result = empty_result(docx_name, img_name, DocxClass.SMALL)
     crop = _read_roi(result, Roi.MOL, image_bytes, _crop_stem(docx_name, img_name), ocr)
     if crop:
         return Reading(result, [crop])
@@ -208,7 +208,7 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
     也不跑);缺欄時的 permit 上下半多數票照跑。參數注入而非模組全域,行為只依輸入決定。
     """
     stem = _crop_stem(docx_name, img_name)
-    result = _empty_result(docx_name, img_name, DocxClass.LARGE)
+    result = empty_result(docx_name, img_name, DocxClass.LARGE)
     crops = [crop for roi in _rois_to_scan(roi_filter)
              if (crop := _read_roi(result, roi, image_bytes, stem, ocr))]
     if not crops:
@@ -264,9 +264,12 @@ def _adopt_permit_vote(result: ScanResult, vote: Vote) -> None:
     logger.info(f"  → mol 無值，permit 多數票：{vote.value}  avg_conf={vote.conf}")
 
 
-def _empty_result(docx_name: str, img_name: str,
-                  docx_class: DocxClass | None) -> ScanResult:
-    """一張圖還沒讀到任何東西時的 ScanResult(也用來造佔位列)。"""
+def empty_result(docx_name: str, img_name: str,
+                 docx_class: DocxClass | None) -> ScanResult:
+    """一張圖還沒讀到任何東西時的 ScanResult(也用來造佔位列)。
+
+    package 內共用(docx 的佔位列也用它),不經 __init__ 對外轉發。
+    """
     return ScanResult(
         source_docx=docx_name,
         image_name=img_name,

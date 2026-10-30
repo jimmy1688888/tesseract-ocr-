@@ -8,7 +8,7 @@ from typing import NamedTuple
 import docx_images
 from matches_csv import DocxClass, ResultStatus
 
-from .image import Reading, _empty_result
+from .image import Reading, empty_result
 from .tiers import ReadImage, TierOutcome, read_large_docx
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ def scan_docx(docx_name: str, images: list[tuple[str, bytes]] | None,
     """
     nothing = unscannable(images)
     if nothing:
-        placeholder = _empty_result(docx_name, "", None)
+        placeholder = empty_result(docx_name, "", None)
         placeholder.status, placeholder.note = nothing
         logger.warning(f"  ⚠ {docx_name} {placeholder.note}")
         return DocxScan.unreadable(Reading(placeholder, []))
@@ -141,7 +141,7 @@ def _large_rows(docx_name: str, images: list[tuple[str, bytes]],
         return DocxScan.large(scan.readings, [], scan.tier, scan.scanned)
 
     # 全無命中：寫一列佔位列
-    placeholder = _empty_result(docx_name, images[0][0], DocxClass.LARGE)
+    placeholder = empty_result(docx_name, images[0][0], DocxClass.LARGE)
     placeholder.note   = "large:全無命中"
     placeholder.status = ResultStatus.LARGE_NO_HIT
     # 全無命中的份不會有任何命中列,這張佔位列是它在 CSV 裡的唯一
