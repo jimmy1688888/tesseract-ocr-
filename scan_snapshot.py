@@ -98,12 +98,12 @@ def scan(docx_files: list[Path], out_dir: Path, ocr: Ocr) -> dict:
 
     matches.csv 的截圖欄本來就相對它自己的資料夾(#61),原樣比對即可跨次、跨機器。
     """
-    import pipeline
     from batch import Batch
     from permit_reading import scan_image_large, scan_image_mol_only
+    from permit_scan import run_scan
 
     batch = Batch(tuple(docx_files), source=out_dir, output_dir=out_dir)
-    csv_path = pipeline.run_scan(
+    csv_path = run_scan(
         batch,
         read_large=partial(scan_image_large, ocr=ocr),
         read_small=partial(scan_image_mol_only, ocr=ocr))

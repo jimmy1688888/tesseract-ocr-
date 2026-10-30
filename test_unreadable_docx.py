@@ -25,6 +25,7 @@ import google_clients
 import permit_reading as R
 from matches_csv import ResultStatus, ScanResult
 import pipeline as P
+from permit_scan import run_scan
 from batch import Batch
 from employer_result import DOUBT_KEY, EMPLOYER_COLUMNS
 from sheet_row import SheetRow, SheetStatus
@@ -114,7 +115,7 @@ class TestScanWritesPlaceholder:
     @pytest.mark.parametrize("make, reason, status", BAD)
     def test_placeholder_row_in_matches_csv(self, make, reason, status, tmp_path):
         p = make(tmp_path)
-        P.run_scan(Batch((p,), source=tmp_path, output_dir=tmp_path / "out"))
+        run_scan(Batch((p,), source=tmp_path, output_dir=tmp_path / "out"))
 
         [row] = _csv_rows(tmp_path / "out" / "matches.csv")
         r = ScanResult.from_csv_row(row)
@@ -125,7 +126,7 @@ class TestScanWritesPlaceholder:
     def test_bad_file_does_not_stop_the_batch(self, mol_hit, tmp_path):
         """壞檔排在前面:後面的好 docx 照常產出。"""
         bad, good = not_zip(tmp_path), good_small(tmp_path)
-        P.run_scan(Batch((bad, good), source=tmp_path, output_dir=tmp_path / "out"),
+        run_scan(Batch((bad, good), source=tmp_path, output_dir=tmp_path / "out"),
                    read_small=mol_hit)
 
         rows = _csv_rows(tmp_path / "out" / "matches.csv")
@@ -140,7 +141,7 @@ class TestDirectManualReview:
     @pytest.mark.parametrize("make, reason, status", BAD)
     def test_decision(self, make, reason, status, tmp_path):
         p = make(tmp_path)
-        P.run_scan(Batch((p,), source=tmp_path, output_dir=tmp_path))
+        run_scan(Batch((p,), source=tmp_path, output_dir=tmp_path))
         rows = [ScanResult.from_csv_row(r) for r in _csv_rows(tmp_path / "matches.csv")]
 
         d = decide(rows)
@@ -151,7 +152,7 @@ class TestDirectManualReview:
     @pytest.mark.parametrize("make, reason, status", BAD)
     def test_queue_keeps_it_out_of_vision_and_rescue(self, make, reason, status, tmp_path):
         p = make(tmp_path)
-        csv_path = P.run_scan(Batch((p,), source=tmp_path, output_dir=tmp_path))
+        csv_path = run_scan(Batch((p,), source=tmp_path, output_dir=tmp_path))
 
         q = P.build_vision_queue(csv_path)
         assert (q.vision, q.rescue, q.keyin) == ([], [], [])
@@ -165,7 +166,7 @@ def test_every_docx_in_the_batch_is_accounted_for(mol_hit, tmp_path):
     docs = (no_media(tmp_path), emf_only(tmp_path), not_zip(tmp_path),
             corrupt_zip(tmp_path), good_small(tmp_path), large)
 
-    csv_path = P.run_scan(Batch(docs, source=tmp_path, output_dir=tmp_path / "out"),
+    csv_path = run_scan(Batch(docs, source=tmp_path, output_dir=tmp_path / "out"),
                           read_small=mol_hit,
                           read_large=lambda *a, **k: None)   # large 全無命中
 

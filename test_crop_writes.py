@@ -21,7 +21,7 @@ from PIL import Image
 import docx_images
 import permit_reading as R
 from matches_csv import ScanResult
-import pipeline as P
+from permit_scan import run_scan
 from batch import Batch
 
 ROI_NAME = {v: k for k, v in R.ROI_REGIONS.items()}
@@ -114,7 +114,7 @@ class TestRunScanWrites:
             return R.Reading(r, [R.Crop("permit_crops/32503_image5.png", roi)])
         out = tmp_path / "out"
 
-        P.run_scan(Batch((tmp_path / "32503.docx",), source=tmp_path, output_dir=out),
+        run_scan(Batch((tmp_path / "32503.docx",), source=tmp_path, output_dir=out),
                    read_large=large)
 
         [row] = csv.DictReader(open(out / "matches.csv", encoding="utf-8-sig"))

@@ -2,7 +2,7 @@
 """許可證判讀:一張圖的 image bytes → 一次判讀(CONTEXT.md「ROI 掃描」「多數票」「分層掃描」)。
 
 不碰硬碟、不碰網路、不改全域:OCR 由參數注入(預設 tesseract),裁切圖只回傳
-「要寫什麼」(Crop),寫出由 pipeline.run_scan 做(#18)。所以多數票、交叉比對、
+「要寫什麼」(Crop),寫出由 permit_scan.run_scan 做(#18)。所以多數票、交叉比對、
 擴掃決策都能用假 OCR 直接測(#19);以前只能靠 monkeypatch 模組屬性。
 
   scan_image_large / scan_image_mol_only   一張圖 → Reading(ScanResult, crops)

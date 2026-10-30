@@ -18,6 +18,7 @@ import permit_reading as R
 from matches_csv import ResultStatus, ScanResult
 from submission_decision import CONF_VOTE_MIN
 import pipeline as P
+from permit_scan import run_scan
 from batch import Batch
 
 
@@ -52,7 +53,7 @@ class Scanned(dict):
                                       status=ResultStatus.SMALL_NO_HIT), [])
 
     def run(self, batch, **kw):
-        return P.run_scan(batch, read_large=self.large, read_small=self.small, **kw)
+        return run_scan(batch, read_large=self.large, read_small=self.small, **kw)
 
 
 @pytest.fixture
