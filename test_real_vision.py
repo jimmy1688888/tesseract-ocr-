@@ -41,10 +41,9 @@ def test_read_sparse_keys_in_the_checked_permit_of_30768():
     if not items or not Path(items[0].img_path).exists():
         pytest.skip("30768 送 Vision 的截圖不在最新的某日掃描")
 
-    auto, review = run_vision_items(items, GoogleVisionReader())
+    checks = run_vision_items(items, GoogleVisionReader())
 
-    assert review == []
-    assert [r.permit for r in auto] == [rs.checked_permit("30768")]
+    assert [(c.value, c.keyin) for c in checks] == [(rs.checked_permit("30768"), True)]
 
 
 def test_read_document_reads_the_checked_employer_name_of_33703(real_ocr):

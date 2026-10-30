@@ -10,7 +10,7 @@ Vision、名冊、次頁台仲區塊全用替身,資料全部捏造。
 import pytest
 
 from batch import Batch
-from conftest import FakeVision
+from conftest import ROOT, FakeVision, project_sources
 from matches_csv import Roi
 from sheet_row import SheetRow, SheetStatus
 from submission_decision import Decision, Destination
@@ -187,3 +187,32 @@ def test_roster_unavailable_skips_the_rescue_and_keeps_the_seeds(monkeypatch, wo
     rows = settle(monkeypatch, rescues, batch, vision, None, must_not_read)
     assert rows == [SheetRow(d.source_docx, d.candidate_value, REVIEW, d.reason) for d in rescues]
     assert vision.document_reads == []
+
+
+# ── D 欄只在一處組成(#72)────────────────────────────────────────────────────
+
+REASON_MODULE = "permit_outcome/reason.py"
+
+
+def _production_sources():
+    return [p for p in project_sources()
+            if not p.name.startswith(("test_", "conftest"))]
+
+
+def _relative(p):
+    return p.relative_to(ROOT).as_posix()
+
+
+@pytest.mark.parametrize("piece", ["[送Vision原因]", "[Vision結果]", " ／ "])
+def test_labels_and_separators_live_only_in_the_reason_module(piece):
+    holders = [_relative(p) for p in _production_sources()
+               if piece in p.read_text(encoding="utf-8")]
+    assert holders == [REASON_MODULE]
+
+
+def test_rescue_fragments_are_joined_only_in_the_reason_module():
+    """反查救援的片段本身不帶「；」;接上去的那一下只在 reason。"""
+    holders = [_relative(p) for p in _production_sources()
+               if p.parent.name in ("permit_outcome", "permit_lookup")
+               and "；" in p.read_text(encoding="utf-8")]
+    assert holders == [REASON_MODULE]

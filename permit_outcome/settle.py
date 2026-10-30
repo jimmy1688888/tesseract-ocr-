@@ -18,8 +18,9 @@ from permit_lookup import PermitLookup
 from sheet_row import SheetRow, SheetStatus
 from submission_decision import Decision, Destination
 from vision_reader import VisionReader
-from vision_verification import run_vision_items
+from vision_verification import VisionCheck, run_vision_items
 
+from .reason import vision_reason
 from .rescue import rescue_from_next_page
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,7 @@ def settle(decisions: list[Decision], batch: Batch, vision: VisionReader,
     # 雙引擎(Tesseract + Vision)完全一致才自動 key-in;其餘人工審查,避免任何單一
     # OCR 引擎的判讀直接決定資料寫入。差 1 字元也不自動填值(見 verify_vision_result)。
     logger.info("── 步驟 4a：Google Vision 判讀 + 交叉比對 ──")
-    confirmed, vision_review = run_vision_items(by_destination[Destination.送VISION], vision)
+    checks = run_vision_items(by_destination[Destination.送VISION], vision)
 
     seeds = [SheetRow(d.source_docx, d.candidate_value, SheetStatus.MANUAL_REVIEW, d.reason)
              for d in by_destination[Destination.反查救援]]
@@ -80,12 +81,17 @@ def settle(decisions: list[Decision], batch: Batch, vision: VisionReader,
     return PermitOutcomes(
         keyin=[SheetRow(d.source_docx, d.candidate_value, SheetStatus.KEYED_IN, d.reason)
                for d in by_destination[Destination.直接KEYIN]],
-        vision_confirmed=confirmed,
-        vision_review=vision_review,
+        vision_confirmed=[_vision_row(c) for c in checks if c.keyin],
+        vision_review=[_vision_row(c) for c in checks if not c.keyin],
         rescue=rescued,
         direct_review=[SheetRow(d.source_docx, "", SheetStatus.MANUAL_REVIEW, d.reason)
                        for d in by_destination[Destination.直接人工審查]],
     )
+
+
+def _vision_row(check: VisionCheck) -> SheetRow:
+    status = SheetStatus.KEYED_IN if check.keyin else SheetStatus.MANUAL_REVIEW
+    return SheetRow(check.decision.source_docx, check.value, status, vision_reason(check))
 
 
 def _by_destination(decisions: list[Decision]) -> dict[Destination, list[Decision]]:

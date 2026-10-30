@@ -15,7 +15,6 @@ from matches_csv import ResultStatus, ScanResult
 from submission_decision import (CONF_KEY_IN, CONF_MOL_VOTE_MIN, CONF_NOVOTE_RESCUE_MAX,
                                  CONF_VOTE_MIN, Destination, decide, is_permit_vote,
                                  read_decisions)
-from sheet_row import SheetStatus
 from conftest import FakeVision
 from vision_verification import run_vision_items
 
@@ -411,9 +410,9 @@ class TestCropPathFromCsv:
             "image5.jpeg", "1234", 60, partial=True, permit_crop="")])
         assert d.img_path == ""
         vision = FakeVision(sparse=lambda b: "")
-        auto, review = run_vision_items([d], vision)
-        assert (vision.sparse_reads, auto) == ([], [])
-        assert [r.status for r in review] == [SheetStatus.MANUAL_REVIEW]
+        [check] = run_vision_items([d], vision)
+        assert vision.sparse_reads == []
+        assert (check.keyin, check.verified) == (False, False)
 
     def test_old_files_with_absolute_paths_still_open(self, tmp_path):
         old = str(tmp_path / "elsewhere" / "permit_crops" / "a_image5.png")

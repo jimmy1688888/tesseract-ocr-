@@ -10,7 +10,7 @@
 import pytest
 
 from permit_lookup import AgencyPick, pick_agency
-from permit_outcome.rescue import RESCUE_NOT_DONE, rescue_from_next_page
+from permit_outcome.rescue import rescue_from_next_page
 from sheet_row import SheetRow, SheetStatus
 
 
@@ -149,7 +149,7 @@ class TestNothing:
         assert pick_agency(_block(["0299999999"], name="查無", address="查無"), Roster()) == AgencyPick()
 
 
-NOT_DONE = RESCUE_NOT_DONE
+NOT_DONE = "；反查救援未完成:次頁 Vision 呼叫失敗"
 
 
 class TestRescueReturnsNewRows:

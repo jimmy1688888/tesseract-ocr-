@@ -11,7 +11,6 @@ from dataclasses import replace as _replace
 
 import pytest
 
-from sheet_row import SheetStatus
 from submission_decision import Decision, Destination
 from conftest import FakeVision
 from vision_reader import VisionCallFailed
@@ -30,23 +29,18 @@ def _item(img_path, **kw):
 def test_missing_crop_goes_to_manual_review_not_nowhere(tmp_path, img_path):
     path = str(tmp_path / "nope.png") if img_path == "MISSING" else ""
     vision = FakeVision(sparse=lambda b: "No. Izin: 1234")
-    auto, review = run_vision_items([_item(path)], vision)
+    [check] = run_vision_items([_item(path)], vision)
     assert vision.sparse_reads == []                     # 沒圖就不打 Vision
-    assert auto == []
-    assert len(review) == 1
-    row = review[0]
-    assert (row.source_docx, row.permit, row.status) == ("a.docx", "1234", SheetStatus.MANUAL_REVIEW)
-    assert "截圖檔不在,未送 Vision" in row.reason
-    assert "permit部分命中無多數" in row.reason           # 送 Vision 的原因照樣留著
+    assert (check.decision.source_docx, check.value, check.keyin) == ("a.docx", "1234", False)
+    assert (check.finding, check.verified) == ("截圖檔不在,未送 Vision", False)
 
 
 def test_existing_crop_still_goes_through_vision(tmp_path):
     crop = tmp_path / "crop.png"
     crop.write_bytes(b"x")
-    auto, review = run_vision_items(
+    [check] = run_vision_items(
         [_item(str(crop))], FakeVision(sparse=lambda b: "No. Izin: 1234"))
-    assert [(r.permit, r.status) for r in auto] == [("1234", SheetStatus.KEYED_IN)]
-    assert review == []
+    assert (check.value, check.keyin, check.verified) == ("1234", True, True)
 
 
 class TestVisionCallFailed:
@@ -61,12 +55,10 @@ class TestVisionCallFailed:
     def test_failed_one_goes_to_manual_review_with_the_candidate(self, tmp_path):
         def read(image):
             raise VisionCallFailed("503")
-        auto, review = run_vision_items([_item(self._crop(tmp_path, "a"))],
-                                        FakeVision(sparse=read))
-        assert auto == []
-        [row] = review
-        assert (row.permit, row.status) == ("1234", SheetStatus.MANUAL_REVIEW)
-        assert row.reason == "[送Vision原因] permit部分命中無多數 ／ Vision 呼叫失敗,未驗證"
+        [check] = run_vision_items([_item(self._crop(tmp_path, "a"))],
+                                   FakeVision(sparse=read))
+        assert (check.value, check.keyin) == ("1234", False)
+        assert (check.finding, check.verified) == ("Vision 呼叫失敗,未驗證", False)
 
     def test_others_are_still_verified(self, tmp_path):
         def read(image):
@@ -75,9 +67,9 @@ class TestVisionCallFailed:
             return "No. Izin: 1234"
         items = [_item(self._crop(tmp_path, "bad")),
                  _replace(_item(self._crop(tmp_path, "ok")), source_docx="b.docx")]
-        auto, review = run_vision_items(items, FakeVision(sparse=read))
-        assert [(r.source_docx, r.status) for r in auto] == [("b.docx", SheetStatus.KEYED_IN)]
-        assert [r.source_docx for r in review] == ["a.docx"]
+        checks = run_vision_items(items, FakeVision(sparse=read))
+        assert [(c.decision.source_docx, c.keyin) for c in checks] == [("a.docx", False),
+                                                                     ("b.docx", True)]
 
     def test_identity_refused_still_aborts(self, tmp_path):
         from google.api_core.exceptions import PermissionDenied

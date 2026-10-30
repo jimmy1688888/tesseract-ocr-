@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Vision 驗證:一個「送 Vision」的送審決策 → 一列 Sheets 結果,絕不回空(#41)。
+"""Vision 驗證:一個「送 Vision」的送審決策 → 一個驗證結果,絕不回空(#41)。
+
+驗證結果只交事實(B 欄的值、要不要自動寫入、Vision 那一段說明);D 欄怎麼組
+(標籤、分隔、順序)在 permit_outcome(#72)。
 
 Vision(VisionReader,截圖 bytes → 全文)放在 seam 後,由呼叫端傳入;取號與 Tesseract 共用
 permit_patterns,依截圖所屬的 ROI 選 pattern。
@@ -12,35 +15,43 @@ from enum import Enum
 from pathlib import Path
 
 from permit_patterns import permit_in_text
-from sheet_row import SheetRow, SheetStatus
 from submission_decision import Decision
 from vision_reader import VisionCallFailed, VisionReader
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["VerificationLevel", "VerifiedResult", "run_vision_items",
+__all__ = ["VerificationLevel", "VerifiedResult", "VisionCheck", "run_vision_items",
            "verify_vision_result"]
 
 
-def run_vision_items(decisions: list[Decision], vision: VisionReader
-                     ) -> tuple[list[SheetRow], list[SheetRow]]:
-    """送 Vision 那一步:每一個送 Vision 的決定都分到 (自動寫入, 人工審查) 其中**一處**,
-    絕不丟掉。
+@dataclass(frozen=True)
+class VisionCheck:
+    """一個送 Vision 的決定驗完的結果。
+
+    value   :B 欄的值(差 1 字元時為空、Vision 沒取到號時留 Tesseract 候選值)。
+    keyin   :雙引擎一致才 True(自動寫入);其餘人工審查。
+    finding :Vision 那一段說明 —— verified 時是交叉比對的理由,否則是沒驗成的事實。
+    verified:有送出且拿到 Vision 的回應(交叉比對過)。
+    """
+    decision: Decision
+    value: str
+    keyin: bool
+    finding: str
+    verified: bool
+
+
+def run_vision_items(decisions: list[Decision], vision: VisionReader) -> list[VisionCheck]:
+    """送 Vision 那一步:每一個送 Vision 的決定都有一個驗證結果(同序),絕不丟掉。
 
     vision 讀截圖上的零星字(read_sparse;正式流程是 GoogleVisionReader,測試換假的)。
     取號依截圖所屬的 ROI(d.hit_roi),與 Tesseract 同一個函式。
     雙引擎完全一致才自動寫入;其餘進人工審查(交叉比對見 verify_vision_result)。
     """
-    auto: list[SheetRow] = []    # 雙引擎一致(CONFIRMED) → 自動寫
-    review: list[SheetRow] = []  # 任何不一致、沒驗成 → 人工審查
-    for d in decisions:
-        row = _verify(d, vision)
-        (auto if row.status is SheetStatus.KEYED_IN else review).append(row)
-    return auto, review
+    return [_verify(d, vision) for d in decisions]
 
 
-def _verify(d: Decision, vision: VisionReader) -> SheetRow:
-    """一個送 Vision 的決定 → 它的那一列。"""
+def _verify(d: Decision, vision: VisionReader) -> VisionCheck:
+    """一個送 Vision 的決定 → 它的驗證結果。"""
     # 截圖不在:舊做法 continue,整份 docx 從 Sheets 消失(#39)。改進人工審查,
     # 比照 Vision 沒讀到值:B 欄留 Tesseract 候選值、理由只講事實。
     if not d.img_path or not Path(d.img_path).exists():
@@ -64,15 +75,13 @@ def _verify(d: Decision, vision: VisionReader) -> SheetRow:
         f"  vision={vision_value!r}"
         f"  → {verified.level.value}(keyin={verified.should_keyin})"
     )
-    status = SheetStatus.KEYED_IN if verified.should_keyin else SheetStatus.MANUAL_REVIEW
-    return SheetRow(d.source_docx, verified.final_value, status,
-                    f"[送Vision原因] {d.reason} ／ [Vision結果] {verified.rationale}")
+    return VisionCheck(d, verified.final_value, verified.should_keyin, verified.rationale,
+                       verified=True)
 
 
-def _unverified(d: Decision, fact: str) -> SheetRow:
-    """沒驗成的那一份:人工審查,B 欄留 Tesseract 候選值,理由只講事實。"""
-    return SheetRow(d.source_docx, d.candidate_value, SheetStatus.MANUAL_REVIEW,
-                    f"[送Vision原因] {d.reason} ／ {fact}")
+def _unverified(d: Decision, fact: str) -> VisionCheck:
+    """沒驗成的那一份:人工審查,B 欄留 Tesseract 候選值,說明只講事實。"""
+    return VisionCheck(d, d.candidate_value, False, fact, verified=False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

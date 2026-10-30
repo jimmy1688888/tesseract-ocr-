@@ -16,9 +16,11 @@ from permit_lookup import PermitLookup, pick_agency
 from sheet_row import SheetRow
 from vision_reader import IDENTITY_REFUSED, VisionCallFailed, VisionReader
 
+from .reason import appended
+
 logger = logging.getLogger(__name__)
 
-RESCUE_NOT_DONE = "；反查救援未完成:次頁 Vision 呼叫失敗"
+RESCUE_NOT_DONE = "反查救援未完成:次頁 Vision 呼叫失敗"
 _NO_BLOCK = {"phones": [], "name": "", "address": ""}
 
 
@@ -64,13 +66,13 @@ def rescue_from_next_page(batch: Batch, seeds: list[SheetRow], roster: PermitLoo
             block_cache[docx_name] = _next_page_block(docx_path, vision)
         if block_cache[docx_name] is None:
             # 沒救 ≠ 救不回:救不回不註明,沒問到要說(CONTEXT「反查救援」、ADR-0015)
-            out.append(replace(row, reason=f"{row.reason}{RESCUE_NOT_DONE}"))
+            out.append(replace(row, reason=appended(row.reason, RESCUE_NOT_DONE)))
             continue
         pick = pick_agency(block_cache[docx_name], roster)
         if pick.note:
             # 要人工擇一時沒有許可證:B 欄留種子值(全無命中是空、單一判讀是候選值)
             row = replace(row, permit=pick.permit or row.permit,
-                          reason=f"{row.reason}；{pick.note}")
+                          reason=appended(row.reason, pick.note))
             rescued += bool(pick.permit)
             logger.info(f"  {'↻' if pick.permit else '⚠'} {docx_name} {pick.note}")
         out.append(row)

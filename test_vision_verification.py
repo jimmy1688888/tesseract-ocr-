@@ -9,7 +9,6 @@ Vision client 只負責「截圖 → 全文」,放在 seam 後(測試換假的)�
 import pytest
 
 import permit_patterns
-from sheet_row import SheetStatus
 from submission_decision import Decision, Destination
 from permit_patterns import permit_in_text
 from conftest import FakeVision
@@ -77,37 +76,32 @@ class TestOneRowPerItem:
         ("什麼都沒有", "review", "1234"),               # Vision 無值 → 留候選值
     ])
     def test_each_verification_level_lands_in_one_place(self, tmp_path, vision_text, where, b):
-        auto, review = run_vision_items(
+        [check] = run_vision_items(
             [_item(tmp_path)], FakeVision(sparse=lambda b: vision_text))
-        rows = {"auto": auto, "review": review}[where]
-        assert len(rows) == 1 and len(auto) + len(review) == 1
-        assert rows[0].permit == b
-        assert rows[0].status is {"auto": SheetStatus.KEYED_IN,
-                                  "review": SheetStatus.MANUAL_REVIEW}[where]
+        assert (check.value, check.keyin) == (b, where == "auto")
 
     def test_vision_only_when_tesseract_had_nothing(self, tmp_path):
-        auto, review = run_vision_items(
+        [check] = run_vision_items(
             [_item(tmp_path, value="")],
             FakeVision(sparse=lambda b: "No. Izin 1234"))
-        assert auto == [] and review[0].permit == "1234"
+        assert (check.value, check.keyin) == ("1234", False)
 
     def test_every_item_gets_exactly_one_row(self, tmp_path):
         items = [_item(tmp_path, value="1234"),
                  _item(tmp_path, value="2222", crop=False),
                  _item(tmp_path, value="3333"),
                  _item(tmp_path, value="4444")]
-        auto, review = run_vision_items(
+        checks = run_vision_items(
             items, FakeVision(sparse=lambda b: "No. Izin 1234"))
-        assert len(auto) + len(review) == len(items)
-        assert sorted(r.source_docx for r in auto + review) == ["a.docx"] * 4
+        assert [c.decision for c in checks] == items
 
     def test_roi_decides_the_pattern(self, tmp_path):
         """同一段 Vision 文字,下半部截圖取得出、上半部截圖取不出(依 ROI 選 pattern)。"""
-        lower, _ = run_vision_items([_item(tmp_path, roi="permit_lower")],
-                                    FakeVision(sparse=lambda b: "No. Izin 1234"))
-        upper, _ = run_vision_items([_item(tmp_path, roi="permit_upper")],
-                                    FakeVision(sparse=lambda b: "No. Izin 1234"))
-        assert len(lower) == 1 and upper == []
+        [lower] = run_vision_items([_item(tmp_path, roi="permit_lower")],
+                                   FakeVision(sparse=lambda b: "No. Izin 1234"))
+        [upper] = run_vision_items([_item(tmp_path, roi="permit_upper")],
+                                   FakeVision(sparse=lambda b: "No. Izin 1234"))
+        assert lower.keyin and not upper.keyin
 
 
 class TestRealVisionReplay:
@@ -129,9 +123,9 @@ class TestRealVisionReplay:
             pytest.skip("送 Vision 的截圖不在最新的某日掃描 samples/permit_scan/<日期>/permit_crops")
 
         by_crop = {Path(i.img_path).read_bytes(): texts[Path(i.img_path).name] for i in items}
-        auto, review = run_vision_items(items, FakeVision(sparse=lambda b: by_crop[b]))
+        checks = run_vision_items(items, FakeVision(sparse=lambda b: by_crop[b]))
 
-        assert review == []
-        got = {Path(r.source_docx).stem: r.permit for r in auto}
+        assert all(c.keyin for c in checks)
+        got = {Path(c.decision.source_docx).stem: c.value for c in checks}
         assert got == {stem: rs.checked_permit(stem) for stem in got}
         assert len(got) == len(texts)
