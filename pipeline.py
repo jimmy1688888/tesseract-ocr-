@@ -620,8 +620,7 @@ def main(opts: argparse.Namespace, vision: VisionReader | None = None) -> None:
 
     # ── 步驟 3、4a、4b：送審決策 → 許可證判讀結果(Vision 驗證、反查救援)──
     # Vision reader 一批只建一個,許可證與雇主兩側共用;拿不到憑證就在這裡整批中止,
-    # 還沒寫 Sheets(test_no_credentials)。
-    logger.info("── 步驟 3：送審決策 ──")
+    # 還沒寫 Sheets(test_no_credentials)。步驟 3~4b 的標題由 settle 自己印。
     vision = vision or GoogleVisionReader()
     outcomes = settle(read_decisions(csv_path), batch, vision, roster)
 

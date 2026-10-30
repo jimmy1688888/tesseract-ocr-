@@ -114,6 +114,7 @@ def _by_destination(decisions: list[Decision]) -> dict[Destination, list[Decisio
 
 
 def _log_destinations(by_destination: dict[Destination, list[Decision]]) -> None:
+    logger.info("── 步驟 3：送審決策 ──")
     logger.info(f"  直接 key-in：{len(by_destination[Destination.直接KEYIN])} 筆")
     logger.info(f"  送 Vision  ：{len(by_destination[Destination.送VISION])} 筆")
     logger.info(f"  反查救援   ：{len(by_destination[Destination.反查救援])} 件")
