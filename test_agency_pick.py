@@ -9,7 +9,8 @@
 """
 import pytest
 
-from pipeline import AgencyPick, pick_agency, rescue_manual_review_via_agency_phone
+from permit_lookup import AgencyPick, pick_agency
+from pipeline import rescue_manual_review_via_agency_phone
 from sheet_row import SheetRow, SheetStatus
 
 

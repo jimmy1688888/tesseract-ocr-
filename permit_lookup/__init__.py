@@ -15,13 +15,15 @@
     if info is None:                    # 查無 → 交人工補
         ...
 
-package 的三塊(ADR-0014;依賴單向 lookup → matching → roster):
-  roster    名冊讀檔、併入自建補充仲介、許可證索引
-  matching  電話欄拆號碼與電話索引、機構名稱/地址的相似度比對
-  lookup    查表器 PermitLookup 與一批載一次的 load_roster
-這裡只轉發三塊的公開名字;別人的名字(PHONE_MIN_LEN 在 tw_phone)到主人那裡取。
+package 的四塊(ADR-0014;依賴單向 rescue_pick → lookup → matching → roster):
+  roster       名冊讀檔、併入自建補充仲介、許可證索引
+  matching     電話欄拆號碼與電話索引、機構名稱/地址的相似度比對
+  lookup       查表器 PermitLookup 與一批載一次的 load_roster
+  rescue_pick  反查救援的決策梯:台仲區塊 → 名冊挑一家(pick_agency)
+這裡只轉發四塊的公開名字;別人的名字(PHONE_MIN_LEN 在 tw_phone)到主人那裡取。
 """
 from .lookup import PermitLookup, load_roster
 from .matching import ADDR_MATCH_MIN, NAME_MATCH_MIN, build_phone_index, split_phone_field
+from .rescue_pick import AgencyPick, pick_agency
 from .roster import (CUSTOM_ROSTER_PATH, ROSTER_JSON_URL, ROSTER_PATH, ROSTER_STALE_DAYS,
                      build_indices, fetch_roster, merge_custom_agencies)
