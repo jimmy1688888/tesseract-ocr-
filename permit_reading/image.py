@@ -22,12 +22,12 @@ ROI_REGIONS = {
 }
 
 
-def _collect_permit_votes(image_bytes: bytes, roi_coords: tuple, ocr: Ocr,
-                          permit_id_list=None) -> list[tuple[str, float]]:
+def _collect_permit_votes(image_bytes: bytes, roi: Roi, ocr: Ocr) -> list[tuple[str, float]]:
+    """permit 的一半以 PERMIT_VOTE_CONFIGS（6組）逐一掃描，回傳 (值, conf) 清單。"""
     entries: list[tuple[str, float]] = []
     for cfg in PERMIT_VOTE_CONFIGS:
-        text, conf = ocr(image_bytes, cfg, roi_coords)
-        id_, _, _, _ = find_permits(text, permit_id_list)
+        text, conf = ocr(image_bytes, cfg, ROI_REGIONS[roi])
+        id_, _, _, _ = find_permits(text, permit_id_patterns(roi))
         if id_:
             entries.append((id_, conf))
     return entries
@@ -122,152 +122,138 @@ def _apply_mol_vote(result: ScanResult, image_bytes: bytes, stem: str,
     return _fill_crop(result, Roi.MOL, stem)
 
 
+def _find_in_roi(text: str, roi: Roi) -> tuple[str, int]:
+    """這個 ROI 那一欄的值與命中的 pattern 層:permit 的一半只找許可證號,mol 只找 mol。"""
+    if roi.is_permit:
+        id_, id_layer, _, _ = find_permits(text, permit_id_patterns(roi), find_mol=False)
+        return id_, id_layer
+    _, _, mol, mol_layer = find_permits(text, find_id=False)
+    return mol, mol_layer
+
+
+def _field_filled(result: ScanResult, roi: Roi) -> bool:
+    return bool(result.id if roi.is_permit else result.mol)
+
+
+def _record_first_hit(result: ScanResult, roi: Roi, value: str, layer: int,
+                      conf: float, config_name: str) -> None:
+    if roi.is_permit:
+        result.id, result.id_layer, result.id_conf = value, layer, conf
+    else:
+        result.mol, result.mol_layer, result.mol_conf = value, layer, conf
+    # 命中設定與 ROI 記整張圖第一個 first-hit;mol 多數票只標了 ROI、沒有設定,
+    # 所以之後 permit 的 first-hit 會把命中 ROI 改成 permit 那一半(沿用舊行為)
+    if not result.hit_config:
+        result.hit_config, result.hit_roi = config_name, roi
+
+
+def _first_hit(result: ScanResult, roi: Roi, image_bytes: bytes, stem: str,
+               ocr: Ocr) -> Crop | None:
+    """SCAN_CONFIGS → FALLBACK_CONFIGS 依序讀,第一個讀到值的設定就採用。"""
+    for cfg in SCAN_CONFIGS + FALLBACK_CONFIGS:
+        text, conf = ocr(image_bytes, cfg, ROI_REGIONS[roi])
+        logger.debug(f"  ✗ {roi}/{cfg['name']}  conf={conf:.0f}  text={text[:400]!r}")
+        value, layer = _find_in_roi(text, roi)
+        if value:
+            _record_first_hit(result, roi, value, layer, conf, cfg["name"])
+            logger.debug(f"  ★ {roi}/{cfg['name']}  conf={conf}  value={value!r}")
+            return _fill_crop(result, roi, stem)
+    return None
+
+
+def _read_roi(result: ScanResult, roi: Roi, image_bytes: bytes, stem: str,
+              ocr: Ocr) -> Crop | None:
+    """讀一個 ROI,讀到就填進 result 那一欄,回傳要寫出的裁切圖;沒讀到回傳 None。
+
+    每欄只收第一個命中的 ROI:那一欄已有值(permit 上半已命中)就不再讀。
+    mol 先跑多數票,沒有贏家才退回 first-hit;small 與 large 共用(以前是兩段複製,#17)。
+    """
+    if _field_filled(result, roi):
+        return None
+    if roi is Roi.MOL:
+        vote_crop = _apply_mol_vote(result, image_bytes, stem, ocr)
+        if vote_crop:
+            return vote_crop
+    return _first_hit(result, roi, image_bytes, stem, ocr)
+
+
 def scan_image_mol_only(docx_name: str, img_name: str, image_bytes: bytes,
                         ocr: Ocr = tesseract) -> Reading:
-    """small docx 專用：只掃 mol ROI。
-
-    第一階段先跑 PERMIT_VOTE_CONFIGS 多數票；有多數票直接採用並標記 mol_from_vote=True。
-    無多數票時退回 first-hit（SCAN_CONFIGS → FALLBACK_CONFIGS）。
+    """small docx 專用：只掃 mol ROI(多數票 → first-hit)。
 
     不碰硬碟:命中的裁切圖放在回傳的 crops,由 run_scan 寫出(#18)。
     """
-    stem = _crop_stem(docx_name, img_name)
     result = _empty_result(docx_name, img_name, DocxClass.SMALL)
-    roi_coords = ROI_REGIONS[Roi.MOL]
-
-    # ── 第一階段：多數票（PERMIT_VOTE_CONFIGS 6組）────────────────────
-    vote_crop = _apply_mol_vote(result, image_bytes, stem, ocr)
-    if vote_crop:
-        return Reading(result, [vote_crop])
-
-    # ── 第二階段：first-hit（SCAN_CONFIGS → FALLBACK_CONFIGS）────────
-    crops: list[Crop] = []
-    for cfg in SCAN_CONFIGS + FALLBACK_CONFIGS:
-        text, conf = ocr(image_bytes, cfg, roi_coords)
-        logger.debug(f"  ✗ mol/{cfg['name']}  conf={conf:.0f}  text={text[:400]!r}")
-        _, _, mol, mol_layer = find_permits(text)
-        if not mol:
-            continue
-        result.mol       = mol
-        result.mol_layer = mol_layer
-        result.mol_conf  = conf
-        result.hit_config = cfg["name"]
-        result.hit_roi   = Roi.MOL
-        crops.append(_fill_crop(result, Roi.MOL, stem))
-        logger.debug(f"  ★ mol/{cfg['name']}  conf={conf}  mol={mol!r}")
-        return Reading(result, crops)
-
+    crop = _read_roi(result, Roi.MOL, image_bytes, _crop_stem(docx_name, img_name), ocr)
+    if crop:
+        return Reading(result, [crop])
     result.note = "mol 無值"
     logger.info(f"  ⚠ {img_name}: mol 無值")
-    return Reading(result, crops)
+    return Reading(result, [])
+
+
+def _rois_to_scan(roi_filter: str) -> list[Roi]:
+    """依序要讀的 ROI;roi_filter(--roi)非空就只讀那一個。"""
+    return [roi for roi in ROI_REGIONS if not roi_filter or roi == roi_filter]
 
 
 def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
                      roi_filter: str = "", ocr: Ocr = tesseract) -> Reading | None:
     """large docx 專用：掃 mol + permit。全無命中回傳 None。
 
+    先逐 ROI 找第一次命中(每欄只收第一個 ROI),再以 permit 多數票補缺的那欄、互證兩欄。
     不碰硬碟:命中的裁切圖放在回傳的 crops,由 run_scan 寫出(#18)。
 
-    roi_filter：若非空字串，只掃指定的 ROI（對應 CLI --roi）。
-    過去版本由 module-level ROI_FILTER 全域變數承載，現改為參數注入，
-    讓函數行為僅依輸入決定，方便測試與並行化。
+    roi_filter：若非空字串，只在 first-hit 時讀指定的 ROI（對應 CLI --roi）;
+    參數注入而非模組全域,行為只依輸入決定。
     """
     stem = _crop_stem(docx_name, img_name)
     result = _empty_result(docx_name, img_name, DocxClass.LARGE)
-    crops: list[Crop] = []
-    fields_found: set[str] = set()
-    any_hit = False
-
-    for roi_name, roi_coords in ROI_REGIONS.items():
-        if roi_filter and roi_name != roi_filter:
-            continue
-        field = roi_name.field
-        if field in fields_found:
-            continue
-
-        # ── mol ROI：先嘗試多數票（PERMIT_VOTE_CONFIGS 6組）────────────
-        if roi_name is Roi.MOL:
-            vote_crop = _apply_mol_vote(result, image_bytes, stem, ocr)
-            if vote_crop:
-                crops.append(vote_crop)
-                any_hit = True
-                fields_found.add(field)
-                continue   # 跳過 mol ROI 的 first-hit
-
-        for cfg in SCAN_CONFIGS + FALLBACK_CONFIGS:
-            text, conf = ocr(image_bytes, cfg, roi_coords)
-            logger.debug(
-                f"  ✗ {roi_name}/{cfg['name']}  conf={conf:.0f}"
-                f"  text={text[:400]!r}"
-            )
-            is_permit_roi = roi_name.is_permit
-            permit_id_list = permit_id_patterns(roi_name) if is_permit_roi else None
-            id_, id_layer, mol, mol_layer = find_permits(
-                text, permit_id_list,
-                find_mol=not is_permit_roi,
-                find_id=is_permit_roi,
-            )
-            if not (id_ or mol):
-                continue
-            if id_:
-                result.id = id_
-                result.id_layer = id_layer
-                if not result.id_conf:
-                    result.id_conf = conf
-            if mol:
-                result.mol = mol
-                result.mol_layer = mol_layer
-                if not result.mol_conf:
-                    result.mol_conf = conf
-            if not result.hit_config:
-                result.hit_config = cfg["name"]
-                result.hit_roi = roi_name
-            any_hit = True
-            fields_found.add(field)
-            # 對應欄位的 crop（mol 或 permit）,每欄只寫第一個命中的 ROI
-            crops.append(_fill_crop(result, roi_name, stem))
-            logger.debug(f"  ★ {roi_name}/{cfg['name']}  conf={conf}  id={id_!r} mol={mol!r}")
-            break
-
-    if not any_hit:
+    crops = [crop for roi in _rois_to_scan(roi_filter)
+             if (crop := _read_roi(result, roi, image_bytes, stem, ocr))]
+    if not crops:
         return None
-
-    mol_val    = result.mol
-    permit_val = result.id
-    permit_vote_avg_conf = 0.0
-
-    if not mol_val or not permit_val:
-        upper_entries = _collect_permit_votes(image_bytes, ROI_REGIONS[Roi.PERMIT_UPPER], ocr)
-        lower_entries = _collect_permit_votes(
-            image_bytes, ROI_REGIONS[Roi.PERMIT_LOWER], ocr,
-            permit_id_list=permit_id_patterns(Roi.PERMIT_LOWER))
-        all_entries = upper_entries + lower_entries
-        vote = majority_vote(all_entries)
-        permit_vote, permit_vote_avg_conf = vote.value, vote.conf
-        if not vote and all_entries:
-            best = max(all_entries, key=lambda x: x[1])
-            result.id = best[0]
-            result.id_conf = float(best[1])
-            result.status = ResultStatus.PERMIT_PARTIAL
-            logger.info(
-                f"  ⚠ permit 有部分命中({len(all_entries)}筆)但無多數"
-                f"  → 候選值={best[0]!r} conf={best[1]:.0f}"
-                f"  all={[v for v,_ in all_entries]}"
-            )
-    else:
-        permit_vote = permit_val
-
-    if mol_val and permit_vote and mol_val == permit_vote:
-        result.cross_match = True
-        logger.info(f"  ✓ 交叉比對吻合：{mol_val}")
-    elif not mol_val and permit_vote:
-        result.id = permit_vote
-        result.id_layer = 0
-        result.id_conf = permit_vote_avg_conf
-        result.id_from_vote = True
-        logger.info(f"  → mol 無值，permit 多數票：{permit_vote}  avg_conf={permit_vote_avg_conf}")
-
+    _confirm_by_permit_vote(result, image_bytes, ocr)
     return Reading(result, crops)
+
+
+def _confirm_by_permit_vote(result: ScanResult, image_bytes: bytes, ocr: Ocr) -> None:
+    """兩欄互證。兩欄都讀到就直接比;缺一欄才跑 permit 上下半的多數票。
+
+    兩欄都有值卻不同時不在這裡處理 —— 衝突留給送審決策(mol≠permit 衝突)。
+    """
+    if result.mol and result.id:
+        _cross_check(result, result.id, vote_conf=0.0)
+        return
+    entries = (_collect_permit_votes(image_bytes, Roi.PERMIT_UPPER, ocr)
+               + _collect_permit_votes(image_bytes, Roi.PERMIT_LOWER, ocr))
+    vote = majority_vote(entries)
+    if not vote and entries:
+        _mark_permit_partial(result, entries)
+    _cross_check(result, vote.value, vote.conf)
+
+
+def _mark_permit_partial(result: ScanResult, entries: list[tuple[str, float]]) -> None:
+    """有讀到值但湊不出多數:取信心最高的當候選值,標 PERMIT_PARTIAL(送反查救援)。"""
+    value, conf = max(entries, key=lambda e: e[1])
+    result.id, result.id_conf = value, float(conf)
+    result.status = ResultStatus.PERMIT_PARTIAL
+    logger.info(
+        f"  ⚠ permit 有部分命中({len(entries)}筆)但無多數"
+        f"  → 候選值={value!r} conf={conf:.0f}"
+        f"  all={[v for v, _ in entries]}"
+    )
+
+
+def _cross_check(result: ScanResult, permit_vote: str, vote_conf: float) -> None:
+    """mol 與 permit 相同 → 交叉比對吻合;mol 沒讀到 → permit 多數票就是讀值。"""
+    if result.mol and permit_vote and result.mol == permit_vote:
+        result.cross_match = True
+        logger.info(f"  ✓ 交叉比對吻合：{result.mol}")
+    elif not result.mol and permit_vote:
+        result.id, result.id_layer, result.id_conf = permit_vote, 0, vote_conf
+        result.id_from_vote = True
+        logger.info(f"  → mol 無值，permit 多數票：{permit_vote}  avg_conf={vote_conf}")
 
 
 def _empty_result(docx_name: str, img_name: str,
