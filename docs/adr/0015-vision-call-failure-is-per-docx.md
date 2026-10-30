@@ -27,6 +27,7 @@ Sheets 上長得一模一樣,審查的人分不出該重跑還是該自己看圖
 |---|---|---|
 | 503、429 額度、逾時、連線斷 | 是(4 次,起始 2 秒) | 用盡 → Vision 呼叫失敗 |
 | `InvalidArgument`、回應裡的 `error.message` | 否(Google 已經回答了這張圖) | Vision 呼叫失敗 |
+| 其他 Google 錯誤(`InternalServerError` 500、`Unknown` 等) | 否(2026-10-30 使用者決定,沿用既有分類) | Vision 呼叫失敗 |
 | `PermissionDenied` 403、`Unauthenticated` 401、拿不到憑證 | 否 | 往上拋,整批中止 |
 | 其他例外(程式 bug) | 否 | 不攔,往上拋 |
 
