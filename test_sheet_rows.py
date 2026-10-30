@@ -12,8 +12,8 @@ import argparse
 
 import pytest
 
+from conftest import FakeVision
 import employer_extract
-import google_clients
 import matches_csv
 import pipeline as P
 import submission_decision
@@ -97,9 +97,9 @@ def world(monkeypatch, tmp_path):
     docs = tmp_path / "docs"
     docs.mkdir()
     crop_ok, crop_bad = tmp_path / "ok.png", tmp_path / "bad.png"
-    crop_ok.write_bytes(b"x")
-    crop_bad.write_bytes(b"x")
-    texts = {str(crop_ok): "No. Izin: 2222", str(crop_bad): "No. Izin: 8888"}
+    crop_ok.write_bytes(b"ok")
+    crop_bad.write_bytes(b"bad")
+    texts = {b"ok": "No. Izin: 2222", b"bad": "No. Izin: 8888"}
 
     V, R = Destination.送VISION, Destination.反查救援
     decisions = [
@@ -138,14 +138,12 @@ def world(monkeypatch, tmp_path):
     sheets = []
     monkeypatch.setattr(P, "run_scan", fake_scan)
     monkeypatch.setattr(submission_decision, "decide", lambda rows: by_name[rows[0].source_docx])
-    monkeypatch.setattr(P, "vision_text", lambda path: texts[path])
-    monkeypatch.setattr(P, "collect_employer_fields", lambda batch: employer)
+    monkeypatch.setattr(P, "collect_employer_fields", lambda batch, vision: employer)
     monkeypatch.setattr(P, "_permit_lookup", lambda: FakeRoster())
     monkeypatch.setattr(employer_extract, "agency_block_from_next_page",
-                        lambda path, client: BLOCKS[path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]])
-    monkeypatch.setattr(google_clients, "vision_client", lambda: object())
+                        lambda path, vision: BLOCKS[path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]])
     monkeypatch.setattr(P, "_sheets_append_atomic", sheets.extend)
-    return sheets
+    return sheets, FakeVision(sparse=lambda b: texts[b])
 
 
 def _opts():
@@ -201,5 +199,6 @@ BEFORE_12 = [
 
 
 def test_fifteen_columns_cell_by_cell(world):
-    P.main(_opts())
-    assert world == BEFORE_12
+    sheets, vision = world
+    P.main(_opts(), vision)
+    assert sheets == BEFORE_12

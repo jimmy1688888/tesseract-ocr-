@@ -21,6 +21,7 @@ from sheet_row import SheetRow, SheetStatus
 from submission_decision import Decision, Destination
 import pipeline as P
 from batch import Batch
+from vision_reader import GoogleVisionReader
 from vision_verification import run_vision_items
 
 
@@ -48,7 +49,7 @@ def test_permit_reading_aborts_the_run(tmp_path):
                       reason="permit部分命中無多數", hit_roi="permit_lower",
                       candidate_value="1234", candidate_conf=60.0)
     with pytest.raises(NoCredentials):
-        run_vision_items([item], read_text=P.vision_text)
+        run_vision_items([item], GoogleVisionReader())
 
 
 def test_employer_fields_abort_the_run(tmp_path):

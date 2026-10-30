@@ -12,6 +12,7 @@ import permit_patterns
 from sheet_row import SheetStatus
 from submission_decision import Decision, Destination
 from permit_patterns import permit_in_text
+from conftest import FakeVision
 from vision_verification import run_vision_items
 
 
@@ -77,7 +78,7 @@ class TestOneRowPerItem:
     ])
     def test_each_verification_level_lands_in_one_place(self, tmp_path, vision_text, where, b):
         auto, review = run_vision_items(
-            [_item(tmp_path)], read_text=lambda p: vision_text)
+            [_item(tmp_path)], FakeVision(sparse=lambda b: vision_text))
         rows = {"auto": auto, "review": review}[where]
         assert len(rows) == 1 and len(auto) + len(review) == 1
         assert rows[0].permit == b
@@ -87,7 +88,7 @@ class TestOneRowPerItem:
     def test_vision_only_when_tesseract_had_nothing(self, tmp_path):
         auto, review = run_vision_items(
             [_item(tmp_path, value="")],
-            read_text=lambda p: "No. Izin 1234")
+            FakeVision(sparse=lambda b: "No. Izin 1234"))
         assert auto == [] and review[0].permit == "1234"
 
     def test_every_item_gets_exactly_one_row(self, tmp_path):
@@ -96,16 +97,16 @@ class TestOneRowPerItem:
                  _item(tmp_path, value="3333"),
                  _item(tmp_path, value="4444")]
         auto, review = run_vision_items(
-            items, read_text=lambda p: "No. Izin 1234")
+            items, FakeVision(sparse=lambda b: "No. Izin 1234"))
         assert len(auto) + len(review) == len(items)
         assert sorted(r.source_docx for r in auto + review) == ["a.docx"] * 4
 
     def test_roi_decides_the_pattern(self, tmp_path):
         """同一段 Vision 文字,下半部截圖取得出、上半部截圖取不出(依 ROI 選 pattern)。"""
         lower, _ = run_vision_items([_item(tmp_path, roi="permit_lower")],
-                                    read_text=lambda p: "No. Izin 1234")
+                                    FakeVision(sparse=lambda b: "No. Izin 1234"))
         upper, _ = run_vision_items([_item(tmp_path, roi="permit_upper")],
-                                    read_text=lambda p: "No. Izin 1234")
+                                    FakeVision(sparse=lambda b: "No. Izin 1234"))
         assert len(lower) == 1 and upper == []
 
 
@@ -126,8 +127,8 @@ class TestRealVisionReplay:
         if not all(Path(i.img_path).exists() for i in items):
             pytest.skip("送 Vision 的截圖不在最新的某日掃描 samples/permit_scan/<日期>/permit_crops")
 
-        auto, review = run_vision_items(
-            items, read_text=lambda p: texts[Path(p).name])
+        by_crop = {Path(i.img_path).read_bytes(): texts[Path(i.img_path).name] for i in items}
+        auto, review = run_vision_items(items, FakeVision(sparse=lambda b: by_crop[b]))
 
         assert review == []
         got = {Path(r.source_docx).stem: r.permit for r in auto}

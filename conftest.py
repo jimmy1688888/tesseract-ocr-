@@ -153,6 +153,27 @@ def real_ocr():
     employer_extract._page_score_cache.clear()
 
 
+# ─── 假的 Vision(VisionReader,#64)──────────────────────────────────────────
+class FakeVision:
+    """測試用 VisionReader:兩種讀法各給一個「影像 bytes → 全文」,記下讀過的 bytes。
+    沒給的那一種被呼叫就是測試寫錯了(那條路不該打 Vision)。"""
+
+    def __init__(self, sparse=None, document=None):
+        self._sparse, self._document = sparse, document
+        self.sparse_reads: list[bytes] = []
+        self.document_reads: list[bytes] = []
+
+    def read_sparse(self, image: bytes) -> str:
+        assert self._sparse is not None, "這條路不該讀截圖"
+        self.sparse_reads.append(image)
+        return self._sparse(image)
+
+    def read_document(self, image: bytes) -> str:
+        assert self._document is not None, "這條路不該讀整頁文件"
+        self.document_reads.append(image)
+        return self._document(image)
+
+
 # ─── 讀原始碼的架構測試共用(ADR-0014)──────────────────────────────────────
 # module.__file__、inspect.getsource(module)、ROOT.glob("*.py") 在 package 上只看得到
 # __init__.py(或整個看不到),測試會悄悄變弱而不會變紅 —— 一律走這裡。

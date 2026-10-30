@@ -9,6 +9,7 @@ import logging
 
 import pytest
 
+from conftest import FakeVision
 import employer_extract as ee
 from contract_template import Template
 from employer_result import EmployerExtraction, ExtractionStatus
@@ -17,7 +18,7 @@ _NO_ANCHOR = "勞動契約 監護工\n仲介公司 某某人力"
 
 
 def _rescue(name="姜信安", page="image5.jpeg"):
-    return lambda p, client=None: (name, page)
+    return lambda p, vision: (name, page)
 
 
 class TestReasonInLColumn:
@@ -43,9 +44,9 @@ class TestRescueAlongsideTheReason:
 
     def test_anchor_failure_then_rescue(self, monkeypatch):
         monkeypatch.setattr(ee, "_scored_pages", lambda p: [(99, "image2.jpeg", b"x")])
-        monkeypatch.setattr(ee, "vision_full_text", lambda b, client=None: _NO_ANCHOR)
         monkeypatch.setattr(ee, "rescue_name_from_pledge", _rescue())
-        r = ee.extract_employer_from_docx("x.docx", roi=None, deink=False)
+        r = ee.extract_employer_from_docx("x.docx", FakeVision(document=lambda b: _NO_ANCHOR),
+                                          roi=None, deink=False)
         assert r.status is ExtractionStatus.雇主區塊未錨定
         assert r.values.雇主名稱_中 == "姜信安"
         assert r.疑慮標示 == "H~O:契約頁雇主區塊未錨定,未擷取；H:中文名取自切結書頁(image5.jpeg)"
@@ -53,7 +54,7 @@ class TestRescueAlongsideTheReason:
     def test_contract_page_not_found_then_rescue(self, monkeypatch):
         monkeypatch.setattr(ee, "_scored_pages", lambda p: [(0, "image2.jpeg", b"x")])
         monkeypatch.setattr(ee, "rescue_name_from_pledge", _rescue())
-        r = ee.extract_employer_from_docx("x.docx", roi=None)
+        r = ee.extract_employer_from_docx("x.docx", FakeVision(), roi=None)
         assert r.status is ExtractionStatus.找不到契約頁
         assert r.values.雇主名稱_中 == "姜信安"
         assert r.疑慮標示 == "H~O:找不到契約頁,未擷取；H:中文名取自切結書頁(image5.jpeg)"
@@ -61,7 +62,7 @@ class TestRescueAlongsideTheReason:
     def test_failed_rescue_leaves_only_the_reason(self, monkeypatch):
         monkeypatch.setattr(ee, "_scored_pages", lambda p: [(0, "image2.jpeg", b"x")])
         monkeypatch.setattr(ee, "rescue_name_from_pledge", _rescue("", ""))
-        r = ee.extract_employer_from_docx("x.docx", roi=None)
+        r = ee.extract_employer_from_docx("x.docx", FakeVision(), roi=None)
         assert r.values.雇主名稱_中 == ""
         assert r.疑慮標示 == "H~O:找不到契約頁,未擷取"
 
@@ -69,8 +70,8 @@ class TestRescueAlongsideTheReason:
         calls = []
         monkeypatch.setattr(ee, "_scored_pages", lambda p: [])
         monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, client=None: calls.append(p) or ("姜信安", "image5.jpeg"))
-        r = ee.extract_employer_from_docx("x.docx", roi=None)
+                            lambda p, vision: calls.append(p) or ("姜信安", "image5.jpeg"))
+        r = ee.extract_employer_from_docx("x.docx", FakeVision(), roi=None)
         assert calls == [] and r.疑慮標示 == "H~O:docx 無內嵌圖,未擷取"
 
     def test_extraction_failure_does_not_rescue(self, tmp_path, monkeypatch, offline_identity):
@@ -78,7 +79,7 @@ class TestRescueAlongsideTheReason:
         from batch import Batch
         calls = []
         monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, client=None: calls.append(p) or ("姜信安", "image5.jpeg"))
+                            lambda p, vision: calls.append(p) or ("姜信安", "image5.jpeg"))
         monkeypatch.setattr("employer_extract.extract_employer_from_docx",
                             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("壞掉")))
         got = pipeline.collect_employer_fields(

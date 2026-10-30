@@ -247,9 +247,8 @@ def _vision_ok() -> tuple[bool, str]:
 
 
 def _fetch_text(content: bytes) -> str:
-    import google_clients
-    from employer_extract import vision_full_text
-    return vision_full_text(content, client=google_clients.vision_client())
+    from vision_reader import GoogleVisionReader
+    return GoogleVisionReader().read_document(content)
 
 
 def _prepare(raw: bytes) -> bytes:

@@ -15,6 +15,7 @@ from matches_csv import ResultStatus, ScanResult
 from submission_decision import (CONF_KEY_IN, CONF_MOL_VOTE_MIN, CONF_NOVOTE_RESCUE_MAX,
                                  CONF_VOTE_MIN, Destination, decide, is_permit_vote)
 from sheet_row import SheetStatus
+from conftest import FakeVision
 from vision_verification import run_vision_items
 
 
@@ -399,19 +400,19 @@ class TestCropPathFromCsv:
         d = self._decide_from(folder, [_permit(
             "image5.jpeg", "1234", 60, partial=True, permit_crop="permit_crops/a_image5.png")])
         (folder / "permit_crops").mkdir()
-        (folder / "permit_crops" / "a_image5.png").write_bytes(b"x")
-        read = []
-        run_vision_items([d], read_text=lambda p: read.append(p) or "No. Izin: 1234")
-        assert read == [str(folder / "permit_crops" / "a_image5.png")]
+        (folder / "permit_crops" / "a_image5.png").write_bytes(b"a_image5")
+        vision = FakeVision(sparse=lambda b: "No. Izin: 1234")
+        run_vision_items([d], vision)
+        assert vision.sparse_reads == [b"a_image5"]
 
     def test_no_crop_still_goes_to_manual_review(self, tmp_path):
         """拼上去會變成資料夾本身 —— exists() 為真,「沒截圖 → 人工審查」就被跳過。"""
         d = self._decide_from(tmp_path, [_permit(
             "image5.jpeg", "1234", 60, partial=True, permit_crop="")])
         assert d.img_path == ""
-        read = []
-        auto, review = run_vision_items([d], read_text=lambda p: read.append(p) or "")
-        assert (read, auto) == ([], [])
+        vision = FakeVision(sparse=lambda b: "")
+        auto, review = run_vision_items([d], vision)
+        assert (vision.sparse_reads, auto) == ([], [])
         assert [r.status for r in review] == [SheetStatus.MANUAL_REVIEW]
 
     def test_old_files_with_absolute_paths_still_open(self, tmp_path):

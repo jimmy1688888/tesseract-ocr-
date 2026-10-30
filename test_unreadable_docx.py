@@ -196,19 +196,19 @@ def world(monkeypatch, tmp_path):
     (tmp_path / "docs").mkdir()
     calls = {"vision": [], "rescue": [], "sheets": [], "employer": 0}
 
-    def fake_vision(items, read_text):
+    def fake_vision(items, vision):
         calls["vision"].extend(items)
         return [], []
 
-    def fake_rescue(batch, rows):
+    def fake_rescue(batch, rows, vision=None):
         calls["rescue"].extend(rows)
         return rows
 
     real_collect = P.collect_employer_fields
 
-    def counting_collect(batch):
+    def counting_collect(batch, vision=None):
         calls["employer"] += 1
-        return real_collect(batch)
+        return real_collect(batch, vision)
 
     monkeypatch.setattr(P, "run_vision_items", fake_vision)
     monkeypatch.setattr(P, "rescue_manual_review_via_agency_phone", fake_rescue)

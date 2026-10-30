@@ -11,6 +11,7 @@ import pytest
 
 from sheet_row import SheetStatus
 from submission_decision import Decision, Destination
+from conftest import FakeVision
 from vision_verification import run_vision_items
 
 
@@ -25,11 +26,9 @@ def _item(img_path, **kw):
 @pytest.mark.parametrize("img_path", ["", "MISSING"])
 def test_missing_crop_goes_to_manual_review_not_nowhere(tmp_path, img_path):
     path = str(tmp_path / "nope.png") if img_path == "MISSING" else ""
-    calls = []
-    auto, review = run_vision_items(
-        [_item(path)],
-        read_text=lambda p: calls.append(p) or "No. Izin: 1234")
-    assert calls == []                                   # 沒圖就不打 Vision
+    vision = FakeVision(sparse=lambda b: "No. Izin: 1234")
+    auto, review = run_vision_items([_item(path)], vision)
+    assert vision.sparse_reads == []                     # 沒圖就不打 Vision
     assert auto == []
     assert len(review) == 1
     row = review[0]
@@ -42,6 +41,6 @@ def test_existing_crop_still_goes_through_vision(tmp_path):
     crop = tmp_path / "crop.png"
     crop.write_bytes(b"x")
     auto, review = run_vision_items(
-        [_item(str(crop))], read_text=lambda p: "No. Izin: 1234")
+        [_item(str(crop))], FakeVision(sparse=lambda b: "No. Izin: 1234"))
     assert [(r.permit, r.status) for r in auto] == [("1234", SheetStatus.KEYED_IN)]
     assert review == []

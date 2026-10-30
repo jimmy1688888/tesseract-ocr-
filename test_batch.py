@@ -121,7 +121,7 @@ class TestRescueOpensTheBatchFile:
         """記下救援真正送去讀次頁的路徑。替身只放在外部邊界:名冊、Vision、次頁擷取。"""
         paths: list[Path] = []
 
-        def fake_next_page(path, client=None):
+        def fake_next_page(path, vision):
             paths.append(Path(path))
             return {"phones": ["02-1234-5678"], "name": "", "address": ""}
 

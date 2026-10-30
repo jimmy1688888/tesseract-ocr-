@@ -58,8 +58,6 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import pytesseract
 
-# Google Vision
-from google.cloud import vision as gvision
 from google.api_core import exceptions as gax_exceptions
 
 # Google Sheets
@@ -185,41 +183,11 @@ def build_vision_queue(csv_path: Path) -> SubmissionQueue:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ⑧ Google Vision(驗證本身在 vision_verification;這裡只有 client)
+# ⑧ Google Vision(驗證在 vision_verification、讀字在 vision_reader)
 # ═══════════════════════════════════════════════════════════════════════════
 
+from vision_reader import GoogleVisionReader, VisionReader  # noqa: E402
 from vision_verification import run_vision_items  # noqa: E402
-
-
-@with_retry(
-    max_attempts=4,
-    initial_wait=2.0,
-    retryable_exceptions=(
-        ConnectionError, TimeoutError,
-        gax_exceptions.GoogleAPICallError,
-        gax_exceptions.RetryError,
-    ),
-    should_retry=is_retryable_google_error,
-)
-def vision_text(img_path: str) -> str:
-    """送截圖給 Google Vision OCR,回傳全文(讀不到或 API 回報錯誤時為空字串)。
-
-    這是 Vision 驗證的 client(seam 後的 adapter):只負責「截圖 → 全文」,
-    取號交給 permit_patterns.permit_in_text,與 Tesseract 同一把尺。
-
-    Vision API 屬讀取操作(idempotent),重試安全。連線錯誤或 5xx/429 會自動重試;
-    4xx 其他錯誤(403/404 等)直接拋出,不會浪費時間重試。
-    拿不到憑證也直接拋出、整批中止(不降級),見 test_no_credentials.py。
-    """
-    client = google_clients.vision_client()
-    with open(img_path, "rb") as f:
-        content = f.read()
-    image    = gvision.Image(content=content)
-    response = client.text_detection(image=image)
-    if response.error.message:
-        logger.error(f"Vision API 錯誤: {response.error.message}")
-        return ""
-    return response.full_text_annotation.text if response.full_text_annotation else ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -270,7 +238,8 @@ def _agency_cols(permit_value: str) -> list[str]:
 # (M 欄)為準,騰出的 L 欄改放疑慮標示。
 # 與 D 欄 reason 仍刻意分開:D 欄專講許可證判讀,一個欄位不承載兩種語意(ADR-0003)。
 
-def collect_employer_fields(batch: Batch) -> dict[str, EmployerExtraction]:
+def collect_employer_fields(batch: Batch, vision: VisionReader | None = None
+                            ) -> dict[str, EmployerExtraction]:
     """對這一批每份 docx 擷取雇主欄位，回傳 {檔名: 雇主擷取結果}（每份一次 Vision 呼叫）。
 
     契約頁偵測用本機 Tesseract 特徵字計分,只有選中的那一頁送 Vision。
@@ -278,8 +247,9 @@ def collect_employer_fields(batch: Batch) -> dict[str, EmployerExtraction]:
     檔名 {docx主檔名}_{圖檔名},供人工複查。
     任何單檔失敗只記 warning、該檔 H~O 留空,絕不中斷主流程;
     employer_extract 或其相依(address_db/AllData.json)缺失時整段安靜跳過。
-    例外:拿不到憑證(建不起 Vision client)不降級,往上拋讓整批中止 ——
-    與許可證判讀同一個決定,見 test_no_credentials.py。
+    例外:拿不到憑證(建不起 Vision reader)不降級,往上拋讓整批中止 ——
+    與許可證判讀同一個決定,見 test_no_credentials.py。vision 不給就在這裡建,
+    所以憑證問題在這一步、第一份 docx 之前就拋出,不會被逐份的 try 吞掉。
 
     Vision 全文在這裡就存檔(write_employer_texts),不放進回傳值:它只供離線重放,
     下游沒有任何一步要讀它,而回傳的欄位每組一列都會查一次。疑慮報表則要讀回傳
@@ -290,14 +260,14 @@ def collect_employer_fields(batch: Batch) -> dict[str, EmployerExtraction]:
     except Exception as e:
         logger.warning(f"  ⚠ employer_extract 載入失敗,雇主欄(H~O)本次全部留空:{e!r}")
         return {}
-    client = google_clients.vision_client()
+    vision = vision or GoogleVisionReader()
     employer_by_docx: dict[str, EmployerExtraction] = {}
     texts: dict[str, dict] = {}
     for dp in batch.docx_files:
         name = dp.name
         try:
             result = extract_employer_from_docx(
-                str(dp), client=client, crop_dir=str(batch.employer_crop_dir))
+                str(dp), vision, crop_dir=str(batch.employer_crop_dir))
         except Exception as e:
             logger.warning(f"  ⚠ {name}: 雇主擷取失敗({e!r}),該列 H~O 留空")
             employer_by_docx[name] = EmployerExtraction(ExtractionStatus.擷取失敗, detail=repr(e))
@@ -435,7 +405,8 @@ def pick_agency(block: dict, roster) -> AgencyPick:
 
 
 def rescue_manual_review_via_agency_phone(
-        batch: Batch, rows: list[SheetRow]) -> list[SheetRow]:
+        batch: Batch, rows: list[SheetRow],
+        vision: VisionReader | None = None) -> list[SheetRow]:
     """仲介反查救援:整頁 OCR 契約次一頁(1 次 Vision),以『台灣仲介』欄位標籤
     錨定區塊(台仲在左在右皆可,靠標籤非位置),取其「電話／名稱／地址」反查名冊
     回推許可證(挑哪一家見 pick_agency)。列進、列出:回傳與 rows 同序的列 —— 救回
@@ -453,7 +424,7 @@ def rescue_manual_review_via_agency_phone(
         return list(rows)
     try:
         from employer_extract import agency_block_from_next_page
-        client = google_clients.vision_client()
+        vision = vision or GoogleVisionReader()
     except Exception as e:
         logger.warning(f"  ⚠ 電話反查救援不可用(略過):{e!r}")
         return list(rows)
@@ -468,7 +439,7 @@ def rescue_manual_review_via_agency_phone(
             continue
         if docx_name not in block_cache:
             try:
-                block_cache[docx_name] = agency_block_from_next_page(str(docx_path), client=client)
+                block_cache[docx_name] = agency_block_from_next_page(str(docx_path), vision)
             except Exception as e:
                 logger.warning(f"  ⚠ {docx_name} 次頁仲介區塊擷取失敗:{e!r}")
                 block_cache[docx_name] = {"phones": [], "name": "", "address": ""}
@@ -772,8 +743,11 @@ def _image_filter_miss(docx_files: list[Path], image: str) -> str | None:
     return None
 
 
-def main(opts: argparse.Namespace) -> None:
-    """主流程。接收已解析的 CLI options，不再依賴 module-level 全域變數。"""
+def main(opts: argparse.Namespace, vision: VisionReader | None = None) -> None:
+    """主流程。接收已解析的 CLI options，不再依賴 module-level 全域變數。
+
+    vision 不給就用 GoogleVisionReader(測試換假的);各步驟在自己那一步才建,
+    拿不到憑證時誰中止、誰降級照舊(見 test_no_credentials.py)。"""
     # 一批:這次要掃哪些 docx。指定 --file 時就是那一份,不看 ./docs。
     batch = Batch.from_file(Path(opts.file)) if opts.file else Batch.from_dir(INPUT_DIR)
 
@@ -829,7 +803,7 @@ def main(opts: argparse.Namespace) -> None:
     # 一律標人工審查、由人工輸入(兩候選與信心寫進 reason 供參考)。
     logger.info("── 步驟 4a：Google Vision 判讀 + 交叉比對 ──")
     vision_auto_keyin, vision_review_rows = run_vision_items(
-        vision_decisions, read_text=vision_text)
+        vision_decisions, vision or GoogleVisionReader())
 
     # ── 步驟 4b：統一寫入 Google Sheets ────────────────────────────────────
     # 簡化為兩個 status,理由欄(reason)負責歸因:
@@ -844,7 +818,7 @@ def main(opts: argparse.Namespace) -> None:
     # 這裡對「本次要寫入的所有 docx」都擷取,含 manual_review 列——
     # 許可證待人工複核不代表雇主資料無效,先填好可省一次人工查找。
     logger.info("── 步驟 4b 前置①：雇主資料擷取（契約頁 OCR → H~O 欄）──")
-    employer_by_docx = collect_employer_fields(batch)
+    employer_by_docx = collect_employer_fields(batch, vision)
     write_doubt_report(batch, employer_by_docx)
 
     # ── 步驟 4b 前置②：反查救援（次頁台仲區塊 → 反查名冊 → 回推許可證）──
@@ -853,7 +827,7 @@ def main(opts: argparse.Namespace) -> None:
     # 救回的許可證、_agency_cols 補 E~G,仍標 manual_review、D 欄註明,供人工快速核對。
     if rescue_rows:
         logger.info("── 步驟 4b 前置②：反查救援 → 次頁台仲區塊反查名冊 ──")
-        rescue_rows = rescue_manual_review_via_agency_phone(batch, rescue_rows)
+        rescue_rows = rescue_manual_review_via_agency_phone(batch, rescue_rows, vision)
 
     logger.info("── 步驟 4b：合併批次寫入 Google Sheets（atomic）──")
     auto_keyin_rows = keyin_rows + vision_auto_keyin

@@ -370,7 +370,7 @@ class TestEmployerOutputFollowsBatch:
         monkeypatch.chdir(tmp_path)              # 預設的 ./scan_results 會落在這裡
         crop_dirs = []
 
-        def fake_extract(path, client=None, crop_dir=""):
+        def fake_extract(path, vision, crop_dir=""):
             crop_dirs.append(Path(crop_dir))
             return _result([Doubt("郵遞區號", "與地址不符")], 雇主名稱_中="王小明")
 

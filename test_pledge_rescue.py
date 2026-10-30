@@ -18,6 +18,7 @@ import zipfile
 
 import pytest
 
+from conftest import FakeVision
 import employer_extract as ee
 from contract_template import Template
 from employer_extract import _pledge_name
@@ -124,24 +125,16 @@ class TestRescueFromPledge:
         pledge_front("image4.jpeg")
         p = _make_docx(tmp_path / "e.docx",
                        [f"image{n}.jpeg" for n in range(1, 8)])
-        monkeypatch.setattr(ee, "vision_full_text",
-                            lambda b, client=None: _SLASHED
-                            if b == b"image6.jpeg" else "無關文字")
-        assert ee.rescue_name_from_pledge(p) == ("姜信安", "image6.jpeg")
+        vision = FakeVision(document=lambda b: _SLASHED if b == b"image6.jpeg" else "無關文字")
+        assert ee.rescue_name_from_pledge(p, vision) == ("姜信安", "image6.jpeg")
 
     def test_stops_at_the_first_hit(self, tmp_path, pledge_front, monkeypatch):
         pledge_front("image4.jpeg")
         p = _make_docx(tmp_path / "f.docx",
                        [f"image{n}.jpeg" for n in range(1, 8)])
-        seen: list[bytes] = []
-
-        def _vision(b, client=None):
-            seen.append(b)
-            return _TWO_LINE
-
-        monkeypatch.setattr(ee, "vision_full_text", _vision)
-        ee.rescue_name_from_pledge(p)
-        assert seen == [b"image5.jpeg"]          # 命中就停,不白花第二次
+        vision = FakeVision(document=lambda b: _TWO_LINE)
+        ee.rescue_name_from_pledge(p, vision)
+        assert vision.document_reads == [b"image5.jpeg"]          # 命中就停,不白花第二次
 
     def test_vision_failure_does_not_propagate(self, tmp_path, pledge_front,
                                                monkeypatch):
@@ -149,11 +142,10 @@ class TestRescueFromPledge:
         pledge_front("image4.jpeg")
         p = _make_docx(tmp_path / "g.docx", ["image4.jpeg", "image5.jpeg"])
 
-        def _boom(b, client=None):
+        def _boom(b):
             raise RuntimeError("403 quota")
 
-        monkeypatch.setattr(ee, "vision_full_text", _boom)
-        assert ee.rescue_name_from_pledge(p) == ("", "")
+        assert ee.rescue_name_from_pledge(p, FakeVision(document=_boom)) == ("", "")
 
 
 class TestApplyRescue:
@@ -166,10 +158,10 @@ class TestApplyRescue:
 
     def test_rescued_name_is_written_and_flagged(self, monkeypatch):
         monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, client=None: ("姜信安", "image5.jpeg"))
+                            lambda p, vision: ("姜信安", "image5.jpeg"))
         f = self._fields()
         assert f.疑慮標示 == "H:未擷取到中文名"
-        f = ee._apply_pledge_rescue(f, "x.docx")
+        f = ee._apply_pledge_rescue(f, "x.docx", FakeVision())
         assert f.values.雇主名稱_中 == "姜信安"
         assert "H:中文名取自切結書頁(image5.jpeg)" in f.疑慮標示
         assert "未擷取到" not in f.疑慮標示      # 已經擷取到了,那句話變成假的
@@ -177,19 +169,19 @@ class TestApplyRescue:
     def test_count_check_still_runs_on_the_rescued_name(self, monkeypatch):
         """救回來的名字仍要過字數/音節數檢查——換來源不等於免檢。"""
         monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, client=None: ("信安", "image5.jpeg"))
+                            lambda p, vision: ("信安", "image5.jpeg"))
         f = self._fields()
-        f = ee._apply_pledge_rescue(f, "x.docx")
+        f = ee._apply_pledge_rescue(f, "x.docx", FakeVision())
         assert "取自切結書頁" in f.疑慮標示
         assert "2 字與英譯 3 音節不符" in f.疑慮標示
 
     def test_rescued_company_name_skips_count_check_on_factory_template(self, monkeypatch):
         """工廠類樣板救回的是公司名:跟契約頁一樣看樣板跳過檢查(ADR-0010)。"""
         monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, client=None: ("大明金屬股份有限公司", "image5.jpeg"))
+                            lambda p, vision: ("大明金屬股份有限公司", "image5.jpeg"))
         f = self._fields(en="DA MING METAL CORPORATION (WANG, DA-MING)",
                          template=Template.工廠類)
-        f = ee._apply_pledge_rescue(f, "x.docx")
+        f = ee._apply_pledge_rescue(f, "x.docx", FakeVision())
         assert "取自切結書頁" in f.疑慮標示
         assert "音節" not in f.疑慮標示
 
@@ -200,9 +192,9 @@ class TestApplyRescue:
         那條「不猜原因」不因為多了一條管道而改變——32503 正是救不回的那一半。
         """
         monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, client=None: ("", ""))
+                            lambda p, vision: ("", ""))
         f = self._fields()
-        f = ee._apply_pledge_rescue(f, "x.docx")
+        f = ee._apply_pledge_rescue(f, "x.docx", FakeVision())
         assert f.values.雇主名稱_中 == ""
         assert f.疑慮標示 == "H:未擷取到中文名"
 
@@ -210,9 +202,9 @@ class TestApplyRescue:
         """只救中文名。切結書頁的英文反而讀壞過(32503 讀成 FU BIN ANI FU),
         而英文名本來就是可靠的那一欄,覆蓋它是負向交換。"""
         monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, client=None: ("姜信安", "image5.jpeg"))
+                            lambda p, vision: ("姜信安", "image5.jpeg"))
         f = self._fields(en="JIANG SIN AN")
-        f = ee._apply_pledge_rescue(f, "x.docx")
+        f = ee._apply_pledge_rescue(f, "x.docx", FakeVision())
         assert f.values.雇主名稱_英 == "JIANG SIN AN"
 
     def test_rescue_only_fires_when_chinese_name_is_missing(self, monkeypatch,
@@ -220,7 +212,7 @@ class TestApplyRescue:
         """契約頁已有中文名就不該多花一次 Vision。"""
         calls: list[str] = []
         monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, client=None: calls.append(p) or ("", ""))
+                            lambda p, vision: calls.append(p) or ("", ""))
         monkeypatch.setattr(ee, "_scored_pages", lambda p: [])
-        ee.extract_employer_from_docx(str(tmp_path / "h.docx"), roi=None)
+        ee.extract_employer_from_docx(str(tmp_path / "h.docx"), FakeVision(), roi=None)
         assert calls == []                       # 無內嵌圖就提早返回,更不會救援

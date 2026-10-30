@@ -1,7 +1,7 @@
 """從勞動契約圖片擷取「雇主資料」(名稱中/英、地址中/英、電話)。
 
 用 Google Vision DOCUMENT_TEXT_DETECTION 取全文後,以內容啟發式解析。
-與許可證流程(vision_text + permit_in_text 抓 4 碼號碼)分開,互不影響。
+與許可證流程(VisionReader.read_sparse + permit_in_text 抓 4 碼號碼)分開,互不影響。
 
 難點與對策:
 - 版面是中印尼雙語兩欄表,Vision 逐欄序列化常錯行 → 不依賴嚴格「標籤緊接值」,
@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import replace
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 # docx 內嵌圖與圖序只有一份,與 pipeline 共用(#5);像素前處理也是(#16)。
 # 兩側不互相 import。
@@ -28,6 +28,9 @@ from pixels import (NEXT_PAGE_DEINK, crop, crop_png, deink_red_stamp, open_uprig
 from employer_result import (VALUE_KEYS, WHOLE, Doubt, EmployerExtraction, EmployerValues,
                              ExtractionStatus, Source)
 from tw_phone import phones_in
+
+if TYPE_CHECKING:
+    from vision_reader import VisionReader
 
 logger = logging.getLogger(__name__)
 
@@ -659,7 +662,7 @@ def _pledge_name(text: str) -> str:
     return val if CJK.search(val) and _is_name_like(val) else ""
 
 
-def rescue_name_from_pledge(docx_path: str, client=None,
+def rescue_name_from_pledge(docx_path: str, vision: VisionReader,
                             max_pages: int = 2) -> tuple[str, str]:
     """契約頁抽不到中文名時,改從切結書頁取。回傳 (名字, 圖檔名),失敗回 ("", "")。
 
@@ -677,7 +680,7 @@ def rescue_name_from_pledge(docx_path: str, client=None,
     """
     for name, raw in pledge_name_pages(docx_path, max_pages):
         try:
-            got = _pledge_name(vision_full_text(raw, client=client))
+            got = _pledge_name(vision.read_document(raw))
         except Exception as e:                       # 憑證/額度/網路問題
             logger.warning(f"  ⚠ 切結書頁 Vision 失敗({name}):{e!r}")
             return "", ""
@@ -824,19 +827,6 @@ def _address_doubt(raw_cn: str, r: dict, trust_city: bool) -> str:
     return "地址無路名樣式(鄉村型),以 OCR 原文為準"
 
 
-def vision_full_text(image_bytes: bytes, client=None) -> str:
-    """對影像 bytes 跑 Vision DOCUMENT_TEXT_DETECTION,回傳全文(缺則空字串)。"""
-    from google.cloud import vision as gvision
-
-    if client is None:
-        from google_clients import vision_client
-        client = vision_client()
-    resp = client.document_text_detection(image=gvision.Image(content=image_bytes))
-    if resp.error.message:
-        raise RuntimeError(f"Vision API 錯誤: {resp.error.message}")
-    return resp.full_text_annotation.text if resp.full_text_annotation else ""
-
-
 # 台灣/印尼仲介區塊標記。台印電話都以 0 開頭、格式會重疊,無法靠純格式區分,
 # 故用「標記錨定」切出台仲區塊。台仲區塊在次頁左右不定(32345 在右、32324 在左),
 # 不能靠幾何裁半;改為整頁 OCR(仍只 1 次 Vision),以『台灣仲介』欄位標籤錨定起點、
@@ -882,7 +872,7 @@ _AGENCY_LABEL_WORD = re.compile(
     r"[台臺]灣仲介公司|[台臺]灣仲介|Agen(?:cy|si)\s*Taiwan", re.I)
 
 
-def _agency_block_lines(docx_path: str, client=None) -> list[str]:
+def _agency_block_lines(docx_path: str, vision: VisionReader) -> list[str]:
     """取「契約頁次一頁」的『台灣仲介』區塊文字行(整頁 1 次 Vision,靠標籤錨定)。
 
     台印電話/名稱格式重疊,無法靠格式或幾何位置分,故以『台灣仲介』欄位標籤
@@ -899,8 +889,7 @@ def _agency_block_lines(docx_path: str, client=None) -> list[str]:
     # 次頁前處理後整頁送 Vision(仍只 1 次;台仲可能在右半,不裁切)。
     # 設定與契約頁不同(放大+中值、不抹白),理由見 pixels.NEXT_PAGE_DEINK。
     png = to_png(preprocess(scored[ci + 1][2], NEXT_PAGE_DEINK))
-    lines = [l.strip() for l in vision_full_text(png, client=client)
-             .splitlines() if l.strip()]
+    lines = [l.strip() for l in vision.read_document(png).splitlines() if l.strip()]
 
     start = next((i for i, l in enumerate(lines)
                   if _is_agency_label_line(l, _TW_AGENCY_LABEL)), None)
@@ -979,10 +968,10 @@ def _address_in_block(block: list[str]) -> str:
     return ""
 
 
-def agency_block_from_next_page(docx_path: str, client=None) -> dict:
+def agency_block_from_next_page(docx_path: str, vision: VisionReader) -> dict:
     """電話備援用:回契約次頁台仲區塊的 {phones, name, address}(整頁 1 次 Vision)。
     找不到區塊 → 皆空。名稱/地址供名冊相似度反查(電話查無時的後備管道)。"""
-    block = _agency_block_lines(docx_path, client=client)
+    block = _agency_block_lines(docx_path, vision)
     if not block:
         return {"phones": [], "name": "", "address": ""}
     return {
@@ -1011,7 +1000,7 @@ def pick_contract_page(scored: list[tuple[int, str, bytes]]
     return best_s, name, raw, found
 
 
-def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
+def extract_employer_from_docx(docx_path: str, vision: VisionReader, deink: bool = True,
                                roi: tuple | None = EMPLOYER_ROI,
                                crop_dir: str = "") -> EmployerExtraction:
     """端到端:從 docx 找出契約頁 → ROI 裁切 → 去紅章 → Vision → 擷取雇主欄位。
@@ -1048,21 +1037,21 @@ def extract_employer_from_docx(docx_path: str, client=None, deink: bool = True,
         # 備援照跑:它讀另一頁、靠自己的標籤,契約頁找不到碰不到它。
         return _apply_pledge_rescue(EmployerExtraction(
             ExtractionStatus.找不到契約頁, source=Source(image=name, crop=crop_name),
-            detail=f"特徵字命中不足,最高分 {best_s};已存候選頁截圖"), docx_path, client)
+            detail=f"特徵字命中不足,最高分 {best_s};已存候選頁截圖"), docx_path, vision)
 
     if deink:
         content = deink_red_stamp(content)
     # 全文一併傳出:它是這條流程唯一花錢買來的東西,而每一次解析修正都要拿它
     # 當素材。丟掉的話,改一次名稱/地址的抽取規則就得再跑一輪 Vision 才驗得了。
-    text = vision_full_text(content, client=client)
+    text = vision.read_document(content)
     result = extract_employer_fields(text)
     if not result.values.雇主名稱_中:
-        result = _apply_pledge_rescue(result, docx_path, client)
+        result = _apply_pledge_rescue(result, docx_path, vision)
     return replace(result, source=replace(result.source, image=name, crop=crop_name, text=text))
 
 
 def _apply_pledge_rescue(result: EmployerExtraction, docx_path: str,
-                         client=None) -> EmployerExtraction:
+                         vision: VisionReader) -> EmployerExtraction:
     """切結書頁救回中文名 → 回傳填了中文名、名稱疑慮換過的結果;救不回來原樣回傳。
 
     只救中文名,不動英文名:英文名本來就是可靠的那一欄(ADR-0004,紅章蓋的是中文
@@ -1075,7 +1064,7 @@ def _apply_pledge_rescue(result: EmployerExtraction, docx_path: str,
     """
     from pathlib import Path
 
-    got, page = rescue_name_from_pledge(docx_path, client=client)
+    got, page = rescue_name_from_pledge(docx_path, vision)
     if not got:
         logger.info(f"  切結書頁未取得中文名:{Path(docx_path).name}")
         return result
@@ -1101,7 +1090,9 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     # 自動找契約頁 → ROI → 去紅章 → Vision
-    res = extract_employer_from_docx(args.path, deink=True,
+    from vision_reader import GoogleVisionReader
+
+    res = extract_employer_from_docx(args.path, GoogleVisionReader(), deink=True,
                                      roi=None if args.full else EMPLOYER_ROI)
     print(f"採用契約頁:{res.source.image or '(無)'}  {res.status.value} {res.detail}")
     for k in (*VALUE_KEYS, "疑慮標示"):

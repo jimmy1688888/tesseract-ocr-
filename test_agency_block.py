@@ -139,7 +139,7 @@ class TestRescueReasonUsesStandardForm:
         monkeypatch.setattr(pipeline, "_permit_lookup", lambda: roster)
         monkeypatch.setattr(google_clients, "vision_client", lambda: object())
         monkeypatch.setattr(employer_extract, "_agency_block_lines",
-                            lambda path, client=None: ["電話:02-2727-6999,傳真:02-2727-6000"])
+                            lambda path, vision: ["電話:02-2727-6999,傳真:02-2727-6000"])
         docx = tmp_path / "32417.docx"
         docx.write_bytes(b"x")
         seed = [SheetRow("32417.docx", "", SheetStatus.MANUAL_REVIEW, "全無命中")]

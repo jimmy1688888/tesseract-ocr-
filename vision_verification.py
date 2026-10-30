@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Vision 驗證:一個「送 Vision」的送審決策 → 一列 Sheets 結果,絕不回空(#41)。
 
-Vision client(截圖 → 全文)放在 seam 後,由呼叫端傳入;取號與 Tesseract 共用
+Vision(VisionReader,截圖 bytes → 全文)放在 seam 後,由呼叫端傳入;取號與 Tesseract 共用
 permit_patterns,依截圖所屬的 ROI 選 pattern。
 """
 from __future__ import annotations
@@ -10,11 +10,11 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable
 
 from permit_patterns import permit_in_text
 from sheet_row import SheetRow, SheetStatus
 from submission_decision import Decision
+from vision_reader import VisionReader
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +22,13 @@ __all__ = ["VerificationLevel", "VerifiedResult", "run_vision_items",
            "verify_vision_result"]
 
 
-def run_vision_items(decisions: list[Decision],
-                     read_text: Callable[[str], str]
+def run_vision_items(decisions: list[Decision], vision: VisionReader
                      ) -> tuple[list[SheetRow], list[SheetRow]]:
     """送 Vision 那一步:每一個送 Vision 的決定都分到 (自動寫入, 人工審查) 其中**一處**,
     絕不丟掉。
 
-    read_text 是 Vision client:「截圖路徑 → 全文」(正式流程是 pipeline.vision_text,
-    測試換假的)。取號依截圖所屬的 ROI(d.hit_roi),與 Tesseract 同一個函式。
+    vision 讀截圖上的零星字(read_sparse;正式流程是 GoogleVisionReader,測試換假的)。
+    取號依截圖所屬的 ROI(d.hit_roi),與 Tesseract 同一個函式。
     雙引擎完全一致才自動寫入;其餘進人工審查(交叉比對見 verify_vision_result)。
     """
     auto: list[SheetRow] = []    # 雙引擎一致(CONFIRMED) → 自動寫
@@ -43,7 +42,7 @@ def run_vision_items(decisions: list[Decision],
                 d.source_docx, d.candidate_value, SheetStatus.MANUAL_REVIEW,
                 f"[送Vision原因] {d.reason} ／ 截圖檔不在,未送 Vision"))
             continue
-        vision_value = permit_in_text(read_text(d.img_path), d.hit_roi)
+        vision_value = permit_in_text(vision.read_sparse(Path(d.img_path).read_bytes()), d.hit_roi)
         verified = verify_vision_result(
             vision_value=vision_value,
             tesseract_candidate=d.candidate_value,

@@ -13,6 +13,7 @@ import zipfile
 
 import pytest
 
+from conftest import FakeVision
 import employer_extract as ee
 from real_samples import REAL_DOCX, checked_contract_page, needs_samples, sample
 
@@ -135,8 +136,9 @@ class TestScoreCache:
         """雇主擷取與次頁台仲反查各跑一次,合計仍只評一輪(本次修正的目的)。"""
         p = _make_docx(tmp_path / "b.docx", {"image1.jpeg": b"i1",
                                              "image2.jpeg": b"i2"})
-        ee.extract_employer_from_docx(p, roi=None)   # roi=None:略過裁切,假 bytes 不必是真圖
-        ee._agency_block_lines(p)
+        vision = FakeVision(document=lambda b: "")
+        ee.extract_employer_from_docx(p, vision, roi=None)   # roi=None:略過裁切,假 bytes 不必是真圖
+        ee._agency_block_lines(p, vision)
         assert counting_scorer == {b"i1": 1, b"i2": 1}
 
     def test_cached_scores_survive_but_results_agree(self, tmp_path,

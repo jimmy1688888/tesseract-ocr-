@@ -4,6 +4,7 @@
 舊做法是一個扁平 dict,混著輸出欄、內部疑慮、流程中介(`_image`、`_note`…);
 擷取拋例外的那份 docx 甚至不在結果裡。資料全部捏造。
 """
+from conftest import FakeVision
 import employer_extract as ee
 from employer_result import (DOUBT_KEY, EMPLOYER_COLUMNS, VALUE_KEYS, Doubt, EmployerExtraction,
                              EmployerValues, ExtractionStatus)
@@ -18,22 +19,22 @@ class TestStatusFromDocx:
 
     def test_no_images(self, monkeypatch):
         monkeypatch.setattr(ee, "_scored_pages", lambda p: [])
-        r = ee.extract_employer_from_docx("x.docx", roi=None)
+        r = ee.extract_employer_from_docx("x.docx", FakeVision(), roi=None)
         assert r.status is ExtractionStatus.docx無內嵌圖
         assert r.values == EmployerValues() and r.doubts == ()
 
     def test_contract_page_not_found_keeps_the_candidate_page(self, monkeypatch):
         monkeypatch.setattr(ee, "_scored_pages", lambda p: [(0, "image2.jpeg", b"x")])
-        monkeypatch.setattr(ee, "rescue_name_from_pledge", lambda p, client=None: ("", ""))
-        r = ee.extract_employer_from_docx("x.docx", roi=None)
+        monkeypatch.setattr(ee, "rescue_name_from_pledge", lambda p, vision: ("", ""))
+        r = ee.extract_employer_from_docx("x.docx", FakeVision(), roi=None)
         assert r.status is ExtractionStatus.找不到契約頁
         assert r.source.image == "image2.jpeg"
         assert r.values == EmployerValues()
 
     def test_success_carries_the_source(self, monkeypatch):
         monkeypatch.setattr(ee, "_scored_pages", lambda p: [(99, "image2.jpeg", b"x")])
-        monkeypatch.setattr(ee, "vision_full_text", lambda b, client=None: _TEXT)
-        r = ee.extract_employer_from_docx("x.docx", roi=None, deink=False)
+        r = ee.extract_employer_from_docx("x.docx", FakeVision(document=lambda b: _TEXT),
+                                          roi=None, deink=False)
         assert r.status is ExtractionStatus.擷取成功
         assert (r.source.image, r.source.text) == ("image2.jpeg", _TEXT)
         assert r.values.雇主名稱_中 == "王小明"
