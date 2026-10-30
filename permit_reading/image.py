@@ -204,8 +204,8 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
     先逐 ROI 找第一次命中(每欄只收第一個 ROI),再以 permit 多數票補缺的那欄、互證兩欄。
     不碰硬碟:命中的裁切圖放在回傳的 crops,由 run_scan 寫出(#18)。
 
-    roi_filter：若非空字串，只在 first-hit 時讀指定的 ROI（對應 CLI --roi）;
-    參數注入而非模組全域,行為只依輸入決定。
+    roi_filter：若非空字串，第一次命中只讀指定的 ROI(對應 CLI --roi;不是 mol 就連 mol 多數票
+    也不跑);缺欄時的 permit 上下半多數票照跑。參數注入而非模組全域,行為只依輸入決定。
     """
     stem = _crop_stem(docx_name, img_name)
     result = _empty_result(docx_name, img_name, DocxClass.LARGE)
@@ -223,14 +223,19 @@ def _confirm_by_permit_vote(result: ScanResult, image_bytes: bytes, ocr: Ocr) ->
     兩欄都有值卻不同時不在這裡處理 —— 衝突留給送審決策(mol≠permit 衝突)。
     """
     if result.mol and result.id:
-        _cross_check(result, result.id, vote_conf=0.0)
+        _mark_cross_match_if_agree(result, result.id)
         return
     entries = (_collect_permit_votes(image_bytes, Roi.PERMIT_UPPER, ocr)
                + _collect_permit_votes(image_bytes, Roi.PERMIT_LOWER, ocr))
     vote = majority_vote(entries)
-    if not vote and entries:
-        _mark_permit_partial(result, entries)
-    _cross_check(result, vote.value, vote.conf)
+    if not vote:
+        if entries:
+            _mark_permit_partial(result, entries)
+        return
+    if result.mol:
+        _mark_cross_match_if_agree(result, vote.value)
+    else:
+        _adopt_permit_vote(result, vote)
 
 
 def _mark_permit_partial(result: ScanResult, entries: list[tuple[str, float]]) -> None:
@@ -245,15 +250,18 @@ def _mark_permit_partial(result: ScanResult, entries: list[tuple[str, float]]) -
     )
 
 
-def _cross_check(result: ScanResult, permit_vote: str, vote_conf: float) -> None:
-    """mol 與 permit 相同 → 交叉比對吻合;mol 沒讀到 → permit 多數票就是讀值。"""
-    if result.mol and permit_vote and result.mol == permit_vote:
+def _mark_cross_match_if_agree(result: ScanResult, permit_value: str) -> None:
+    """mol 與 permit 讀到同一個號碼 → 交叉比對吻合。"""
+    if result.mol == permit_value:
         result.cross_match = True
         logger.info(f"  ✓ 交叉比對吻合：{result.mol}")
-    elif not result.mol and permit_vote:
-        result.id, result.id_layer, result.id_conf = permit_vote, 0, vote_conf
-        result.id_from_vote = True
-        logger.info(f"  → mol 無值，permit 多數票：{permit_vote}  avg_conf={vote_conf}")
+
+
+def _adopt_permit_vote(result: ScanResult, vote: Vote) -> None:
+    """mol 沒讀到:permit 多數票就是這張圖的許可證讀值(取代 first-hit 那一筆)。"""
+    result.id, result.id_layer, result.id_conf = vote.value, 0, vote.conf
+    result.id_from_vote = True
+    logger.info(f"  → mol 無值，permit 多數票：{vote.value}  avg_conf={vote.conf}")
 
 
 def _empty_result(docx_name: str, img_name: str,
