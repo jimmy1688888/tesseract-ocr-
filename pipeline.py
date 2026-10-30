@@ -50,13 +50,11 @@ Google 認證（程式內服務帳戶模擬，不使用金鑰檔）：
 
 import csv
 import json
-import time
 import logging
 import argparse
-import functools
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
+from typing import TYPE_CHECKING, NamedTuple
 
 import pytesseract
 
@@ -140,79 +138,8 @@ INPUT_DIR  = Path("./docs")
 from submission_decision import Decision, Destination, read_decisions  # noqa: E402
 from permit_reading import ROI_REGIONS, TESS_LANG, TIER1_IMAGES, unscannable  # noqa: E402
 from permit_scan import read_docx_images, run_scan  # noqa: E402
+from retry import is_retryable_google_error, with_retry  # noqa: E402
 
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# ①' 共用工具：重試 decorator
-# ═══════════════════════════════════════════════════════════════════════════
-
-def with_retry(
-    max_attempts: int = 5,
-    initial_wait: float = 2.0,
-    backoff_factor: float = 2.0,
-    max_wait: float = 30.0,
-    retryable_exceptions: tuple = (Exception,),
-    should_retry: Optional[Callable[[BaseException], bool]] = None,
-):
-    """指數退避重試 decorator（純 stdlib，無需 tenacity）。
-
-    參數：
-      max_attempts         ：總嘗試次數（含第一次）。
-      initial_wait         ：第一次失敗後等待秒數。
-      backoff_factor       ：每次失敗後等待時間乘以此倍數。
-      max_wait             ：等待時間上限。
-      retryable_exceptions ：哪些 exception 才會觸發重試。
-      should_retry         ：額外的判斷函數；回傳 False 表示此次例外不重試（直接 raise）。
-
-    生產環境建議改用 tenacity 套件；此處用 stdlib 是為了不新增相依。
-    """
-    def decorator(fn: Callable) -> Callable:
-        @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-            wait = initial_wait
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    return fn(*args, **kwargs)
-                except retryable_exceptions as e:
-                    if should_retry is not None and not should_retry(e):
-                        raise
-                    if attempt == max_attempts:
-                        logger.error(
-                            f"{fn.__name__} 重試 {max_attempts} 次後仍失敗：{e!r}"
-                        )
-                        raise
-                    logger.warning(
-                        f"{fn.__name__} 第 {attempt}/{max_attempts} 次失敗：{e!r}；"
-                        f"{wait:.1f}s 後重試"
-                    )
-                    time.sleep(wait)
-                    wait = min(wait * backoff_factor, max_wait)
-        return wrapper
-    return decorator
-
-
-def _is_retryable_google_error(exc: BaseException) -> bool:
-    """判斷 Google API 例外是否值得重試。
-
-    可重試：
-      - 連線 / 逾時錯誤
-      - HttpError 429（rate limit）、5xx（伺服器端錯誤）
-      - google.api_core 的 ServiceUnavailable / DeadlineExceeded / Aborted
-    不可重試（直接拋出）：
-      - 4xx 其他錯誤（如 403 權限、404 找不到資源）→ 重試也沒用
-    """
-    if isinstance(exc, (ConnectionError, TimeoutError)):
-        return True
-    if isinstance(exc, HttpError):
-        status = getattr(exc.resp, "status", 0)
-        return status == 429 or 500 <= status < 600
-    if isinstance(exc, (gax_exceptions.ServiceUnavailable,
-                        gax_exceptions.DeadlineExceeded,
-                        gax_exceptions.Aborted,
-                        gax_exceptions.ResourceExhausted)):
-        return True
-    return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -272,7 +199,7 @@ from vision_verification import run_vision_items  # noqa: E402
         gax_exceptions.GoogleAPICallError,
         gax_exceptions.RetryError,
     ),
-    should_retry=_is_retryable_google_error,
+    should_retry=is_retryable_google_error,
 )
 def vision_text(img_path: str) -> str:
     """送截圖給 Google Vision OCR,回傳全文(讀不到或 API 回報錯誤時為空字串)。
@@ -304,7 +231,7 @@ def vision_text(img_path: str) -> str:
     initial_wait=2.0,
     retryable_exceptions=(HttpError, ConnectionError, TimeoutError,
                           gax_exceptions.GoogleAPICallError),
-    should_retry=_is_retryable_google_error,
+    should_retry=is_retryable_google_error,
 )
 def _sheets_append_atomic(values: list[list[str]]) -> None:
     """單次 atomic append。values 為已組裝好的二維 list。
