@@ -151,3 +151,25 @@ def real_ocr():
     employer_extract._page_score_cache.clear()
     yield
     employer_extract._page_score_cache.clear()
+
+
+# ─── 讀原始碼的架構測試共用(ADR-0014)──────────────────────────────────────
+# module.__file__、inspect.getsource(module)、ROOT.glob("*.py") 在 package 上只看得到
+# __init__.py(或整個看不到),測試會悄悄變弱而不會變紅 —— 一律走這裡。
+
+def module_sources(module) -> list[Path]:
+    """一個 module 的原始碼檔:單檔回傳那一檔,package 回傳底下所有 .py。"""
+    package_dirs = getattr(module, "__path__", None)
+    if package_dirs is None:
+        return [Path(module.__file__)]
+    return sorted(p for d in package_dirs for p in Path(d).rglob("*.py"))
+
+
+def project_packages() -> list[Path]:
+    """專案根目錄下的 package(含 __init__.py 的資料夾)。"""
+    return sorted(p.parent for p in ROOT.glob("*/__init__.py"))
+
+
+def project_sources() -> list[Path]:
+    """專案的所有原始碼檔:根目錄的 .py 加上每個 package 底下的 .py。"""
+    return sorted([*ROOT.glob("*.py"), *(p for d in project_packages() for p in d.rglob("*.py"))])

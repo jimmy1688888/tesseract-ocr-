@@ -27,7 +27,7 @@ from pytesseract import Output
 
 import docx_images
 from matches_csv import DocxClass, ResultStatus, Roi, ScanResult
-from permit_patterns import RE_PERMIT_ID_LIST_LOWER, find_permits, permit_id_patterns
+from permit_patterns import find_permits, permit_id_patterns
 from pixels import preprocess
 # 停止擴掃與規則 A2 用同一個多數票謂詞(ADR-0005);送審門檻不在這裡用
 from submission_decision import is_permit_vote
@@ -373,7 +373,7 @@ def scan_image_large(docx_name: str, img_name: str, image_bytes: bytes,
         upper_entries = _collect_permit_votes(image_bytes, ROI_REGIONS[Roi.PERMIT_UPPER], ocr)
         lower_entries = _collect_permit_votes(
             image_bytes, ROI_REGIONS[Roi.PERMIT_LOWER], ocr,
-            permit_id_list=RE_PERMIT_ID_LIST_LOWER)
+            permit_id_list=permit_id_patterns(Roi.PERMIT_LOWER))
         all_entries = upper_entries + lower_entries
         vote = majority_vote(all_entries)
         permit_vote, permit_vote_avg_conf = vote.value, vote.conf

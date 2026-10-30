@@ -7,6 +7,8 @@
 import ast
 from pathlib import Path
 
+from conftest import project_packages, project_sources
+
 ROOT = Path(__file__).resolve().parent
 PIPELINE = ROOT / "pipeline.py"
 
@@ -16,7 +18,7 @@ def _tree(path: Path) -> ast.Module:
 
 
 def _project_modules() -> set[str]:
-    return {p.stem for p in ROOT.glob("*.py")}
+    return {p.stem for p in ROOT.glob("*.py")} | {d.name for d in project_packages()}
 
 
 def _imported_from_project(tree: ast.Module) -> set[str]:
@@ -66,7 +68,7 @@ def _pipeline_aliases(tree: ast.Module) -> set[str]:
 def test_nobody_takes_other_modules_names_through_pipeline():
     borrowed = _imported_from_project(_tree(PIPELINE))
     found = []
-    for path in sorted(ROOT.glob("*.py")):
+    for path in project_sources():
         if path == PIPELINE:
             continue
         tree = _tree(path)

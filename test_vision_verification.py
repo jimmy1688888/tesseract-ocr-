@@ -28,11 +28,13 @@ class TestPermitInText:
         assert permit_in_text("No. Izin 1234", "permit") == "1234"
 
     def test_tesseract_and_vision_choose_patterns_in_one_place(self):
-        """ROI → pattern 的選擇只一處:掃描迴圈與 Vision 取號都呼叫 permit_id_patterns。"""
-        import inspect
-
+        """ROI → pattern 的選擇只一處:掃描(first-hit 與多數票)與 Vision 取號都呼叫
+        permit_id_patterns,許可證判讀裡沒有任何一處直接拿 pattern 清單。"""
         import permit_reading
-        assert "permit_id_patterns(roi_name)" in inspect.getsource(permit_reading.scan_image_large)
+        from conftest import module_sources
+        sources = "\n".join(p.read_text(encoding="utf-8") for p in module_sources(permit_reading))
+        assert "permit_id_patterns(" in sources
+        assert "RE_PERMIT_ID_LIST" not in sources
         assert permit_patterns.permit_id_patterns("permit_lower") is \
             permit_patterns.RE_PERMIT_ID_LIST_LOWER
         assert permit_patterns.permit_id_patterns("permit_upper") is \
@@ -52,7 +54,6 @@ class TestPermitInText:
         """Tesseract 掃描與 Vision 取號用的是同一份 pattern 與同一個函式。"""
         import permit_reading
         assert permit_reading.find_permits is permit_patterns.find_permits
-        assert permit_reading.RE_PERMIT_ID_LIST_LOWER is permit_patterns.RE_PERMIT_ID_LIST_LOWER
 
 
 def _item(tmp_path, *, value="1234", roi="permit_lower", crop=True, **kw):

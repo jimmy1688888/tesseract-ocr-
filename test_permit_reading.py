@@ -99,6 +99,53 @@ class TestScanImageLarge:
         assert r.id == "1234"
 
 
+NON_VOTE = [c for c in FIRST_HIT if c not in PERMIT_VOTE_CONFIGS]
+
+
+class TestFirstHitPerField:
+    """first-hit 每欄只收第一個命中:之後的 ROI、之後的設定都不再改那一欄。
+
+    兩欄都讀到時不跑 permit 多數票,所以這裡讀到的就是最後寫進列的值。
+    """
+
+    @staticmethod
+    def _mol_vote():
+        return FakeOcr().every("mol", "MOL 1234", 70.0, PERMIT_VOTE_CONFIGS)
+
+    def test_upper_hit_skips_the_lower_half(self):
+        ocr = (self._mol_vote().every("permit_upper", "No. Izin: 1234", 60.0)
+               .every("permit_lower", "No. Izin 5678", 90.0))
+
+        r, crops = _large(ocr)
+
+        assert r.id == "1234"
+        assert "permit_lower" not in ocr.read_rois
+        assert [c.path for c in crops] == [r.mol_crop, r.permit_crop]
+        assert ROI_NAME[crops[1].roi] == "permit_upper"
+
+    def test_hit_config_and_roi_are_the_first_field_hit(self):
+        ocr = FakeOcr()
+        ocr[("mol", NON_VOTE[0]["name"])] = ("MOL 1234", 55.0)
+        ocr[("permit_upper", NON_VOTE[1]["name"])] = ("No. Izin: 1284", 65.0)
+
+        r, _ = _large(ocr)
+
+        assert (r.hit_config, r.hit_roi) == (NON_VOTE[0]["name"], R.Roi.MOL)
+        assert (r.mol, r.mol_conf, r.mol_from_vote) == ("1234", 55.0, False)
+        assert (r.id, r.id_conf, r.id_from_vote) == ("1284", 65.0, False)
+
+    def test_first_config_to_hit_sets_the_confidence(self):
+        ocr = self._mol_vote()
+        first, *later = FIRST_HIT
+        ocr[("permit_upper", first["name"])] = ("No. Izin: 1234", 50.0)
+        for cfg in later:
+            ocr[("permit_upper", cfg["name"])] = ("No. Izin: 9999", 90.0)
+
+        r, _ = _large(ocr)
+
+        assert (r.id, r.id_conf) == ("1234", 50.0)
+
+
 class TestScanImageMolOnly:
 
     def test_vote_beats_first_hit(self):
@@ -179,15 +226,21 @@ class TestReadLargeDocx:
         assert (reading.result.id, reading.result.id_conf) == ("1234", 70.0)
 
 
+def _source_trees():
+    import ast
+    from conftest import module_sources
+    return [ast.parse(p.read_text(encoding="utf-8")) for p in module_sources(R)]
+
+
 def test_permit_reading_does_not_import_pipeline():
     """判讀不依賴流程模組:pipeline 2,000 行、Google 套件、身分物件都不該被拉進來。"""
     import ast
-    import inspect
-    tree = ast.parse(inspect.getsource(R))
-    imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import)
-                for a in n.names}
-    imported |= {n.module.split(".")[0] for n in ast.walk(tree)
-                 if isinstance(n, ast.ImportFrom) and n.module}
+    imported = set()
+    for tree in _source_trees():
+        imported |= {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import)
+                     for a in n.names}
+        imported |= {n.module.split(".")[0] for n in ast.walk(tree)
+                     if isinstance(n, ast.ImportFrom) and n.module}
     assert "pipeline" not in imported
     assert not {m for m in imported if m.startswith("google")}
 
@@ -195,10 +248,10 @@ def test_permit_reading_does_not_import_pipeline():
 def test_only_the_vote_predicate_comes_from_submission_decision():
     """許可證判讀不碰送審門檻:只為停止擴掃用多數票謂詞(ADR-0005、#58)。"""
     import ast
-    from pathlib import Path
-    tree = ast.parse(Path(R.__file__).read_text(encoding="utf-8"))
-    names = {a.name for n in ast.walk(tree)
-             if isinstance(n, ast.ImportFrom) and n.module == "submission_decision"
-             for a in n.names}
-    plain = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    names, plain = set(), set()
+    for tree in _source_trees():
+        names |= {a.name for n in ast.walk(tree)
+                  if isinstance(n, ast.ImportFrom) and n.module == "submission_decision"
+                  for a in n.names}
+        plain |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     assert names == {"is_permit_vote"} and "submission_decision" not in plain
