@@ -171,6 +171,14 @@ python pipeline.py --roi mol              # 只掃某個 ROI（mol / permit_uppe
 | `執行.bat` | 日常使用 | 把 .docx 丟進 `docs\` 後雙擊，跑完視窗停留可看結果 |
 | `更新.bat` | 取得新版 | `git pull` + 同步套件（專案需以 `git clone` 取得，ZIP 解壓版無法一鍵更新） |
 
+`pipeline.py` 的結束碼就是一批的結果(見 CONTEXT.md),`執行.bat` 依它印收尾那句話(措辭以 bat 為準,這裡只寫意思):
+
+| 結束碼 | 一批的結果 | 收尾告訴人 |
+|---|---|---|
+| 0 | 跑完(含只做 preflight 且通過) | 去 Sheets 看結果 |
+| 2 | 被擋下:preflight 沒過、沒有 .docx、`--file` 不存在、`--image` 對不到、參數打錯 —— Sheets 沒動 | 什麼都沒動;照上方訊息排除後重跑 |
+| 其他(1 = 中途出錯) | 開跑後整批中止(身分或權限被拒、Sheets 寫入失敗…);Python 沒裝是 9009 | 這一批沒寫進 Sheets;截圖回報管理者 |
+
 > 三個 .bat 為 **Big5 編碼 + CRLF 換行**（cmd 原生格式），請勿用 UTF-8 編輯器另存，否則中文會變亂碼。
 
 ---

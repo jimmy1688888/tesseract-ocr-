@@ -52,6 +52,7 @@ import csv
 import json
 import logging
 import argparse
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -73,6 +74,7 @@ from permit_lookup import PermitLookup, load_roster
 
 # 一批:這次要處理哪些 docx(完整路徑)。只是設定,結果不放進去(ADR-0009)。
 from batch import Batch
+from batch_result import BatchResult
 from employer_result import EMPLOYER_COLUMNS, EmployerExtraction, ExtractionStatus
 # 寫進 Sheets 的一列(A~D),結果在哪一步確定就在哪一步建好(#12)。
 from sheet_row import SheetRow
@@ -574,8 +576,8 @@ def _image_filter_miss(docx_files: list[Path], image: str) -> str | None:
     return None
 
 
-def main(opts: argparse.Namespace, vision: VisionReader | None = None) -> None:
-    """主流程。接收已解析的 CLI options，不再依賴 module-level 全域變數。
+def main(opts: argparse.Namespace, vision: VisionReader | None = None) -> BatchResult:
+    """跑一批,交出一批的結果(跑完/被擋下);中途出錯是往上拋的例外(CONTEXT「一批的結果」)。
 
     vision 不給就在掃描之後建一個 GoogleVisionReader(測試換假的),許可證與雇主兩側
     共用;拿不到憑證就整批中止、不寫 Sheets(見 test_no_credentials.py)。"""
@@ -587,30 +589,28 @@ def main(opts: argparse.Namespace, vision: VisionReader | None = None) -> None:
     # ── 步驟 0：preflight ──────────────────────────────────────────────────
     # 放在最前面的理由：掃描階段可能跑數十分鐘，跑完才發現 Sheets 沒權限、
     # 結果寫不進去，等於整批白做。憑證問題要在花時間之前就攔下來。
-    if not opts.skip_preflight:
-        if not run_preflight(batch, roster):
-            return
+    if not opts.skip_preflight and not run_preflight(batch, roster):
+        return BatchResult.BLOCKED
     if opts.preflight_only:
-        return
+        return BatchResult.FINISHED
 
     # preflight 的輸入閘門看的也是這一句;--skip-preflight 時只剩這裡擋。
     problem = batch.problem()
     if problem:
         logger.error(problem)
-        return
+        return BatchResult.BLOCKED
     docx_files = list(batch.docx_files)
     if batch.single_file:
         logging.getLogger().setLevel(logging.DEBUG)
         logger.debug(f"單檔 DEBUG 模式：{batch.source.name}")
 
-    # --image 只在單檔除錯用:對不到就是指令打錯,直接結束 —— 不寫 Sheets、不跑雇主
-    # 擷取(那要花 Vision),不套用「每份 docx 一列」的規則。要在掃描之前擋:
-    # 掃描一開始就覆寫 matches.csv。small/large 分類在掃描時邊掃邊印。
+    # --image 只在單檔除錯用:對不到就是指令打錯,被擋下 —— 不跑雇主擷取(要花 Vision)、不套用
+    # 「每份 docx 一列」的規則。要在掃描之前擋:掃描一開始就覆寫 matches.csv。
     if opts.image:
         missing = _image_filter_miss(docx_files, opts.image)
         if missing:
             logger.error(missing)
-            return
+            return BatchResult.BLOCKED
 
     # ── 步驟 2：scan → matches.csv ─────────────────────────────────────────
     logger.info("── 步驟 2：Tesseract 掃描 ──")
@@ -638,6 +638,7 @@ def main(opts: argparse.Namespace, vision: VisionReader | None = None) -> None:
     outcomes.log_review_list()
 
     logger.info("── 全部完成 ──")
+    return BatchResult.FINISHED
 
 
 def _parse_args() -> argparse.Namespace:
@@ -661,7 +662,6 @@ def _parse_args() -> argparse.Namespace:
     opts = parser.parse_args()
     if opts.preflight_only and opts.skip_preflight:
         parser.error("--preflight-only 與 --skip-preflight 互斥")
-    # 驗證 --roi（過去在 __main__ 內驗證後寫到 globals()，現於此處驗證後由 main 直接讀 opts.roi）
     if opts.roi:
         valid_rois = [str(r) for r in ROI_REGIONS]
         if opts.roi not in valid_rois:
@@ -675,4 +675,4 @@ def _parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     opts = _parse_args()
     logging.getLogger().setLevel(getattr(logging, opts.log_level))
-    main(opts)
+    sys.exit(main(opts).exit_code)   # 執行.bat 依結束碼印收尾那句話(CONTEXT「一批的結果」)

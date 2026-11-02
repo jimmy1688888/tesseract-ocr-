@@ -16,6 +16,7 @@ from conftest import FakeVision
 import employer_extract
 import matches_csv
 import pipeline as P
+from batch_result import BatchResult
 import submission_decision
 from matches_csv import ScanResult
 from employer_result import EmployerExtraction, EmployerValues, ExtractionStatus
@@ -200,8 +201,9 @@ BEFORE_12 = [
 
 def test_fifteen_columns_cell_by_cell(world):
     sheets, vision, _ = world
-    P.main(_opts(), vision)
+    result = P.main(_opts(), vision)
     assert sheets == BEFORE_12
+    assert result is BatchResult.FINISHED      # 一批的結果(#75):有人工審查列也算跑完
 
 
 def test_one_vision_reader_per_run(world, monkeypatch):
