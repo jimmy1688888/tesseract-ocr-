@@ -45,6 +45,10 @@ docx 在流程中被縮成檔名(穿過 `matches.csv` 時只剩 `source_docx`),�
 - **名冊查表器**:2.2MB 唯讀資源,跨批共用合理;它是降級來源,不是本批的狀態
 - **CLI 選項**(`--image`、`--roi`、`--full-scan`):已經以參數傳給 `run_scan`
 - **Google 身分與 client**:[#3](https://github.com/jimmy1688888/tesseract-ocr-/issues/3) 已讓它自成 module
+- **認頁結果的備忘**(`PageIdentifier`,候選 X,2026-11-03):純函式的備忘,不是本批的
+  結果 —— 拿掉只會變慢、不會變錯。是注入的服務,不掛在 `Batch` 上;只記分數不記圖的
+  bytes(一份 docx 的圖動輒數 MB)。否決過「各階段自己重評」:反查救援很常見,同一份
+  docx 評兩次的代價太高
 
 ## 後果
 
