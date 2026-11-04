@@ -27,8 +27,9 @@ class ExtractionStatus(Enum):
     擷取失敗 = "擷取失敗"          # 擷取時拋例外(Vision 呼叫失敗以外的)
 
 
-# 一條疑慮講的是一整份時,「哪一格」寫這個(L 欄冠 H~O)。
-WHOLE = "整份"
+# 一條疑慮講的是一整份時,「哪一格」寫這個。與欄位名稱同一層級:不寫 H~O,
+# 那也是欄位字母,Sheets 拿掉欄位(#30)就指錯(#29)。
+WHOLE = "雇主資料"
 
 # 沒擷取的原因(L 欄)。只陳述確定的事實;例外名稱不寫,看 Sheets 的人用不到,日誌有。
 _NOT_EXTRACTED = {
@@ -63,8 +64,8 @@ VALUE_KEYS = tuple(f.name for f in fields(EmployerValues))
 class Doubt:
     """一條疑慮:哪一格(欄位值的名稱)、什麼事實。
 
-    事實只陳述確定的事,不推斷成因(CONTEXT.md「疑慮標示」)。欄位字母不寫在事實裡,
-    由 compose_doubts 依 EMPLOYER_COLUMNS 加 —— L 欄的寫法只在那一處。
+    事實只陳述確定的事,不推斷成因(CONTEXT.md「疑慮標示」)。欄位名稱不寫在事實裡,
+    由 compose_doubts 冠上 —— L 欄的寫法只在那一處。
     """
     field: str
     fact: str
@@ -75,7 +76,7 @@ class Doubt:
             raise ValueError(f"疑慮指向不存在的欄位:{self.field!r}")
 
 
-# Sheets 的 H~O:哪一欄放哪個值。寫 Sheets 與疑慮冠的欄位字母都看這一張。
+# Sheets 的 H~O:哪一欄放哪個值。疑慮冠的是欄位名稱、不看這一張(#29)。
 DOUBT_KEY = "疑慮標示"
 EMPLOYER_COLUMNS = (
     ("H", "雇主名稱_中"), ("I", "雇主名稱_英"),
@@ -83,16 +84,17 @@ EMPLOYER_COLUMNS = (
     ("L", DOUBT_KEY), ("M", "地址_英"),
     ("N", "郵遞區號"), ("O", "電話"),
 )
-_COLUMN_OF = {key: col for col, key in EMPLOYER_COLUMNS} | {WHOLE: "H~O"}
 
 
 def compose_doubts(doubts: tuple[Doubt, ...]) -> str:
-    """把疑慮清單組成 L 欄一格,每條冠上欄位字母指明是哪一格。L 欄只在這裡組。
+    """把疑慮清單組成 L 欄一格,每條冠上欄位名稱指明是哪一格。L 欄只在這裡組。
+
+    冠名稱不冠字母(#29):字母是寫死的欄位位置,Sheets 移動欄位後會安靜地指到別格。
 
     與 D 欄分開的理由不變(D 欄專講許可證判讀,不同主題);但名稱與地址同屬
     雇主資料,是同一個主題下的多個欄位,合在一格不算一詞多義。
     """
-    return "；".join(f"{_COLUMN_OF[d.field]}:{d.fact}" for d in doubts)
+    return "；".join(f"{d.field}:{d.fact}" for d in doubts)
 
 
 @dataclass(frozen=True)

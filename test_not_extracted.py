@@ -38,11 +38,11 @@ def _vision(contract_text: str = "", pledge_text: str = _PLEDGE_TEXT) -> FakeVis
 class TestReasonInLColumn:
 
     @pytest.mark.parametrize("status, l_column", [
-        (ExtractionStatus.雇主區塊未錨定, "H~O:契約頁雇主區塊未錨定,未擷取"),
-        (ExtractionStatus.找不到契約頁, "H~O:找不到契約頁,未擷取"),
-        (ExtractionStatus.docx無內嵌圖, "H~O:docx 無內嵌圖,未擷取"),
-        (ExtractionStatus.契約頁Vision呼叫失敗, "H~O:契約頁 Vision 呼叫失敗,未擷取"),
-        (ExtractionStatus.擷取失敗, "H~O:雇主擷取失敗(例外),未擷取"),
+        (ExtractionStatus.雇主區塊未錨定, "雇主資料:契約頁雇主區塊未錨定,未擷取"),
+        (ExtractionStatus.找不到契約頁, "雇主資料:找不到契約頁,未擷取"),
+        (ExtractionStatus.docx無內嵌圖, "雇主資料:docx 無內嵌圖,未擷取"),
+        (ExtractionStatus.契約頁Vision呼叫失敗, "雇主資料:契約頁 Vision 呼叫失敗,未擷取"),
+        (ExtractionStatus.擷取失敗, "雇主資料:雇主擷取失敗(例外),未擷取"),
     ])
     def test_each_status_states_why(self, status, l_column):
         assert EmployerExtraction(status).疑慮標示 == l_column
@@ -62,22 +62,22 @@ class TestRescueAlongsideTheReason:
                                           roi=None, deink=False)
         assert r.status is ExtractionStatus.雇主區塊未錨定
         assert r.values.雇主名稱_中 == "姜信安"
-        assert r.疑慮標示 == "H~O:契約頁雇主區塊未錨定,未擷取；H:中文名取自切結書頁(image5.jpeg)"
+        assert r.疑慮標示 == "雇主資料:契約頁雇主區塊未錨定,未擷取；雇主名稱_中:中文名取自切結書頁(image5.jpeg)"
 
     def test_contract_page_not_found_then_rescue(self, monkeypatch):
         r = ee.extract_employer_from_docx(_contract(0), _vision(), roi=None)
         assert r.status is ExtractionStatus.找不到契約頁
         assert r.values.雇主名稱_中 == "姜信安"
-        assert r.疑慮標示 == "H~O:找不到契約頁,未擷取；H:中文名取自切結書頁(image5.jpeg)"
+        assert r.疑慮標示 == "雇主資料:找不到契約頁,未擷取；雇主名稱_中:中文名取自切結書頁(image5.jpeg)"
 
     def test_failed_rescue_leaves_only_the_reason(self, monkeypatch):
         r = ee.extract_employer_from_docx(_contract(0), _vision(pledge_text="無關文字"), roi=None)
         assert r.values.雇主名稱_中 == ""
-        assert r.疑慮標示 == "H~O:找不到契約頁,未擷取"
+        assert r.疑慮標示 == "雇主資料:找不到契約頁,未擷取"
 
     def test_no_images_does_not_rescue(self):
         r = ee.extract_employer_from_docx(pages_of(), FakeVision(), roi=None)   # 讀整頁就會紅
-        assert r.疑慮標示 == "H~O:docx 無內嵌圖,未擷取"
+        assert r.疑慮標示 == "雇主資料:docx 無內嵌圖,未擷取"
 
     def test_extraction_failure_does_not_rescue(self, tmp_path, monkeypatch):
         import pipeline
@@ -88,7 +88,7 @@ class TestRescueAlongsideTheReason:
         got = pipeline.collect_employer_fields(
             Batch.from_file(tmp_path / "99996.docx", output_dir=tmp_path), vision,
             identifier=FakeIdentifier(*_PLEDGE))
-        assert got["99996.docx"].疑慮標示 == "H~O:雇主擷取失敗(例外),未擷取"
+        assert got["99996.docx"].疑慮標示 == "雇主資料:雇主擷取失敗(例外),未擷取"
 
 
 class TestContractPageVisionCallFailed:
@@ -104,7 +104,7 @@ class TestContractPageVisionCallFailed:
         assert r.status is ExtractionStatus.契約頁Vision呼叫失敗
         assert r.values == EmployerValues()
         assert r.source.image == "image2.jpeg"        # 截圖照樣留著,人工看得到
-        assert r.疑慮標示 == "H~O:契約頁 Vision 呼叫失敗,未擷取"
+        assert r.疑慮標示 == "雇主資料:契約頁 Vision 呼叫失敗,未擷取"
 
     def test_pledge_rescue_does_not_run(self):
         vision = FakeVision(document=self._failing)
@@ -154,7 +154,7 @@ class TestTemplateDoubtIsAboutTheWholeDocx:
         r = ee.extract_employer_fields("\n".join([
             "甲方名稱: 王小明", "SELANJUTNYA DISEBUT PIHAK PERTAMA"]))
         assert r.source.template is Template.認不出
-        assert r.疑慮標示.startswith("H~O:契約樣板未辨識,以家庭類規則擷取")
+        assert r.疑慮標示.startswith("雇主資料:契約樣板未辨識,以家庭類規則擷取")
 
 
 class TestLogMatchesSheets:

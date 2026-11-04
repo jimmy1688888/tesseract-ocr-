@@ -41,7 +41,7 @@ def test_snapshot_row_records_status_values_and_composed_doubts():
     assert set(row) == set(snap.KEYS)
     assert row["擷取狀況"] == "擷取成功"
     assert row["雇主名稱_英"] == "WANG XIAO MING"
-    assert row["疑慮標示"] == "H:未擷取到中文名；J:中文地址未擷取到"
+    assert row["疑慮標示"] == "雇主名稱_中:未擷取到中文名；地址_中:中文地址未擷取到"
 
 
 # ─── 錄製與比對本身(tmp 底下的假 corpus、假解析器) ─────────────────────

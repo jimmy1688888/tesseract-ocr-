@@ -27,7 +27,7 @@ def test_33703_contract_page_failure(real_ocr):
 
     assert result.status is ExtractionStatus.契約頁Vision呼叫失敗
     assert result.source.image == rs.checked_contract_page("33703.docx")
-    assert result.疑慮標示 == "H~O:契約頁 Vision 呼叫失敗,未擷取"
+    assert result.疑慮標示 == "雇主資料:契約頁 Vision 呼叫失敗,未擷取"
 
 
 def test_30766_pledge_page_failure_stops_at_the_first_page(real_ocr):
@@ -45,7 +45,7 @@ def test_30766_pledge_page_failure_stops_at_the_first_page(real_ocr):
 
     assert len(reads) == 2
     assert result.values.雇主名稱_中 == ""
-    assert "H:未擷取到中文名；H:切結書頁 Vision 呼叫失敗" in result.疑慮標示
+    assert "雇主名稱_中:未擷取到中文名；雇主名稱_中:切結書頁 Vision 呼叫失敗" in result.疑慮標示
 
 
 def test_33703_next_page_failure_is_stated_in_d(real_ocr, monkeypatch):

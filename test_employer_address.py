@@ -151,7 +151,7 @@ class TestCityMismatchDoubt:
         """挑對沒救到(標籤被毀)、只剩安全網時,33704 型的資料要被標出來。"""
         f = _block(["高雄市左營區華夏路100號3樓", "Alamat:", _EN_KAOHSIUNG])
         assert f.values.地址_中.startswith("臺中市")          # 前提:確實挑到仲介那行
-        assert "J:縣市中英不符(臺中市／Kaohsiung City)" in f.疑慮標示
+        assert "地址_中:縣市中英不符(臺中市／Kaohsiung City)" in f.疑慮標示
 
     def test_same_city_not_flagged(self):
         f = _block(["地址:", "高雄市左營區華夏路100號3樓", "Alamat:", _EN_KAOHSIUNG])
@@ -185,7 +185,7 @@ class TestCityMismatchDoubt:
     def test_taipei_vs_new_taipei_is_flagged(self):
         f = _block(["地址:", "臺北市大安區復興南路一段10號", "Alamat:",
                     "No.10, Sec. 1, Wenhua Rd., Banqiao Dist., New Taipei City"])
-        assert "J:縣市中英不符(臺北市／New Taipei City)" in f.疑慮標示
+        assert "地址_中:縣市中英不符(臺北市／New Taipei City)" in f.疑慮標示
 
     def test_fuzzy_chinese_city_uses_standardized_name(self):
         """OCR 把縣市讀歪(桃園市 → 成園市)時比的是標準化後的縣市,不誤報。"""

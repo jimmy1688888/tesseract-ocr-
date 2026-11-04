@@ -13,6 +13,7 @@
 import re
 
 from contract_template import Template
+from employer_result import VALUE_KEYS, WHOLE
 from employer_extract import (EmployerAddress, EmployerNames, extract_employer_fields,
                               pick_employer_address, pick_employer_names, _name_doubt,
                               _house_number_doubt)
@@ -206,8 +207,8 @@ class TestComposedDoubtColumn:
                  "勞動契約 監護工", "地址:", "成園市格梅區梅翠路二段716巷7號",
                  "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
         d = _f(lines).疑慮標示
-        assert d.startswith("H:")
-        assert "J:" in d
+        assert d.startswith("雇主名稱_中:")
+        assert "郵遞區號:" in d
 
     def test_clean_row_is_empty(self):
         lines = ["甲方名稱 (以下簡稱為甲方): 李宜蓁",
@@ -219,8 +220,10 @@ class TestComposedDoubtColumn:
     def test_every_entry_names_its_column(self):
         lines = ["甲方名稱 (以下簡稱為甲方): 明芳", "Nama Majikan: SONG, MING-FANG",
                  "SELANJUTNYA DISEBUT PIHAK PERTAMA"]
+        prefixes = (*VALUE_KEYS, WHOLE)
         for part in _f(lines).疑慮標示.split("；"):
-            assert re.match(r"^[A-Z]:", part), part
+            assert part.split(":", 1)[0] in prefixes, part
+            assert not re.match(r"^[A-Z](~[A-Z])?:", part), part
 
 
 class TestHouseNumberCrossCheck:

@@ -123,10 +123,10 @@ class TestApplyRescue:
 
     def test_rescued_name_is_written_and_flagged(self):
         f = self._fields()
-        assert f.疑慮標示 == "H:未擷取到中文名"
+        assert f.疑慮標示 == "雇主名稱_中:未擷取到中文名"
         f = ee._apply_pledge_rescue(f, _pledge_pages(), _rescuing())
         assert f.values.雇主名稱_中 == "姜信安"
-        assert "H:中文名取自切結書頁(image5.jpeg)" in f.疑慮標示
+        assert "雇主名稱_中:中文名取自切結書頁(image5.jpeg)" in f.疑慮標示
         assert "未擷取到" not in f.疑慮標示      # 已經擷取到了,那句話變成假的
 
     def test_count_check_still_runs_on_the_rescued_name(self):
@@ -151,7 +151,7 @@ class TestApplyRescue:
         f = ee._apply_pledge_rescue(self._fields(), _pledge_pages(), _failing_vision())
         assert f.values.雇主名稱_中 == ""
         assert f.status is ExtractionStatus.擷取成功
-        assert f.疑慮標示 == "H:未擷取到中文名；H:切結書頁 Vision 呼叫失敗"
+        assert f.疑慮標示 == "雇主名稱_中:未擷取到中文名；雇主名稱_中:切結書頁 Vision 呼叫失敗"
 
     def test_failed_rescue_changes_nothing(self):
         """救不回來時 H 欄維持空、L 欄維持「未擷取到」。
@@ -162,7 +162,7 @@ class TestApplyRescue:
         f = self._fields()
         f = ee._apply_pledge_rescue(f, _pledge_pages(), _rescuing("無關文字"))
         assert f.values.雇主名稱_中 == ""
-        assert f.疑慮標示 == "H:未擷取到中文名"
+        assert f.疑慮標示 == "雇主名稱_中:未擷取到中文名"
 
     def test_english_name_is_never_overwritten(self):
         """只救中文名。切結書頁的英文反而讀壞過(32503 讀成 FU BIN ANI FU),
@@ -183,7 +183,7 @@ class TestPledgeVisionFailureShape:
         """找不到契約頁時本來就沒有「未擷取到中文名」,不該被補上。"""
         f = ee._apply_pledge_rescue(EmployerExtraction(ExtractionStatus.找不到契約頁),
                                     _pledge_pages(), _failing_vision())
-        assert f.疑慮標示 == "H~O:找不到契約頁,未擷取；H:切結書頁 Vision 呼叫失敗"
+        assert f.疑慮標示 == "雇主資料:找不到契約頁,未擷取；雇主名稱_中:切結書頁 Vision 呼叫失敗"
 
     def test_other_errors_still_give_up_quietly(self):
 

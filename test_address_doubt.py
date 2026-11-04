@@ -274,8 +274,8 @@ class TestSheetWiring:
         assert len(self._row("a.docx", _result())) == 15
 
     def test_doubt_lands_in_column_l(self):
-        row = self._row("b.docx", _result([Doubt("地址_中_標準", "路名未在該行政區的路名清單中")]))
-        assert row[self.L] == "J:路名未在該行政區的路名清單中"
+        row = self._row("b.docx", _result([Doubt("地址_中", "路名未在該行政區的路名清單中")]))
+        assert row[self.L] == "地址_中:路名未在該行政區的路名清單中"
 
     def test_english_column_is_ocr_verbatim(self):
         """M 欄只放 OCR 原文,官方英譯不得從任何路徑出現在列上。"""
@@ -294,7 +294,7 @@ class TestSheetWiring:
 
     def test_doubt_does_not_leak_into_reason_column(self):
         """D 欄專講許可證判讀,不能被雇主的疑慮汙染(一個欄位不承載兩種語意)。"""
-        row = self._row("d.docx", _result([Doubt("地址_中_標準", "縣市未比對到官方資料庫")]))
+        row = self._row("d.docx", _result([Doubt("郵遞區號", "縣市未比對到官方資料庫")]))
         assert "縣市" not in row[3]
 
     def test_unknown_docx_gives_empty_doubt_not_crash(self):

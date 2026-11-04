@@ -62,7 +62,7 @@ class TestExtractionFailureIsAResult:
         row = pipeline._row_to_sheet_values(
             SheetRow("99997.docx", "", SheetStatus.MANUAL_REVIEW, ""), got, None)
         assert row[7:11] + row[12:15] == [""] * 7         # H~O 照舊留空
-        assert row[11] == "H~O:雇主擷取失敗(例外),未擷取"   # L 寫原因(#46)
+        assert row[11] == "雇主資料:雇主擷取失敗(例外),未擷取"   # L 寫原因(#46)
 
 
 class TestSheetsRowPhone:
@@ -94,9 +94,9 @@ class TestColumns:
 
     def test_cell_gives_values_and_the_composed_l_column(self):
         r = EmployerExtraction(ExtractionStatus.擷取成功, EmployerValues(地址_中="台北市"),
-                               (Doubt("地址_中_標準", "中文地址未擷取到"),))
+                               (Doubt("地址_中", "中文地址未擷取到"),))
         assert r.cell("地址_中") == "台北市"
-        assert r.cell("疑慮標示") == "J:中文地址未擷取到"
+        assert r.cell("疑慮標示") == "地址_中:中文地址未擷取到"
 
     def test_o_column_is_display_form_but_value_stays_standard_form(self):
         """O 欄寫電話顯示形;擷取結果的值仍是電話標準形(比對、快照都用它)(#49)。"""

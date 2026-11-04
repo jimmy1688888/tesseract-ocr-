@@ -361,7 +361,7 @@ def extract_employer_fields(text: str) -> EmployerExtraction:
                  if values.雇主名稱_中 != names.cn else ""),
         *_doubts(_NAME_CN, _name_doubt(values.雇主名稱_中, values.雇主名稱_英, template)),
         *std.doubts,
-        *_doubts(_ADDR_STD, _house_number_doubt(values.地址_中, values.地址_英)),
+        *_doubts(_ADDR_CN, _house_number_doubt(values.地址_中, values.地址_英)),
     )
     return EmployerExtraction(ExtractionStatus.擷取成功, values, doubts, Source(template))
 
@@ -586,7 +586,10 @@ def _city_mismatch_doubt(city_cn: str, en_text: str) -> str:
 
 
 _NAME_CN = "雇主名稱_中"
-_ADDR_STD = "地址_中_標準"
+_ADDR_CN = "地址_中"
+# 郵遞區號留空的成因冠這一格:標準地址欄與路名層都要拿掉(#30、#78),之後這幾條
+# 講的就是「郵遞區號為什麼空」(#29)。
+_ZIP = "郵遞區號"
 _NAME_MISSING = Doubt(_NAME_CN, "未擷取到中文名")
 # 沒問到 ≠ 救不回:兩條並列,審查的人知道重跑也許能補回來(ADR-0015)。
 _PLEDGE_VISION_FAILED = Doubt(_NAME_CN, "切結書頁 Vision 呼叫失敗")
@@ -618,16 +621,16 @@ def _standardize_address(raw_cn: str, en_text: str = "") -> StandardAddress:
     庫或資料缺失時安靜跳過(try/except),絕不影響既有流程。
     """
     if not raw_cn.strip():
-        return StandardAddress("", "", _doubts(_ADDR_STD, "中文地址未擷取到"))
+        return StandardAddress("", "", _doubts(_ADDR_CN, "中文地址未擷取到"))
     try:
         from address_db import normalize_address
         r = normalize_address(raw_cn, en_text=en_text)
     except Exception:
-        return StandardAddress("", "", _doubts(_ADDR_STD, "地址庫無法使用"))
+        return StandardAddress("", "", _doubts(_ADDR_CN, "地址庫無法使用"))
     if not r.get("matched"):
-        return StandardAddress("", "", _doubts(_ADDR_STD, "縣市未比對到官方資料庫"))
+        return StandardAddress("", "", _doubts(_ZIP, "縣市未比對到官方資料庫"))
 
-    city_doubt = _doubts(_ADDR_STD, _city_mismatch_doubt(r["city"], en_text))
+    city_doubt = _doubts(_ADDR_CN, _city_mismatch_doubt(r["city"], en_text))
     # 縣市只靠模糊比對湊上、且路名也沒配到時,郵遞區號不採用:模糊配錯縣市時,
     # 「中山區」「中山路」這類全台通用的名字在錯誤縣市底下照樣配得到,會產出
     # 確信的錯值(實測「台桃市中壢區」→ 臺北市中山區、郵遞 104)。
@@ -640,8 +643,7 @@ def _standardize_address(raw_cn: str, en_text: str = "") -> StandardAddress:
 
     if r["district"] and r["road"]:        # 縣市+區+路都命中才給標準中文地址
         return StandardAddress(r["address_cn"], zipcode, city_doubt)
-    return StandardAddress("", zipcode,
-                           _doubts(_ADDR_STD, _address_doubt(raw_cn, r, trust_city)) + city_doubt)
+    return StandardAddress("", zipcode, _address_doubt(raw_cn, r, trust_city) + city_doubt)
 
 
 # 判定「地址文字裡是否有路名樣式」用的兩支 regex 就是 address_db 配路名時用的同兩支,
@@ -651,7 +653,7 @@ def _has_road_pattern(text: str) -> bool:
     return bool(_ROAD_SEG_RE.search(text) or _ROAD_RE.search(text))
 
 
-def _address_doubt(raw_cn: str, r: dict, trust_city: bool) -> str:
+def _address_doubt(raw_cn: str, r: dict, trust_city: bool) -> tuple[Doubt, ...]:
     """標準中文地址留空的成因。順序即優先序:先講最上游卡住的那一關。
 
     措辭一律只陳述**確定的事實**,不寫推斷的成因、也不給行動建議。
@@ -663,15 +665,15 @@ def _address_doubt(raw_cn: str, r: dict, trust_city: bool) -> str:
     if not trust_city:
         # 這條同時代表郵遞區號也被扣住,比下游的區/路更該先講。
         # 只提郵遞區號:官方英譯已不輸出,對看 Sheets 的人來說不存在那一欄。
-        return "縣市僅模糊比對命中,郵遞區號一併未採用"
+        return _doubts(_ZIP, "縣市僅模糊比對命中,郵遞區號一併未採用")
     if not r["district"]:
         # 路名配得到卻仍無區 → 該路名跨多個區,無從判定(反推只在唯一時啟動)
         if r["road"]:
-            return "行政區未判定(該路名在多個行政區皆有)"
-        return "行政區未判定"
+            return _doubts(_ADDR_CN, "行政區未判定(該路名在多個行政區皆有)")
+        return _doubts(_ZIP, "行政區未判定")
     if _has_road_pattern(raw_cn):
-        return "路名未在該行政區的路名清單中"
-    return "地址無路名樣式(鄉村型),以 OCR 原文為準"
+        return _doubts(_ADDR_CN, "路名未在該行政區的路名清單中")
+    return _doubts(_ADDR_CN, "地址無路名樣式(鄉村型),以 OCR 原文為準")
 
 
 # 台灣/印尼仲介區塊標記。台印電話都以 0 開頭、格式會重疊,無法靠純格式區分,
