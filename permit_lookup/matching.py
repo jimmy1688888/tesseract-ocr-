@@ -6,8 +6,8 @@ import re
 from collections import defaultdict
 
 # 台灣文字正規化的唯一來源(臺/台、鍾/鐘、全半形、段號寫法)。
-# address_db 只依賴標準函式庫、且 import 時不讀任何資料檔,故可安全頂層 import
-# ——即使 data/AllData.json 缺席也不影響本模組。見 docs/adr/0001。
+# address_db 只依賴標準函式庫、且 import 時不讀任何資料檔(縣市區表第一次判定郵遞
+# 區號時才載入),故可安全頂層 import。見 docs/adr/0001。
 from address_db import fold_variants
 from tw_phone import PHONE_MIN_LEN, standard_form
 

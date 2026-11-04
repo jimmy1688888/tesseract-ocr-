@@ -186,7 +186,7 @@ def collect_employer_fields(batch: Batch, vision: VisionReader | None = None, *,
     送 Vision 的 ROI 裁切圖(去紅章前原貌)同步存到 batch.employer_crop_dir,
     檔名 {docx主檔名}_{圖檔名},供人工複查。
     任何單檔失敗只記 warning、該檔 H~O 留空,絕不中斷主流程;
-    employer_extract 或其相依(address_db/AllData.json)缺失時整段安靜跳過。
+    employer_extract 載入失敗時整段安靜跳過;縣市區表讀不到則是該份擷取失敗(#78)。
     例外:拿不到憑證(建不起 Vision reader)不降級,往上拋讓整批中止 ——
     與許可證判讀同一個決定,見 test_no_credentials.py。vision 不給就在這裡建,
     所以憑證問題在這一步、第一份 docx 之前就拋出,不會被逐份的 try 吞掉。
@@ -296,7 +296,7 @@ def _row_to_sheet_values(row: SheetRow,
 
     E~G 欄由 B 欄的許可證值查名冊補上;H~O 為雇主欄位,依 source_docx 查
     collect_employer_fields() 回傳的 employer_by_docx,未擷取或失敗則留空。其中 L 欄不是
-    資料而是疑慮標示,說明中文標準地址(J)為何留空(見 ADR-0003)。
+    資料而是疑慮標示,說明雇主資料哪一格不可盡信(見 ADR-0003)。
     """
     return ([row.source_docx, row.permit, row.status.value, row.reason]
             + _agency_cols(row.permit, roster) + _employer_cols(row.source_docx, employer_by_docx))

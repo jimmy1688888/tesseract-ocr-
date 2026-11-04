@@ -7,7 +7,7 @@
 """
 from conftest import FakeVision, pages_of
 import employer_extract as ee
-from employer_extract import extract_employer_fields
+from employer_extract import EmployerAddress, extract_employer_fields
 from employer_result import (VALUE_KEYS, WHOLE, Doubt, EmployerExtraction, EmployerValues,
                              ExtractionStatus, compose_doubts)
 
@@ -35,46 +35,49 @@ class TestComposeDoubts:
         assert compose_doubts(doubts) == "地址_中:乙；雇主名稱_中:甲"
 
 
-class TestZipBlankReasonsArePrefixedZip:
-    """郵遞區號留空的三種成因冠「郵遞區號」;其餘地址疑慮冠「地址_中」(#29)。"""
+class TestAddressFactsGetFieldNames:
+    """地址庫給的事實不冠欄名;雇主擷取冠上:郵遞區號留空的成因冠「郵遞區號」,
+    縣市中英不符冠「地址_中」(#29、#78 Q2 表)。"""
 
-    def _fields(self, cn, en=""):
-        return [(d.field, d.fact) for d in ee._standardize_address(cn, en).doubts]
+    @staticmethod
+    def _doubts(cn, en=""):
+        return ee._check_address(EmployerAddress(cn, en, "")).doubts
 
-    def test_city_not_matched(self):
-        assert self._fields("XX@@市北區磐石路29號7樓") == [("郵遞區號", "縣市未比對到官方資料庫")]
+    def test_zip_blank_reason_is_prefixed_zip(self):
+        assert self._doubts("XX@@市北區磐石路29號7樓") == (Doubt("郵遞區號", "縣市未比對到官方資料庫"),)
+        assert self._doubts("新竹市OOO29號7樓") == (Doubt("郵遞區號", "行政區未判定"),)
+        assert self._doubts("台桃市中壢區中山路8號") == (
+            Doubt("郵遞區號", "縣市僅模糊比對命中,郵遞區號一併未採用"),)
 
-    def test_city_only_fuzzy(self):
-        fields = self._fields("台桃市中壢區天馬行空路8號")
-        assert ("郵遞區號", "縣市僅模糊比對命中,郵遞區號一併未採用") in fields
+    def test_city_mismatch_is_prefixed_address(self):
+        assert self._doubts("臺中市西區民權路88號5樓", "No.88, Zuoying Dist., Kaohsiung City") == (
+            Doubt("地址_中", "縣市中英不符(臺中市／Kaohsiung City)"),)
 
-    def test_district_not_determined(self):
-        assert ("郵遞區號", "行政區未判定") in self._fields("新竹市OOO29號7樓")
-
-    def test_district_ambiguous_by_road_is_address(self):
-        assert ("地址_中", "行政區未判定(該路名在多個行政區皆有)") in self._fields(
-            "新竹市OOO中正路29號7樓")
-
-    def test_road_not_in_list_is_address(self):
-        assert self._fields("新竹市北區天馬行空路29號7樓") == [
-            ("地址_中", "路名未在該行政區的路名清單中")]
-
-    def test_no_letter_prefix_left(self):
-        for cn in ("XX@@市北區磐石路29號7樓", "新竹市OOO29號7樓", "新竹市北區天馬行空路29號7樓", ""):
-            for d in ee._standardize_address(cn).doubts:
-                assert d.field in ("地址_中", "郵遞區號"), (cn, d)
-
-
-class TestStandardizeAddressReturnsAValue:
-
-    def test_returns_value_without_touching_anything(self):
-        r = ee._standardize_address("")
-        assert (r.standard, r.zip) == ("", "")
-        assert r.doubts == (Doubt("地址_中", "中文地址未擷取到"),)
+    def test_empty_address_is_a_fact_of_its_own(self):
+        """空輸入不呼叫地址庫:「中文地址未擷取到」,不是「縣市未比對到」。"""
+        r = ee._check_address(EmployerAddress("", "No. 5, Taoyuan City", ""))
+        assert (r.zip, r.doubts) == ("", (Doubt("地址_中", "中文地址未擷取到"),))
 
     def test_matched_address(self):
-        r = ee._standardize_address("新竹市北區磐石路29號7樓")
-        assert r.standard and r.zip and r.doubts == ()
+        r = ee._check_address(EmployerAddress("新竹市北區磐石路29號7樓", "", ""))
+        assert (r.zip, r.doubts) == ("300", ())
+
+    def test_english_hint_feeds_the_anchor(self):
+        """讀不到英文地址時,黏了紅章殘影的 en_hint 照樣餵英文行錨定。"""
+        r = ee._check_address(EmployerAddress(
+            "台桃市中壢區中山路8號", "", "司賜No. 8, Zhongshan Rd., Zhongli Dist., Taoyuan City"))
+        assert (r.zip, r.doubts) == ("320", ())
+
+
+class TestStandardAddressNoLongerProduced:
+
+    def test_standard_address_is_always_empty(self):
+        """路名層拿掉後標準中文地址算不出來,值永遠空;欄位由 #30 拿掉(#78)。"""
+        f = extract_employer_fields("\n".join([
+            "甲方名稱: 王小明", "Nama Majikan: WANG XIAO MING", "地址:",
+            "新竹市北區磐石路29號7樓", "SELANJUTNYA DISEBUT PIHAK PERTAMA"]))
+        assert (f.values.地址_中, f.values.地址_中_標準, f.values.郵遞區號) == (
+            "新竹市北區磐石路29號7樓", "", "300")
 
 
 class TestExtractedFieldsCarryTheList:
@@ -93,17 +96,17 @@ class TestExtractedFieldsCarryTheList:
 
 class TestOrderOfTheLColumn:
 
-    def test_name_then_address_then_city_then_house_number(self):
-        """L 欄的順序:樣板 → 名稱 → 地址 → 縣市 → 門牌(與改成清單之前逐字相同)。"""
+    def test_name_then_address_then_house_number_then_zip(self):
+        """L 欄的順序:樣板 → 名稱 → 地址_中(縣市中英不符)→ 門牌 → 郵遞區號(#78 Q2 表)。"""
         f = extract_employer_fields("\n".join([
             "甲方名稱: 王明", "Nama Majikan: WANG XIAO MING", "地址:",
-            "新竹市北區天馬行空路29號7樓",
+            "新竹市OOO天馬行空路29號7樓",
             "Alamat: No. 30, Tianma Rd., North Dist., Taichung City",
             "SELANJUTNYA DISEBUT PIHAK PERTAMA"]))
         assert f.疑慮標示 == ("雇主名稱_中:中文 2 字與英譯 3 音節不符；"
-                             "地址_中:路名未在該行政區的路名清單中；"
                              "地址_中:縣市中英不符(新竹市／Taichung City)；"
-                             "地址_中:門牌號中英不符(29／30)")
+                             "地址_中:門牌號中英不符(29／30)；"
+                             "郵遞區號:行政區未判定")
 
 
 class TestEnglishHintAnchorsTheAddress:
@@ -117,7 +120,7 @@ class TestEnglishHintAnchorsTheAddress:
             "司賜No. 8, Zhongshan Rd., Zhongli Dist., Taoyuan City",
             "SELANJUTNYA DISEBUT PIHAK PERTAMA"]))
         assert f.values.地址_英 == ""
-        assert (f.values.地址_中_標準, f.values.郵遞區號) == ("桃園市中壢區中山路8號", "320")
+        assert f.values.郵遞區號 == "320"
 
 
 class TestPledgeRescueAddsToTheList:

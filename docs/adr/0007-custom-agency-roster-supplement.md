@@ -1,5 +1,7 @@
 # 名冊補充檔:自建仲介放獨立檔,不改官方名冊
 
+> 部分被 [ADR-0016](0016-address-db-stops-at-district.md) 取代(2026-11-04):開頭以 `data/custom_roads.json` 為前例那段 —— 路名補充檔已刪除;名冊補充檔本身不受影響。
+
 [CONTEXT.md](../../CONTEXT.md) 把名冊定義為「許可證與仲介機構之間的唯一權威對照」,
 而它的更新方式是**整份重新下載覆蓋** `data/agency_roster.json`。
 

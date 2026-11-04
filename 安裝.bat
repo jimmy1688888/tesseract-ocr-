@@ -54,7 +54,7 @@ echo.
 if not exist "docs" mkdir docs
 if exist "service_account.json" (echo [V] service_account.json) else (echo [!] 缺 service_account.json — 請向管理者索取,放在本資料夾)
 if exist "data\agency_roster.json" (echo [V] data\agency_roster.json) else (echo [!] 缺 data\agency_roster.json — 仲介名冊,缺少時機構欄會留空)
-if exist "data\AllData.json" (echo [V] data\AllData.json) else (echo [!] 缺 data\AllData.json — 門牌地址庫,缺少時標準地址欄會留空)
+if exist "data\tw_districts.json" (echo [V] data\tw_districts.json) else (echo [!] 缺 data\tw_districts.json — 縣市區表隨程式附帶,缺少時雇主資料會擷取失敗,請執行「更新.bat」)
 
 echo.
 echo ============================================

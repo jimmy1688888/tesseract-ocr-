@@ -20,8 +20,7 @@ def test_employer_fields_match_snapshot(stem):
     saved = snap.load()
     if saved is None or stem not in saved["fields"]:
         pytest.skip(f"{stem} 沒有快照:執行 python snapshots.py record 錄製(會先印出內容給你看)")
-    msg = snap.mismatch_message(stem, saved, snap.current_fields([stem])[stem],
-                                snap.alldata_sha256())
+    msg = snap.mismatch_message(stem, saved, snap.current_fields([stem])[stem])
     assert msg is None, msg
 
 
@@ -70,7 +69,6 @@ def _parser(**override):
 
 def _record(lines, **kw):
     kw.setdefault("extract", _parser())
-    kw.setdefault("data_hash", "hash-A")
     kw.setdefault("today", "2026-10-19")
     return snap.record(out=lines.append, **kw)
 
@@ -85,10 +83,11 @@ class TestRecord:
             for k in snap.KEYS:
                 assert f"{stem} {k}" in text
 
-    def test_snapshot_keeps_output_keys_only_and_the_data_hash(self, corpus):
+    def test_snapshot_keeps_output_keys_only(self, corpus):
+        """門牌庫雜湊不再記(#78):縣市區表進了版控,變了 git diff 看得到。"""
         _record([])
         saved = snap.load()
-        assert saved["alldata_sha256"] == "hash-A"
+        assert set(saved) == {"recorded", "fields"}
         assert set(saved["fields"]["33701"]) == set(snap.KEYS)
         assert "疑慮" not in saved["fields"]["33701"]
         assert "擷取狀況" in snap.KEYS
@@ -143,30 +142,19 @@ class TestMismatchMessage:
     def test_match_is_none(self, corpus):
         saved = self._saved(corpus)
         now = snap.current_fields(["33701"], extract=_parser())["33701"]
-        assert snap.mismatch_message("33701", saved, now, "hash-A") is None
+        assert snap.mismatch_message("33701", saved, now) is None
 
     def test_names_the_cell_and_both_values(self, corpus):
         saved = self._saved(corpus)
         now = snap.current_fields(["33701"], extract=_parser(電話="新電話"))["33701"]
-        msg = snap.mismatch_message("33701", saved, now, "hash-A")
+        msg = snap.mismatch_message("33701", saved, now)
         assert "33701 電話" in msg and "電話@全文-33701" in msg and "新電話" in msg
         assert "雇主名稱_中" not in msg                     # 沒變的格不列
-
-    def test_says_when_the_address_data_changed(self, corpus):
-        saved = self._saved(corpus)
-        now = snap.current_fields(["33701"], extract=_parser(郵遞區號="999"))["33701"]
-        msg = snap.mismatch_message("33701", saved, now, "hash-B")
-        assert "AllData.json" in msg
-
-    def test_same_data_does_not_blame_the_data(self, corpus):
-        saved = self._saved(corpus)
-        now = snap.current_fields(["33701"], extract=_parser(郵遞區號="999"))["33701"]
-        assert "AllData.json" not in snap.mismatch_message("33701", saved, now, "hash-A")
 
     def test_comparing_never_writes(self, corpus):
         saved = self._saved(corpus)
         before = snap.snapshot_path().read_bytes()
         now = snap.current_fields(["33701"], extract=_parser(電話="新電話"))["33701"]
-        snap.mismatch_message("33701", saved, now, "hash-B")
+        snap.mismatch_message("33701", saved, now)
         assert snap.snapshot_path().read_bytes() == before
         assert len(list(snap.snapshot_path().parent.iterdir())) == 1

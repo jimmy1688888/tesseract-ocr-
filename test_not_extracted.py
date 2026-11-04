@@ -91,6 +91,25 @@ class TestRescueAlongsideTheReason:
         assert got["99996.docx"].疑慮標示 == "雇主資料:雇主擷取失敗(例外),未擷取"
 
 
+class TestDistrictTableUnreadable:
+    """縣市區表讀不到 → 該份擷取失敗,不是安靜地讓郵遞區號留空(#78)。
+    表在 repo 裡,讀不到就是程式或安裝壞了,要讓人在 L 欄看得到。"""
+
+    def test_status_is_extraction_failure(self, tmp_path, missing_district_table):
+        import pipeline
+        from batch import Batch
+        page = io.BytesIO()
+        Image.new("RGB", (40, 40), "white").save(page, format="PNG")
+        text = "\n".join(["甲方名稱: 王小明", "Nama Majikan: WANG XIAO MING",
+                          "地址:新竹市北區磐石路29號7樓", "SELANJUTNYA DISEBUT PIHAK PERTAMA"])
+        got = pipeline.collect_employer_fields(
+            Batch.from_file(tmp_path / "99995.docx", output_dir=tmp_path),
+            FakeVision(document=lambda b: text),
+            identifier=FakeIdentifier((99, "image2.jpeg", page.getvalue())))
+        assert got["99995.docx"].status is ExtractionStatus.擷取失敗
+        assert got["99995.docx"].疑慮標示 == "雇主資料:雇主擷取失敗(例外),未擷取"
+
+
 class TestContractPageVisionCallFailed:
     """契約頁沒問到:自己一種擷取狀況,不和程式例外混在「擷取失敗」(#66、ADR-0015)。"""
 

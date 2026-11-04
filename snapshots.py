@@ -4,8 +4,7 @@
 快照是**機器輸出、不是真值**(CONTEXT.md「快照」)。它記的是 Vision 全文經
 extract_employer_fields 解析出的雇主擷取結果:擷取狀況、7 個欄位值、組好的疑慮標示;
 疑慮清單本身不記 —— 疑慮怎麼組裝是內部的事,重組了不該變紅。
-地址標準化與郵遞區號會查門牌庫,所以一併記下門牌庫的雜湊:對不上時分得出是
-「資料檔變了」還是「程式變了」。
+郵遞區號查的縣市區表在版控裡(#78),表變了 git diff 看得到,快照不另記雜湊。
 
 快照不進版控(在 samples/ 底下),沒有 git diff 可看,所以:
   - pytest 只比對、絕不寫入
@@ -15,7 +14,6 @@ extract_employer_fields 解析出的雇主擷取結果:擷取狀況、7 個欄�
 新素材(放進 samples/docs/ 的 docx)由同一個指令先補 Vision 全文:列出選中的契約頁
 請人確認、說好共幾次 Vision 才打,每份只打一次(fill_missing_vision)。
 """
-import hashlib
 import json
 import sys
 from datetime import date
@@ -36,13 +34,6 @@ KEYS = (STATUS_KEY, *VALUE_KEYS, DOUBT_KEY)
 
 def snapshot_path() -> Path:
     return rs.ROOT / "snapshots" / "employer_fields.json"
-
-
-def alldata_sha256() -> str:
-    """門牌庫的雜湊;沒有門牌庫就是空字串。"""
-    import address_db
-    p = address_db._DB_PATH
-    return hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else ""
 
 
 def snapshot_row(result) -> dict[str, str]:
@@ -69,7 +60,7 @@ def current_fields(stems: list[str] | None = None,
 
 
 def load() -> dict | None:
-    """存好的快照 {alldata_sha256, recorded, fields: {stem: {...}}};沒錄過是 None。"""
+    """存好的快照 {recorded, fields: {stem: {...}}};沒錄過是 None。"""
     p = snapshot_path()
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
@@ -85,15 +76,12 @@ def _changed_cells(stem: str, old: dict | None, new: dict) -> list[str]:
     return lines
 
 
-def mismatch_message(stem: str, saved: dict, now: dict[str, str], data_hash: str) -> str | None:
+def mismatch_message(stem: str, saved: dict, now: dict[str, str]) -> str | None:
     """現在的解析結果與快照不同時的說明;相同則 None。只讀,絕不寫。"""
     cells = _changed_cells(stem, saved["fields"].get(stem, {}), now)
     if not cells:
         return None
     head = "快照對不上(行為變了,不一定是錯;是刻意的改動就用 python snapshots.py record 重錄並逐格看過):"
-    if data_hash != saved.get("alldata_sha256"):
-        head = ("AllData.json 變了(錄快照時與現在的門牌庫雜湊不同):先確認是不是資料檔更新"
-                "造成的地址/郵遞區號差異,再判斷程式有沒有變。\n" + head)
     return "\n".join([head, *cells])
 
 
@@ -110,10 +98,8 @@ def _keep_path(today: str, p: Path | None = None) -> Path:
 
 def record(out: Callable[[str], None] = print,
            extract: Callable[[str], dict] | None = None,
-           data_hash: str | None = None,
            today: str | None = None) -> Path | None:
     """重錄快照:印逐格 diff → 舊快照加日期留存 → 寫入新快照。沒有變化就什麼都不寫。"""
-    data_hash = alldata_sha256() if data_hash is None else data_hash
     today = today or date.today().isoformat()
     if not rs.vision_stems():
         out("沒有任何 Vision 全文,不錄(否則每份素材都會被當成已移除)。")
@@ -127,9 +113,6 @@ def record(out: Callable[[str], None] = print,
         lines += _changed_cells(stem, old_fields.get(stem), new[stem])
     removed = sorted(set(old_fields) - set(new))
     lines += [f"{stem}: 素材已不在,從快照移除" for stem in removed]
-    hash_changed = saved is not None and saved.get("alldata_sha256") != data_hash
-    if hash_changed:
-        lines.insert(0, "⚠ AllData.json 與上次錄製時不同:地址/郵遞區號的差異可能來自資料檔")
 
     if not lines:
         out("快照沒有變化,不寫入。")
@@ -143,7 +126,7 @@ def record(out: Callable[[str], None] = print,
         p.rename(keep)
         out(f"舊快照留存為 {keep.name}")
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"alldata_sha256": data_hash, "recorded": today, "fields": new},
+    p.write_text(json.dumps({"recorded": today, "fields": new},
                             ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
     out(f"已寫入 {p}({len(new)} 份)")
     return p

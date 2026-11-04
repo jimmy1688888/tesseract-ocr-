@@ -140,6 +140,16 @@ def offline_identity():
     return ident
 
 
+# ─── 縣市區表讀不到(#78)───────────────────────────────────────────────────
+@pytest.fixture
+def missing_district_table(monkeypatch, tmp_path):
+    """縣市區表指向不存在的檔。表是 lazy + 快取載入,前後都清快取,不讓別的測試吃到。"""
+    import address_db
+    monkeypatch.setattr(address_db, "_TABLE_PATH", tmp_path / "tw_districts.json")
+    address_db._load.cache_clear()
+    yield
+    address_db._load.cache_clear()
+
 
 # ─── 真實素材 + 真的跑 Tesseract 的測試共用 ─────────────────────────────────
 @pytest.fixture

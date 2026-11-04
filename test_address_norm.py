@@ -92,17 +92,13 @@ class TestEdges:
 
 
 class TestNotForOutput:
-    """fold_variants 是比對用,normalize_address 才是輸出用——兩者不可混淆。
+    """fold_variants 是比對用,判出的縣市才照官方寫法 —— 兩者不可混淆。
 
-    README 明訂 J 欄標準地址須照官方庫原樣輸出(保留正體「臺」,此為使用者拍板)。
-    若哪天有人把 fold_variants 拿去填 J 欄,下面這個測試會先失敗。
+    縣市中英不符的疑慮會把判出的縣市寫進 L 欄,那裡要的是官方正體「臺」。
     """
 
-    def test_normalize_address_keeps_formal_tai(self):
-        r = address_db.normalize_address("台北市文山區辛亥路7段69巷15號3樓")
-        if not r["matched"]:                      # 缺 data/AllData.json 時安靜跳過
-            return
-        assert "臺" in r["address_cn"], "標準地址輸出必須保留官方正體「臺」"
+    def test_determined_city_keeps_formal_tai(self):
+        assert address_db.determine_zip("台北市文山區辛亥路7段69巷15號3樓").city == "臺北市"
 
     def test_fold_variants_lowers_formal_tai(self):
         """對照組:折疊會把「臺」變「台」,所以它的輸出不是標準地址。"""

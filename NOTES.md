@@ -9,25 +9,15 @@
 
 ## 換機／首次設定：git 不含的本機檔
 
-以下都被 `.gitignore`，clone 後需自行補齊：
+以下都被 `.gitignore`，clone 後需自行補齊（縣市區表 `data/tw_districts.json` 隨 repo
+版控，不用另外準備；舊的 `data/AllData.json`、`data/custom_roads.json` 已不再使用，見 ADR-0016）：
 
 1. `service_account.json` — Google Service Account 金鑰（放專案根目錄）
 2. `data/agency_roster.json` — 仲介名冊
    - 手動下載：瀏覽器開 `https://apiservice.mol.gov.tw/OdService/download/A17000000J-020001-QHy`（data.gov.tw dataset 6682 的 JSON），存到 `data/agency_roster.json`
    - 不在程式內連網下載（mol.gov.tw 憑證缺 Subject Key Identifier，Python SSL 會擋）
-3. `data/custom_roads.json` — **自建補充路名**（進版控，clone 即有，不用另外準備）。
-   政府開放資料未收錄的新路（如大園區長發一路、新屋區富聯路）加在這裡，
-   `address_db._load()` 會自動併入對應行政區；**不要直接改 AllData.json**
-   （重新下載會洗掉手改）。格式見檔內既有條目。
-   加之前先查庫確認真的沒有：`python address_db.py <路名關鍵字> [縣市] [行政區]`
-   （經正規化比對，臺/台、鍾/鐘異體都吸收，比手動搜 JSON 可靠）。
-   具名巷（后尾巷型）可加；數字巷（文化路100巷型）不要加，巷弄由門牌尾巴處理。
-4. `data/AllData.json` — 全國門牌地址庫（2.4MB，供 `address_db.py` 地址標準化）
-   - 來源：data.gov.tw 全國「縣市→行政區→路街」中英對照 JSON。
-   - **最省事作法：直接把舊機的 `data/AllData.json` 複製過來**（此檔 gitignore、內容穩定、不常變）。三個本機檔（service_account / agency_roster / AllData）都建議一起用隨身碟或雲端硬碟帶過來，比重新下載可靠。
-   - 缺此檔時 `address_db` 會安靜跳過，雇主地址標準欄留空，不中斷主流程。
-4. `samples/employer/` — 測試契約圖（含個資，不上版控；自行放置）
-5. `pip install -r requirements.txt`；Tesseract 安裝於 `C:\Program Files\Tesseract-OCR\`
+3. `samples/employer/` — 測試契約圖（含個資，不上版控；自行放置）
+4. `pip install -r requirements.txt`；Tesseract 安裝於 `C:\Program Files\Tesseract-OCR\`
 
 ### 同事機（不熟終端機者）
 
@@ -51,6 +41,10 @@
 - 5 張樣本實測：電話 5/5、地址中/英約 9/10；名稱在紅章蓋住時 OCR 層即亂碼（非解析問題）。
 
 ## 已完成：地址標準化（`address_db.py`，用 `data/AllData.json`）
+
+> **2026-11-04 #78 起路名層已拿掉**：不再用 `AllData.json`／`custom_roads.json`、不再產出標準
+> 中文地址，只剩郵遞區號判定（縣市區表 `data/tw_districts.json`），見
+> [ADR-0016](docs/adr/0016-address-db-stops-at-district.md)。以下保留當時的紀錄。
 
 - 以官方地址庫逐層（縣市→行政區→路街→段/號樓）比對，還原標準地址並附**官方中英譯名 + 郵遞區號**。
 - `employer_extract._standardize_address()` 非破壞式補上 4 欄：`地址_中_標準`、`郵遞區號`、`地址_比對`(bool)、`地址_疑慮`。原 OCR 地址（中、英）一律保留不覆寫、不回填。
@@ -87,29 +81,30 @@ Sheets 每列 **15 欄**，H~O 由 `pipeline.py` 於寫入前自動填入：
 - 英文行仍**餵進** `normalize_address(en_text=…)` 當縣市錨定用（印章多蓋中文行首，英文的
   County/City 在行尾而倖存）。錨定是輸入、英譯輸出是輸出，取消後者不影響前者。且
   `_match_city_area_en` 只做官方英文名精確含、不做模糊，故該路徑的 `city_tier` 設為 1，
-  否則「縣市非精確不填郵遞區號」會反過來打掉這條救援（`test_address_doubt.py`
-  `TestEnglishAnchorCountsAsPrecise` 釘住）。
+  否則「縣市非精確不填郵遞區號」會反過來打掉這條救援（`test_zip_determination.py`
+  `TestEnglishLineAnchor` 釘住）。
 - **L 欄疑慮標示**（[ADR-0003](docs/adr/0003-employer-address-doubt-flag.md)、
   [ADR-0004](docs/adr/0004-employer-name-doubt.md)）：雇主資料哪一格不可盡信，每條冠上
   欄位名稱（`雇主名稱_中:…；地址_中:…`，#29 起不冠欄位字母）。`雇主名稱_中:` 為中文名
   （未擷取到／字數與英譯音節不符），`郵遞區號:` 為郵遞區號為何留空（縣市未比對到／縣市僅
-  模糊命中／行政區未判定），`地址_中:` 為其餘地址疑慮（路名未在該行政區清單中、無路名樣式、
-  縣市與門牌號中英不符）。
+  模糊命中／行政區未判定），`地址_中:` 為其餘地址疑慮（未擷取到、縣市與門牌號中英不符；
+  路名的兩條隨 #78 拿掉）。
   留空的格子人看得見，填錯的格子人看不見，所以系統的工作是把後者變成前者。
   **措辭只陳述確定的事實**，不推斷成因也不給行動建議——32538 的教訓：行政區被誤配時，
   一條好端端存在於別區的路會被說成「不在資料庫（可補進 custom_roads.json）」，照著補
-  會重複加入並掛錯區。明細另存 `scan_results/address_doubts.csv` 供人工一次數完誤報率
+  會重複加入並掛錯區（路名層與補充檔已於 #78 拿掉）。明細另存 `scan_results/address_doubts.csv` 供人工一次數完誤報率
   （pipeline 對 Sheets 只寫不讀）。
 - **行政區比對前先剝縣市名**：`桃園區` 去尾字剩 `桃園`，而 `桃園市…` 裡就有這兩字，
   於是完全沒寫區的地址被安上桃園區（32538 實為龜山區，郵遞 333 被填成 330）。
   剝掉縣市名後，區配不到時再以「路名在該縣市內唯一屬於某區」反推（全台 90.8% 路名符合
-  唯一性；限精確命中，模糊路名不反推）。
+  唯一性；限精確命中，模糊路名不反推）。路名反推隨 #78 拿掉，區配不到就是「行政區未判定」。
 - **契約頁 Vision 全文存 `scan_results/employer_texts.json`**：這是整條流程唯一花錢買來
   的東西，改了抽取規則要驗證就得靠它；不存的話每次改規則都得再跑一輪 Vision，實務上
   就會變成憑猜測改。
 - **縣市僅模糊命中時不填郵遞區號與官方英譯**：模糊配錯縣市時，「中山區」「中山路」這類
   全台通用的名字在錯誤縣市底下照樣配得到（實測「台桃市中壢區」→ 臺北市中山區、郵遞 104）。
-  但路名配得到就是佐證（「宜藺縣」→ 宜蘭縣羅東鎮中正路），此時照填——模糊命中本身不是錯誤。
+  當時路名配得到就當佐證照填（「宜藺縣」→ 宜蘭縣羅東鎮中正路）；#78 拿掉路名層後沒有佐證可
+  翻案，模糊命中一律不填。
 - 英文地址**不做**判定：契約英譯沒有單一正確寫法（Panshih/Panshi 都出現得到），分不出
   「拼法不同」與「讀錯」。代價是「中文讀對、英文讀錯」（32448 的 Jinhai/Jinmei）抓不到，
   已知且接受。
@@ -195,8 +190,8 @@ Sheets 每列 **15 欄**，H~O 由 `pipeline.py` 於寫入前自動填入：
 
 ### 一句話喚醒新 session
 
-> 台灣移工 OCR 專案（repo 已 clone，data/AllData.json 已備妥）。permit_lookup 許可證查表、
-> employer_extract 雇主擷取、address_db 地址標準化、pipeline H~O 整合、
+> 台灣移工 OCR 專案（repo 已 clone）。permit_lookup 許可證查表、
+> employer_extract 雇主擷取、address_db 郵遞區號判定、pipeline H~O 整合、
 > 全無命中→仲介電話反查救援**全部完成**
 > （含雇主 ROI 截圖存 scan_results/employer_crops 供人工複查），
 > `python pipeline.py` 即可端到端跑 docs/ → Sheets 15 欄。183 測試全過。

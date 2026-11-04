@@ -15,8 +15,7 @@ ROSTER_PATH = _DATA_DIR / "agency_roster.json"
 ROSTER_STALE_DAYS = 30   # 超過此天數只記提示,仍照常使用
 # 自建補充仲介:官方名冊尚未收錄或資料已變更者。
 # 不直接改 agency_roster.json(原檔重新下載會整份覆蓋,手改的列會靜靜消失,
-# 而且是下次跑才發現那家又查不到)。補充檔小、進版控、跨機同步——與
-# address_db 的 custom_roads.json 同一個模式。
+# 而且是下次跑才發現那家又查不到)。補充檔小、進版控、跨機同步。
 CUSTOM_ROSTER_PATH = _DATA_DIR / "custom_agencies.json"
 
 logger = logging.getLogger(__name__)

@@ -55,7 +55,6 @@ class TestAddressLabelFirst:
     def test_label_next_line_wins_over_earlier_agency_address(self):
         f = _block(["地址:", "高雄市左營區華夏路100號3樓", "Alamat:", _EN_KAOHSIUNG])
         assert f.values.地址_中 == "高雄市左營區華夏路100號3樓"
-        assert f.values.地址_中_標準 == "高雄市左營區華夏路100號3樓"
         assert f.values.郵遞區號 == "813"
         assert "縣市中英不符" not in f.疑慮標示
 

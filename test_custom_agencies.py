@@ -2,8 +2,7 @@
 """名冊補充檔(data/custom_agencies.json)。
 
 官方名冊每次重新下載會**整份覆蓋**,直接手改 agency_roster.json 的列會靜靜消失
-——而且是下次跑才發現那家又查不到。故比照 address_db 的 custom_roads.json,
-把自訂資料放獨立檔、進版控、跨機同步。
+——而且是下次跑才發現那家又查不到。故把自訂資料放獨立檔、進版控、跨機同步。
 """
 import json
 

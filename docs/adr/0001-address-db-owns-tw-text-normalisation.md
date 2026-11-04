@@ -1,5 +1,7 @@
 # address_db 擁有台灣文字正規化,permit_lookup 呼叫它
 
+> 部分被 [ADR-0016](0016-address-db-stops-at-district.md) 取代(2026-11-04):Consequences 裡「門牌庫缺席」與「要輸出標準地址一律用 `normalize_address()`」兩條 —— 路名層與標準地址已拿掉,地址庫只剩 `fold_variants` 與 `determine_zip`。
+
 台灣同一個地址有多種合法寫法(臺/台、鍾/鐘、全形/半形、段號國字/阿拉伯),而本專案的
 三個資料來源各用一套:官方門牌庫與勞動部名冊的機構地址慣用正體「臺」與阿拉伯段號,
 契約 OCR 印的則是「台」與國字段。過去 `address_db.fold_variants`(原私有 `_norm`)與
