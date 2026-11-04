@@ -28,6 +28,7 @@ from pixels import (NEXT_PAGE_DEINK, crop, crop_png, deink_red_stamp, open_uprig
 from employer_result import (VALUE_KEYS, WHOLE, Doubt, EmployerExtraction, EmployerValues,
                              ExtractionStatus, Source)
 from tw_phone import phones_in
+from tesseract_ocr import read_text
 
 from vision_reader import IDENTITY_REFUSED, VisionCallFailed
 
@@ -187,23 +188,10 @@ def _balanced(s: str, op: str, cl: str) -> bool:
     return depth == 0
 
 
-def _ensure_tesseract() -> None:
-    """確保 pytesseract 指向 tesseract.exe(與 pipeline 相同路徑),未設則補上。"""
-    import os
-    import pytesseract
-    cmd = pytesseract.pytesseract.tesseract_cmd
-    if os.path.basename(cmd) == cmd:              # 尚未設定絕對路徑
-        default = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-        if os.path.exists(default):
-            pytesseract.pytesseract.tesseract_cmd = default
-
-
 def _tesseract_top_text(image_bytes: bytes, top_frac: float = 0.35) -> str:
     """對影像上緣區塊跑輕量 Tesseract(供契約頁辨識用,不呼叫 Vision 省成本)。"""
-    import pytesseract
-    _ensure_tesseract()
     top = crop(open_upright(image_bytes), (0.0, 0.0, 1.0, top_frac))
-    return pytesseract.image_to_string(top, lang="ind+eng", config="--psm 3")
+    return read_text(top)
 
 
 def score_contract_page(image_bytes: bytes) -> int:

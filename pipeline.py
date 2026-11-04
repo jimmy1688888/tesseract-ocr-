@@ -57,8 +57,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import pytesseract
-
 from google.api_core import exceptions as gax_exceptions
 
 # Google Sheets
@@ -81,8 +79,6 @@ from sheet_row import SheetRow
 
 if TYPE_CHECKING:   # 只給型別標註看;執行期在 preflight 的函式裡才 import(見該段說明)
     from gcp_identity.checks import CheckResult
-
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -118,7 +114,8 @@ INPUT_DIR  = Path("./docs")
 #   許可證判讀結果(送審決策走完去向 → A~D、反查救援)  permit_outcome
 # 送審決策:每份 docx 一個去向(門檻與判斷只在那裡,#40)。
 from submission_decision import read_decisions  # noqa: E402
-from permit_reading import ROI_REGIONS, TESS_LANG, TIER1_IMAGES, unscannable  # noqa: E402
+from permit_reading import ROI_REGIONS, TIER1_IMAGES, unscannable  # noqa: E402
+import tesseract_ocr  # noqa: E402
 from permit_scan import read_docx_images, run_scan  # noqa: E402
 from retry import is_retryable_google_error, with_retry  # noqa: E402
 
@@ -365,33 +362,26 @@ def write_sheets_batched(rows: list[SheetRow],
 def _check_tesseract() -> "CheckResult":
     """Tesseract 執行檔與語言包。"""
     from gcp_identity.checks import CheckResult
-    exe = pytesseract.pytesseract.tesseract_cmd
-    if not Path(exe).exists():
+    install = tesseract_ocr.installation()
+    if not install.found:
         return CheckResult(
-            "Tesseract 執行檔", False, f"找不到 {exe}",
-            "安裝 Tesseract-OCR，或修改 pipeline.py 頂端的 "
-            "pytesseract.pytesseract.tesseract_cmd 指向實際安裝路徑",
+            "Tesseract 執行檔", False, f"找不到 {install.exe}",
+            "安裝 Tesseract-OCR，或修改 tesseract_ocr.py 的 TESSERACT_EXE 指向實際安裝路徑",
         )
-    try:
-        ver = pytesseract.get_tesseract_version()
-    except Exception as e:
-        return CheckResult("Tesseract 執行檔", False, repr(e),
+    if install.version_error:
+        return CheckResult("Tesseract 執行檔", False, install.version_error,
                            "確認 Tesseract 可正常執行")
-    # 語言包：TESS_LANG 形如 "ind+eng"
-    want = set(TESS_LANG.split("+"))
-    try:
-        have = set(pytesseract.get_languages(config=""))
-    except Exception:
-        # 舊版 pytesseract 沒有 get_languages()，跳過語言包檢查而非誤報失敗
-        return CheckResult("Tesseract 執行檔", True, f"v{ver}（語言包未檢查）")
-    missing = want - have
-    if missing:
+    if not install.langs_checked:
+        # 舊版 pytesseract 問不出語言清單：跳過語言包檢查而非誤報失敗
+        return CheckResult("Tesseract 執行檔", True, f"v{install.version}（語言包未檢查）")
+    if install.missing_langs:
         return CheckResult(
-            "Tesseract 語言包", False, f"缺少 {sorted(missing)}",
+            "Tesseract 語言包", False, f"缺少 {list(install.missing_langs)}",
             "重跑 Tesseract 安裝程式並勾選對應語言，或手動把 .traineddata "
             "放進 tessdata 資料夾",
         )
-    return CheckResult("Tesseract 執行檔", True, f"v{ver}，語言包 {TESS_LANG} 齊全")
+    return CheckResult("Tesseract 執行檔", True,
+                       f"v{install.version}，語言包 {tesseract_ocr.TESS_LANG} 齊全")
 
 
 def _gchecks():

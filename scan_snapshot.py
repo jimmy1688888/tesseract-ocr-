@@ -168,7 +168,6 @@ def is_recorded() -> bool:
 
 def record(docx_files: list[Path]) -> None:
     """真 Tesseract 跑一次掃描,存下每次 OCR 與快照。輸出寫在暫存目錄,事後丟掉。"""
-    import pipeline  # noqa: F401  import 時設好 tesseract_cmd(與正式流程同一個)
     from permit_reading import tesseract
 
     recorder = Recorder(tesseract)

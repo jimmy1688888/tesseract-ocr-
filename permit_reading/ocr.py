@@ -1,18 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Tesseract 設定與呼叫:許可證判讀唯一的外部依賴(Ocr)與它的預設實作。
+"""許可證怎麼讀(Tesseract 設定)與它唯一的外部依賴(Ocr)的預設實作。
 
-候選 AG(Tesseract 一個 adapter)的落腳點:執行檔路徑目前仍由 pipeline import 時設定。
+Tesseract 本身(執行檔、語言、呼叫)在 tesseract_ocr(#76)。
 """
 from __future__ import annotations
 
 from typing import Callable
 
-import pytesseract
-from pytesseract import Output
-
 from pixels import preprocess
-
-TESS_LANG = "ind+eng"
+from tesseract_ocr import TESS_LANG, ocr_with_conf
 
 # ─── Tesseract configs ────────────────────────────────────────────────────
 WHITELIST_LATIN = (
@@ -53,15 +49,6 @@ def build_tess_config(cfg: dict) -> str:
     if "whitelist" in cfg and cfg["whitelist"]:
         parts.append(f"-c tessedit_char_whitelist={cfg['whitelist']}")
     return " ".join(parts)
-
-
-def ocr_with_conf(img, lang: str, tess_cfg: str) -> tuple[str, float]:
-    data = pytesseract.image_to_data(img, lang=lang, config=tess_cfg, output_type=Output.DICT)
-    valid = [(w, int(c)) for w, c in zip(data["text"], data["conf"])
-             if w.strip() and int(c) != -1]
-    text = " ".join(w for w, _ in valid)
-    avg_conf = round(sum(c for _, c in valid) / len(valid), 1) if valid else 0.0
-    return text, avg_conf
 
 
 # 讀一個 ROI:(image bytes, 設定, ROI 相對比例) → (文字, 信心)。這是本模組唯一的

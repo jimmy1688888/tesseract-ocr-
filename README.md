@@ -524,7 +524,7 @@ python -m pytest -q
 ## 常見問題
 
 **Q1：`tesseract is not installed or it's not in your PATH`**
-Tesseract 沒裝或路徑不對。確認已安裝，並檢查 `pipeline.py` 頂部 `tesseract_cmd` 路徑。
+Tesseract 沒裝或路徑不對。確認已安裝，並檢查 `tesseract_ocr.py` 的 `TESSERACT_EXE` 路徑。
 
 **Q2：`Could not find a language data file for "ind"`**
 安裝 Tesseract 時沒勾印尼語言包。重裝勾選，或下載 `ind.traineddata` 放 `tessdata/`。

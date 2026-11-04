@@ -205,11 +205,7 @@ def permit_scans() -> list[Path]:
 
 
 def needs_tesseract() -> None:
-    """與正式流程同一套方式找 tesseract.exe;找不到就 skip。"""
-    import shutil
-    import pytesseract
-    import employer_extract
-    employer_extract._ensure_tesseract()
-    cmd = pytesseract.pytesseract.tesseract_cmd
-    if not Path(cmd).exists() and not shutil.which(cmd):
+    """與正式流程同一個 tesseract.exe(tesseract_ocr 寫死的路徑);不在就 skip。"""
+    import tesseract_ocr
+    if not tesseract_ocr.installation().found:
         pytest.skip("沒有 Tesseract")

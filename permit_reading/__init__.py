@@ -27,8 +27,8 @@ from .docx import (
 from .image import (
     ROI_REGIONS, Crop, Reading, Vote, majority_vote, scan_image_large, scan_image_mol_only)
 from .ocr import (
-    FALLBACK_CONFIGS, PERMIT_VOTE_CONFIGS, SCAN_CONFIGS, TESS_LANG, WHITELIST_LATIN, Ocr,
-    build_tess_config, ocr_with_conf, tesseract)
+    FALLBACK_CONFIGS, PERMIT_VOTE_CONFIGS, SCAN_CONFIGS, WHITELIST_LATIN, Ocr, build_tess_config,
+    tesseract)
 from .tiers import (
     TIER1_IMAGES, LargeDocxReading, ReadImage, TierOutcome, has_permit_vote, read_large_docx,
     split_tiers)
