@@ -20,10 +20,13 @@ import json
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import real_samples as rs
 from employer_result import DOUBT_KEY, VALUE_KEYS
+
+if TYPE_CHECKING:   # 執行期在錄製函式裡才 import(只有錄製要開 docx 認頁)
+    from page_identification import PageIdentification
 
 # 擷取狀況、7 個欄位值、疑慮標示(寫 Sheets 的 H~O 一律取自這裡)。快照記解析輸出、
 # 不是 Sheets 欄:Sheets 少寫幾欄(#30)時值照算,這裡不跟著少。
@@ -258,25 +261,25 @@ def _prepare(raw: bytes) -> bytes:
     return deink_red_stamp(crop_png(raw, EMPLOYER_ROI))
 
 
-def _score_pages(docx: Path) -> list[tuple[int, str, bytes]]:
-    from employer_extract import _scored_pages
-    return _scored_pages(str(docx))
+def _identify(docx: Path) -> "PageIdentification":
+    from page_identification import PageIdentifier
+    return PageIdentifier().identify(docx)
 
 
 def fill_missing_vision(ask: Callable[[str], str] = input,
                         out: Callable[[str], None] = print,
                         vision_ok: Callable[[], tuple[bool, str]] = _vision_ok,
                         fetch_text: Callable[[bytes], str] = _fetch_text,
-                        score_pages: Callable[[Path], list] = _score_pages,
+                        identify: Callable[[Path], "PageIdentification"] = _identify,
                         prepare: Callable[[bytes], bytes] = _prepare) -> list[str]:
     """有 docx、沒有 Vision 全文的素材:選契約頁 → 人確認 → 每份打一次 Vision 存全文。
 
-    契約頁用正式流程同一套規則(pick_contract_page)。人回答「對」或指定別張,
+    契約頁用正式流程同一套規則(認頁結果的 contract_page)。人回答「對」或指定別張,
     那張才記成契約頁核對值;只說「打」不記 —— 程式不把機器的選擇升格成真值。
     打之前先列出共幾次並等確認,再確認 Vision 可用;不可用就停,不重試。
     回傳這次存了全文的 stem。
     """
-    from employer_extract import EMPLOYER_ROI, pick_contract_page
+    from employer_extract import EMPLOYER_ROI
 
     missing = [d for d in rs.docx_samples() if not rs.vision_path(d.stem).exists()]
     if not missing:
@@ -285,23 +288,24 @@ def fill_missing_vision(ask: Callable[[str], str] = input,
 
     plan: list[tuple[str, str, bytes]] = []
     for docx in missing:
-        scored = score_pages(docx)
-        pick = pick_contract_page(scored)
-        if pick is None:
+        identified = identify(docx)
+        contract = identified.contract_page()
+        if contract is None:
             out(f"{docx.name}:docx 無內嵌圖,略過")
             continue
-        score, name, raw, found = pick
-        second = max((s for s, n, _b in scored if n != name), default=0)
+        name, raw, found = contract.page.name, contract.page.image_bytes, contract.found
+        score = contract.page.contract_score
+        second = max((p.contract_score for p in identified.pages if p.name != name), default=0)
         # 每一頁都匯出:人要改指定別張,得先看得到別張。
         review_dir = rs.ROOT / "review"
         review_dir.mkdir(parents=True, exist_ok=True)
-        for _s, n, b in scored:
-            (review_dir / f"{docx.stem}_{n}").write_bytes(b)
+        for p in identified.pages:
+            (review_dir / f"{docx.stem}_{p.name}").write_bytes(p.image_bytes)
         review = review_dir / f"{docx.stem}_{name}"
         out(f"{docx.name} → {name}(分數 {score},次高 {second})"
             + ("" if found else "  ⚠ 未達門檻,正式流程不會送 Vision")
             + f"  圖:{review}")
-        pages = {n: b for _s, n, b in scored}
+        pages = {p.name: p.image_bytes for p in identified.pages}
         while True:
             answer = ask(ASK_PAGE).strip()
             if answer.lower() in ("y", "g"):

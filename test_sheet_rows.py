@@ -8,11 +8,12 @@ Vision 結果 dict、novote_rescue dict),還有 main 裡一次現場翻譯;重�
 
 名冊、台仲區塊、許可證全部捏造。
 """
+from pathlib import Path
 import argparse
 
 import pytest
 
-from conftest import FakeVision
+from conftest import FakeIdentifier, FakeVision
 import employer_extract
 import matches_csv
 import pipeline as P
@@ -139,10 +140,10 @@ def world(monkeypatch, tmp_path):
     sheets, roster_loads = [], []
     monkeypatch.setattr(P, "run_scan", fake_scan)
     monkeypatch.setattr(submission_decision, "decide", lambda rows: by_name[rows[0].source_docx])
-    monkeypatch.setattr(P, "collect_employer_fields", lambda batch, vision: employer)
+    monkeypatch.setattr(P, "collect_employer_fields", lambda batch, vision, *, identifier: employer)
     monkeypatch.setattr(P, "load_roster", lambda: roster_loads.append(1) or FakeRoster())
     monkeypatch.setattr(employer_extract, "agency_block_from_next_page",
-                        lambda path, vision: BLOCKS[path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]])
+                        lambda pages, vision: BLOCKS[Path(pages.docx_path).name])
     monkeypatch.setattr(P, "_sheets_append_atomic", sheets.extend)
     return sheets, FakeVision(sparse=lambda b: texts[b]), roster_loads
 
@@ -201,7 +202,7 @@ BEFORE_12 = [
 
 def test_fifteen_columns_cell_by_cell(world):
     sheets, vision, _ = world
-    result = P.main(_opts(), vision)
+    result = P.main(_opts(), vision, FakeIdentifier())
     assert sheets == BEFORE_12
     assert result is BatchResult.FINISHED      # 一批的結果(#75):有人工審查列也算跑完
 
@@ -211,15 +212,34 @@ def test_one_vision_reader_per_run(world, monkeypatch):
     sheets, vision, _ = world
     built = []
     monkeypatch.setattr(P, "GoogleVisionReader", lambda: built.append(vision) or vision)
-    P.main(_opts())
+    P.main(_opts(), identifier=FakeIdentifier())
     assert built == [vision]
     assert sheets == BEFORE_12
+
+
+def test_one_page_identifier_per_run(world, monkeypatch):
+    """#77:main 一批只建一個認頁來源,反查救援與雇主擷取共用(ADR-0009 認頁結果的備忘)。"""
+    sheets, vision, _ = world
+    built: list[FakeIdentifier] = []
+    used_by_employer = []
+
+    def build():
+        built.append(FakeIdentifier())
+        return built[-1]
+    monkeypatch.setattr(P, "PageIdentifier", build)
+    monkeypatch.setattr(P, "collect_employer_fields",
+                        lambda batch, vision, *, identifier: used_by_employer.append(identifier) or {})
+    P.main(_opts(), vision)
+    assert len(built) == 1
+    assert used_by_employer == built
+    assert "nh_phone.docx" in built[0].identified         # 反查救援也是用這一個認頁
+    assert len(sheets) == len(BEFORE_12)
 
 
 def test_roster_is_loaded_once_per_run(world):
     """#69:名冊由 main 載一次往下傳(E~G 與反查救援共用),不再各自惰性載入。"""
     sheets, vision, roster_loads = world
-    P.main(_opts(), vision)
+    P.main(_opts(), vision, FakeIdentifier())
     assert roster_loads == [1]
 
 
@@ -231,5 +251,5 @@ def test_identity_refused_writes_nothing(world):
     def refused(image):
         raise PermissionDenied("403")
     with pytest.raises(PermissionDenied):
-        P.main(_opts(), FakeVision(sparse=refused))
+        P.main(_opts(), FakeVision(sparse=refused), FakeIdentifier())
     assert sheets == []

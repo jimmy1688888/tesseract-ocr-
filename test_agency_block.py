@@ -6,6 +6,7 @@
 若取第一個標記會錨到 prose(32324 教訓),故以「短行+非句號結尾」濾除。
 測試字串取自 32324 / 32345 次頁實際 OCR 結果。
 """
+from conftest import FakeIdentifier
 from employer_extract import (_address_in_block, _is_agency_label_line,
                               _name_in_block, _phones_in_block,
                               _TW_AGENCY_LABEL, _TW_AGENCY_LABEL_LOOSE,
@@ -136,12 +137,13 @@ class TestRescueReasonUsesStandardForm:
         roster = PermitLookup([{"許可證": "2340", "機構名稱": "測試仲介", "機構地址": "地址",
                                 "電話": "(02)2727-6999#12", "廢止許可日期": "", "終止營業日期": ""}])
         monkeypatch.setattr(employer_extract, "_agency_block_lines",
-                            lambda path, vision: ["電話:02-2727-6999,傳真:02-2727-6000"])
+                            lambda pages, vision: ["電話:02-2727-6999,傳真:02-2727-6000"])
         docx = tmp_path / "32417.docx"
         docx.write_bytes(b"x")
         seed = [SheetRow("32417.docx", "", SheetStatus.MANUAL_REVIEW, "全無命中")]
 
-        [row] = rescue_from_next_page(Batch.from_file(docx), seed, roster, object())
+        [row] = rescue_from_next_page(Batch.from_file(docx), seed, roster, object(),
+                                      FakeIdentifier())
         assert row.permit == "2340"
         assert "台仲電話 0227276999 " in row.reason
         assert "02-2727-6999" not in row.reason

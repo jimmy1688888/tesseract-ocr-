@@ -144,13 +144,30 @@ def offline_identity():
 # ─── 真實素材 + 真的跑 Tesseract 的測試共用 ─────────────────────────────────
 @pytest.fixture
 def real_ocr():
-    """找得到 tesseract.exe 才跑;前後清掉契約頁評分快取,不讓前一支測試的分數漏進來。"""
-    import employer_extract
+    """找得到 tesseract.exe 才跑。"""
     from real_samples import needs_tesseract
     needs_tesseract()
-    employer_extract._page_score_cache.clear()
-    yield
-    employer_extract._page_score_cache.clear()
+
+
+# ─── 假的認頁結果(#77)──────────────────────────────────────────────────────
+def pages_of(*pages: tuple, docx_path: str = "x.docx"):
+    """認頁結果,每張圖一個 (契約頁分數, 圖檔名, bytes[, 是否切結書第一頁]),依圖序。"""
+    from page_identification import IdentifiedPage, PageIdentification
+    return PageIdentification(docx_path, tuple(
+        IdentifiedPage(name, raw, score, bool(front and front[0]))
+        for score, name, raw, *front in pages))
+
+
+class FakeIdentifier:
+    """測試用認頁來源:每份 docx 都給同一組頁(不開檔、不跑 Tesseract),記下認過哪些。"""
+
+    def __init__(self, *pages: tuple):
+        self._pages = pages
+        self.identified: list[str] = []
+
+    def identify(self, docx_path):
+        self.identified.append(Path(docx_path).name)
+        return pages_of(*self._pages, docx_path=str(docx_path))
 
 
 # ─── 假的 Vision(VisionReader,#64)──────────────────────────────────────────

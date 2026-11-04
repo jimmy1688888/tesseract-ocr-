@@ -76,6 +76,7 @@ from batch_result import BatchResult
 from employer_result import EMPLOYER_COLUMNS, EmployerExtraction, ExtractionStatus
 # 寫進 Sheets 的一列(A~D),結果在哪一步確定就在哪一步建好(#12)。
 from sheet_row import SheetRow
+from page_identification import PageIdentifier
 
 if TYPE_CHECKING:   # 只給型別標註看;執行期在 preflight 的函式裡才 import(見該段說明)
     from gcp_identity.checks import CheckResult
@@ -177,11 +178,11 @@ def _agency_cols(permit_value: str, roster: PermitLookup | None) -> list[str]:
 # (M 欄)為準,騰出的 L 欄改放疑慮標示。
 # 與 D 欄 reason 仍刻意分開:D 欄專講許可證判讀,一個欄位不承載兩種語意(ADR-0003)。
 
-def collect_employer_fields(batch: Batch, vision: VisionReader | None = None
-                            ) -> dict[str, EmployerExtraction]:
+def collect_employer_fields(batch: Batch, vision: VisionReader | None = None, *,
+                            identifier: PageIdentifier) -> dict[str, EmployerExtraction]:
     """對這一批每份 docx 擷取雇主欄位，回傳 {檔名: 雇主擷取結果}（每份一次 Vision 呼叫）。
 
-    契約頁偵測用本機 Tesseract 特徵字計分,只有選中的那一頁送 Vision。
+    認頁(identifier,一批共用,ADR-0009)用本機 Tesseract,只有選中的契約頁送 Vision。
     送 Vision 的 ROI 裁切圖(去紅章前原貌)同步存到 batch.employer_crop_dir,
     檔名 {docx主檔名}_{圖檔名},供人工複查。
     任何單檔失敗只記 warning、該檔 H~O 留空,絕不中斷主流程;
@@ -206,7 +207,7 @@ def collect_employer_fields(batch: Batch, vision: VisionReader | None = None
         name = dp.name
         try:
             result = extract_employer_from_docx(
-                str(dp), vision, crop_dir=str(batch.employer_crop_dir))
+                identifier.identify(dp), vision, crop_dir=str(batch.employer_crop_dir))
         except IDENTITY_REFUSED:
             raise                       # 換下一份也一樣失敗:整批中止(ADR-0015)
         except Exception as e:
@@ -566,11 +567,13 @@ def _image_filter_miss(docx_files: list[Path], image: str) -> str | None:
     return None
 
 
-def main(opts: argparse.Namespace, vision: VisionReader | None = None) -> BatchResult:
+def main(opts: argparse.Namespace, vision: VisionReader | None = None,
+         identifier: PageIdentifier | None = None) -> BatchResult:
     """跑一批,交出一批的結果(跑完/被擋下);中途出錯是往上拋的例外(CONTEXT「一批的結果」)。
 
     vision 不給就在掃描之後建一個 GoogleVisionReader(測試換假的),許可證與雇主兩側
-    共用;拿不到憑證就整批中止、不寫 Sheets(見 test_no_credentials.py)。"""
+    共用;拿不到憑證就整批中止、不寫 Sheets(見 test_no_credentials.py)。認頁來源(identifier)
+    同理:不給就建一個,反查救援與雇主擷取共用,同一份 docx 不重評。"""
     # 一批:這次要掃哪些 docx。指定 --file 時就是那一份,不看 ./docs。
     batch = Batch.from_file(Path(opts.file)) if opts.file else Batch.from_dir(INPUT_DIR)
     # 名冊一批載一次、往下傳(#69);載不起來是 None,E~G 留空、反查救援跳過,不擋。
@@ -612,14 +615,15 @@ def main(opts: argparse.Namespace, vision: VisionReader | None = None) -> BatchR
     # Vision reader 一批只建一個,許可證與雇主兩側共用;拿不到憑證就在這裡整批中止,
     # 還沒寫 Sheets(test_no_credentials)。步驟 3~4b 的標題由 settle 自己印。
     vision = vision or GoogleVisionReader()
-    outcomes = settle(read_decisions(csv_path), batch, vision, roster)
+    identifier = identifier or PageIdentifier()
+    outcomes = settle(read_decisions(csv_path), batch, vision, roster, identifier)
 
     # ── 步驟 4c：雇主資料擷取（H~O 欄）─────────────────────────────────────
     # 每份 docx 一次 Vision 呼叫(契約頁偵測是本機 Tesseract,不花 API)。
     # 這裡對「本次要寫入的所有 docx」都擷取,含 manual_review 列——
     # 許可證待人工複核不代表雇主資料無效,先填好可省一次人工查找。
     logger.info("── 步驟 4c：雇主資料擷取（契約頁 OCR → H~O 欄）──")
-    employer_by_docx = collect_employer_fields(batch, vision)
+    employer_by_docx = collect_employer_fields(batch, vision, identifier=identifier)
     write_doubt_report(batch, employer_by_docx)
 
     logger.info("── 步驟 4d：合併批次寫入 Google Sheets（atomic）──")

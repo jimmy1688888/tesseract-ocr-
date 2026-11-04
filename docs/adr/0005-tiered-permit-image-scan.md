@@ -74,8 +74,8 @@ mol 信心是 37 與 28 —— 讓這種值擋掉擴掃,等於用雜訊決定要
 
 ## 台仲反查不受影響
 
-反查走 `_agency_block_lines()` → `_scored_pages(docx_path)` → `docx_images.read_images()`,
-**自己從 zip 重讀全部圖、自己 Tesseract 評分挑契約頁**,再取下一張當次頁。
+反查走 `_agency_block_lines()` → 認頁結果(`page_identification`,#77 起)→ `docx_images.read_images()`,
+**從 zip 重讀全部圖、用 Tesseract 評分挑契約頁**,再取下一張當次頁。
 許可證掃描的圖片過濾碰不到它。雇主擷取同理。受影響的只有許可證那一欄。
 
 (2026-10-16 補記,#5:讀圖原本兩側各一份,副檔名集合已分歧 —— 雇主擷取與反查

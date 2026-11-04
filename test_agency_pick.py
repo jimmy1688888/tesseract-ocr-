@@ -7,7 +7,11 @@
 
 名冊與台仲區塊全部捏造。
 """
+from pathlib import Path
+
 import pytest
+
+from conftest import FakeIdentifier
 
 from permit_lookup import AgencyPick, pick_agency
 from permit_outcome.rescue import rescue_from_next_page
@@ -165,14 +169,15 @@ class TestRescueReturnsNewRows:
         roster = Roster(phone={"0211111111": ["1111"], "0244444444": ["4444", "5555"]})
         reads = []
 
-        def next_page(path, vision):
-            name = path.replace("\\", "/").rsplit("/", 1)[-1]
+        def next_page(pages, vision):
+            name = Path(pages.docx_path).name
             reads.append(name)
             if isinstance(blocks[name], Exception):
                 raise blocks[name]
             return blocks[name]
         monkeypatch.setattr(employer_extract, "agency_block_from_next_page", next_page)
-        got = rescue_from_next_page(Batch.from_dir(tmp_path), seeds, roster, object())
+        got = rescue_from_next_page(Batch.from_dir(tmp_path), seeds, roster, object(),
+                                    FakeIdentifier())
         return (got, reads) if with_reads else got
 
     def test_rescued_and_not_rescued(self, monkeypatch, tmp_path):

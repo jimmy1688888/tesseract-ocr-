@@ -20,7 +20,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-import employer_extract as ee
+import page_identification as pi
+from page_identification import PageIdentifier
 from docx_images import IMAGE_EXTENSIONS, image_index, image_sort_key, read_images
 from real_samples import REAL_DOCX, needs_samples, sample
 
@@ -121,6 +122,14 @@ class TestReadImagesNaturalSort:
         assert {".tif", ".tiff", ".bmp", ".gif"} <= got
 
 
+@pytest.fixture
+def employer_side(monkeypatch):
+    """雇主擷取看到的圖 = 認頁結果的頁(#77)。只比圖與圖序:不跑 Tesseract、不去紅章。"""
+    monkeypatch.setattr(pi, "deink_red_stamp", lambda b: b)
+    identifier = PageIdentifier(lambda b: "")
+    return lambda docx: [p.name for p in identifier.identify(docx).pages]
+
+
 class TestBothSidesSeeSameImagesSynthetic:
     """「兩側看到同一組圖」的合成版:沒有真實素材的機器上也會跑,不會 skip。
 
@@ -128,7 +137,7 @@ class TestBothSidesSeeSameImagesSynthetic:
     許可證掃描(docx_images.read_images)一模一樣。
     """
 
-    def test_every_extension_reaches_employer_side(self, tmp_path):
+    def test_every_extension_reaches_employer_side(self, tmp_path, employer_side):
         docx = tmp_path / "mixed.docx"
         exts = sorted(IMAGE_EXTENSIONS)
         with zipfile.ZipFile(docx, "w") as z:
@@ -136,7 +145,7 @@ class TestBothSidesSeeSameImagesSynthetic:
                 z.writestr(f"word/media/image{i}{ext}", b"x")
         pipeline_side = [n for n, _ in read_images(docx)]
         assert len(pipeline_side) == len(exts)
-        assert [n for n, _ in ee._sorted_images(str(docx))] == pipeline_side
+        assert employer_side(docx) == pipeline_side
 
 
 class TestImageIndex:
@@ -197,17 +206,17 @@ class TestBothSidesSeeSameImages:
         return [n for n, _ in images]
 
     @pytest.mark.parametrize("docx", REAL_DOCX, ids=lambda p: p.name)
-    def test_real_docx(self, docx):
-        assert self._names(ee._sorted_images(str(docx))) == self._names(read_images(docx))
+    def test_real_docx(self, docx, employer_side):
+        assert employer_side(docx) == self._names(read_images(docx))
 
-    def test_tif_variant(self, tmp_path):
+    def test_tif_variant(self, tmp_path, employer_side):
         with zipfile.ZipFile(REAL_DOCX[0]) as z:      # 一定要關:Windows 上會鎖住素材
             names = z.namelist()
         media = "image2.png" if "word/media/image2.png" in names else "image2.jpeg"
         tif = _as_tif(REAL_DOCX[0], tmp_path / "tif.docx", media)
         pipeline_side = self._names(read_images(tif))
         assert "image2.tif" in pipeline_side
-        assert self._names(ee._sorted_images(str(tif))) == pipeline_side
+        assert employer_side(tif) == pipeline_side
 
 
 @needs_samples
@@ -223,7 +232,6 @@ class TestTifContractPage:
 
     def test_tif_contract_page_is_picked(self, tmp_path):
         tif = _as_tif(sample("33701.docx"), tmp_path / "33701.docx", "image2.png")
-        best = ee._best_scored_page(ee._scored_pages(str(tif)))
-        assert best is not None
-        assert best[1] == "image2.tif"
-        assert best[0] >= ee.MIN_CONTRACT_SCORE
+        contract = PageIdentifier().identify(tif).contract_page()
+        assert contract is not None
+        assert (contract.page.name, contract.found) == ("image2.tif", True)

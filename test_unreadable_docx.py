@@ -29,7 +29,7 @@ from permit_scan import run_scan
 from batch import Batch
 from employer_result import DOUBT_KEY, EMPLOYER_COLUMNS
 from sheet_row import SheetRow, SheetStatus
-from conftest import FakeVision
+from conftest import FakeIdentifier, FakeVision
 from permit_outcome import settle
 from submission_decision import Destination, decide, read_decisions
 
@@ -157,7 +157,7 @@ class TestDirectManualReview:
         csv_path = run_scan(Batch((p,), source=tmp_path, output_dir=tmp_path))
 
         got = settle(read_decisions(csv_path), Batch((p,), source=tmp_path, output_dir=tmp_path),
-                     FakeVision(), _AnyRoster())
+                     FakeVision(), _AnyRoster(), FakeIdentifier())
         assert (got.tesseract_keyin, got.vision_confirmed, got.vision_review, got.rescue) == ([], [], [], [])
         assert got.direct_review == [SheetRow(p.name, "", SheetStatus.MANUAL_REVIEW, reason)]
 
@@ -205,14 +205,14 @@ def world(monkeypatch, tmp_path):
 
     real_collect = P.collect_employer_fields
 
-    def counting_collect(batch, vision=None):
+    def counting_collect(batch, vision=None, *, identifier):
         calls["employer"] += 1
-        return real_collect(batch, vision)
+        return real_collect(batch, vision, identifier=identifier)
 
     monkeypatch.setattr(P, "collect_employer_fields", counting_collect)
     monkeypatch.setattr(P, "load_roster", lambda: _AnyRoster())
     monkeypatch.setattr(employer_extract, "agency_block_from_next_page",
-                        lambda path, vision: calls["next_page"].append(path))
+                        lambda pages, vision: calls["next_page"].append(pages.docx_path))
     monkeypatch.setattr(P, "_sheets_append_atomic", lambda values: calls["sheets"].extend(values))
     return calls
 

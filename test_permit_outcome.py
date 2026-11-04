@@ -7,10 +7,11 @@
 
 Vision、名冊、次頁台仲區塊全用替身,資料全部捏造。
 """
+from pathlib import Path
 import pytest
 
 from batch import Batch
-from conftest import ROOT, FakeVision, project_sources
+from conftest import ROOT, FakeIdentifier, FakeVision, project_sources
 from matches_csv import Roi
 from sheet_row import SheetRow, SheetStatus
 from submission_decision import Decision, Destination
@@ -33,7 +34,7 @@ def settle(monkeypatch, decisions, batch, vision, roster, next_page):
     import permit_outcome
 
     monkeypatch.setattr(employer_extract, "agency_block_from_next_page", next_page)
-    return permit_outcome.settle(decisions, batch, vision, roster).rows
+    return permit_outcome.settle(decisions, batch, vision, roster, FakeIdentifier()).rows
 
 
 # ── 各去向的送審決策 ────────────────────────────────────────────────────────
@@ -95,8 +96,8 @@ def world(tmp_path):
             raise VisionCallFailed("Vision 呼叫失敗: 503")
         return VISION_TEXT[image.decode()]
 
-    def next_page(path, vision):
-        found = NEXT_PAGE[path.replace("\\", "/").rsplit("/", 1)[-1]]
+    def next_page(pages, vision):
+        found = NEXT_PAGE[Path(pages.docx_path).name]
         if isinstance(found, Exception):
             raise found
         return found
@@ -181,7 +182,7 @@ def test_roster_unavailable_skips_the_rescue_and_keeps_the_seeds(monkeypatch, wo
     decisions, batch, vision, _ = world
     rescues = [d for d in decisions if d.destination is Destination.反查救援]
 
-    def must_not_read(path, vision):
+    def must_not_read(pages, vision):
         raise AssertionError("名冊不在,不該讀次頁")
 
     rows = settle(monkeypatch, rescues, batch, vision, None, must_not_read)

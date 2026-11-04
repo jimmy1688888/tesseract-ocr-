@@ -9,6 +9,7 @@ keyed-in/manual_review 完全由許可證判讀決定——雇主資料只是搭
 分不出「拼法不同」與「讀錯」。代價是 32448 那類「中文讀對、英文讀錯」抓不到,
 這是已知且接受的缺口。
 """
+from conftest import FakeIdentifier, FakeVision
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -352,7 +353,8 @@ class TestVisionTextIsPersisted:
             lambda *a, **k: replace(_result(雇主名稱_中="王小明"),
                                     source=Source(image="image2.jpeg", text="甲方名稱: 王小明")))
         employer = pipeline.collect_employer_fields(
-            Batch.from_file(tmp_path / "99999.docx", output_dir=tmp_path))
+            Batch.from_file(tmp_path / "99999.docx", output_dir=tmp_path), FakeVision(),
+            identifier=FakeIdentifier())
         result = employer["99999.docx"]
         assert result.source.text == ""
         assert result.values.雇主名稱_中 == "王小明"
@@ -377,7 +379,8 @@ class TestEmployerOutputFollowsBatch:
         monkeypatch.setattr("employer_extract.extract_employer_from_docx", fake_extract)
         out = tmp_path / "另一處"
         b = Batch.from_file(tmp_path / "99998.docx", output_dir=out)
-        pipeline.write_doubt_report(b, pipeline.collect_employer_fields(b))
+        pipeline.write_doubt_report(b, pipeline.collect_employer_fields(b, FakeVision(),
+                                                                        identifier=FakeIdentifier()))
         report = (out / "address_doubts.csv").read_text(encoding="utf-8-sig")
         assert "99998.docx" in report
         assert crop_dirs == [out / "employer_crops"]   # 雇主截圖也跟著走
@@ -427,11 +430,12 @@ class TestTwoBatchesDoNotLeak:
         from batch import Batch
         monkeypatch.setattr(
             "employer_extract.extract_employer_from_docx",
-            lambda path, **k: _result([Doubt("郵遞區號", "與地址不符")], 雇主名稱_中="王小明"))
+            lambda pages, vision, **k: _result([Doubt("郵遞區號", "與地址不符")], 雇主名稱_中="王小明"))
 
         def run(name, out):
             b = Batch.from_file(tmp_path / name, output_dir=out)
-            pipeline.write_doubt_report(b, pipeline.collect_employer_fields(b))
+            pipeline.write_doubt_report(b, pipeline.collect_employer_fields(b, FakeVision(),
+                                                                            identifier=FakeIdentifier()))
             return (out / "address_doubts.csv").read_text(encoding="utf-8-sig")
 
         assert "11111.docx" in run("11111.docx", tmp_path / "第一批")

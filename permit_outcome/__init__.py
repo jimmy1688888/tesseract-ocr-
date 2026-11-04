@@ -1,6 +1,6 @@
 """許可證判讀結果(CONTEXT.md):一批送審決策走完去向 → Sheets A~D(#71,候選 AC)。
 
-  settle(decisions, batch, vision, roster) -> PermitOutcomes
+  settle(decisions, batch, vision, roster, identifier) -> PermitOutcomes
 
 package 的三塊(ADR-0014;依賴單向 settle → rescue → reason):
   settle  依去向分派、Vision 驗證、依寫入順序交出列與摘要

@@ -22,15 +22,13 @@ from typing import TYPE_CHECKING, NamedTuple
 # docx 內嵌圖與圖序只有一份,與 pipeline 共用(#5);像素前處理也是(#16)。
 # 兩側不互相 import。
 from contract_template import COMPANY_WORDS, Template, contract_template
-from docx_images import read_images
-from pixels import (NEXT_PAGE_DEINK, crop, crop_png, deink_red_stamp, open_upright,
-                    preprocess, to_png)
+from pixels import NEXT_PAGE_DEINK, crop_png, deink_red_stamp, preprocess, to_png
 from employer_result import (VALUE_KEYS, WHOLE, Doubt, EmployerExtraction, EmployerValues,
                              ExtractionStatus, Source)
 from tw_phone import phones_in
-from tesseract_ocr import read_text
 
 from vision_reader import IDENTITY_REFUSED, VisionCallFailed
+from page_identification import PageIdentification
 
 if TYPE_CHECKING:
     from vision_reader import VisionReader
@@ -99,44 +97,6 @@ BOILERPLATE = re.compile(
 # 甲方名稱、地址中/英、電話/Nomor Telepon),下緣停在乙方標籤前,避免抓到勞工資料。
 EMPLOYER_ROI = (0.0, 0.0, 1.0, 0.35)
 
-# 契約頁特徵字:用來從 docx 多張圖中辨識「哪一張是勞動契約頁」。
-# 分兩類加權計分,以區辨「雇主資料表」與「簽名頁」:
-#   FORM_LABELS(權重 2):只出現在雇主資料表的欄位標籤(Nama Majikan/
-#     Perusahaan/Pemberi Kerja、Alamat、Nomor Telepon、MOL License)。
-#     這正是我們要抽資料的那頁。
-#   PROSE_MARKERS(權重 1):樣板文字,簽名頁的長段 prose 也密集出現
-#     (PERJANJIAN KERJA、PIHAK PERTAMA、SELANJUTNYA、MAJIKAN DENGAN)。
-# 只數總命中會讓 prose 密集的簽名頁壓過真正的資料表(32262 農業契約教訓:
-# image3 簽名頁 prose 命中 4 > image2 資料表 2 → 選錯頁、名稱抽到樣板字)。
-# 加權後資料表(欄位標籤×2)穩定勝出;標題被紅章毀時仍有 FORM 標籤撐分。
-# 機構類(養護機構/醫院)樣板的雇主名稱標籤是「Nama Panti Jompo/Rumah Sakit」,
-# 而且電話標籤落在上緣 35% 之外 —— 不認得它,資料表只剩 1 個 FORM 標籤,輸給
-# 仲介區塊也有 Alamat 的次頁(33703 教訓:image2 4 分敗給 image3 5 分,#27)。
-# 錨定整個標籤、一個標籤只算一次:單獨比對「Rumah Sakit」(醫院)會讓住院、
-# 醫療費用條款的條文頁也拿 FORM 加權(33703 的 image4 就因此多 2 分)。
-# 修正後 33703 是 6 比 5,只贏 1 分 —— 那是真實差距,不要靠重複計分灌大。
-#
-# 只列印尼文/英文:上緣 OCR 用 ind+eng,沒有載 chi_tra,中文標籤讀不出來。
-_FORM_LABELS = re.compile(
-    r"Nama\s*Majikan|Nama\s*Perusahaan|Pemberi\s*Kerja|Nomor\s*Telepon"
-    r"|Nama\s*Panti\s*Jompo(?:\s*/\s*Rumah\s*Sakit)?"
-    r"|Alamat|MOL\s*License",
-    re.I,
-)
-_PROSE_MARKERS = re.compile(
-    r"PERJANJIAN\s*KERJA|MAJIKAN\s*DENGAN|PIHAK\s*PERTAMA|SELANJUTNYA",
-    re.I,
-)
-
-# 切結書(Surat Pernyataan Biaya dan Gaji)第一頁的標題。用來找雇主姓名的第二個
-# 來源:那個欄位實測 6/6 都在「切結書第一頁的下一頁」(見 ADR-0006)。
-#
-# 刻意**不**用 `Majikan R.O.C`(欄位本身的標籤)當錨:32538/32554 的那一頁,
-# Tesseract 在 35%/55%/70% 任何裁切範圍都讀不出這串字,而 Vision 讀得到。認頁
-# 只能靠 Tesseract 讀得穩的東西 —— 印刷體大標題讀得穩,夾在表格線與紅章之間的
-# 欄位標籤讀不穩。認頁與取值因此分工:Tesseract 認頁(免費),Vision 取值。
-_PLEDGE_FRONT = re.compile(r"Surat\s*Pernyataan", re.I)
-
 
 def _has_cjk(s: str) -> bool:
     return bool(CJK.search(s))
@@ -186,117 +146,6 @@ def _balanced(s: str, op: str, cl: str) -> bool:
         if depth < 0:
             return False
     return depth == 0
-
-
-def _tesseract_top_text(image_bytes: bytes, top_frac: float = 0.35) -> str:
-    """對影像上緣區塊跑輕量 Tesseract(供契約頁辨識用,不呼叫 Vision 省成本)。"""
-    top = crop(open_upright(image_bytes), (0.0, 0.0, 1.0, top_frac))
-    return read_text(top)
-
-
-def score_contract_page(image_bytes: bytes) -> int:
-    """一張圖的契約頁分數:欄位標籤(FORM)×2 + 樣板(PROSE)×1。
-    加權讓「雇主資料表」壓過只有 prose 的簽名頁(見 _FORM_LABELS 上方註解)。
-
-    **先去紅章再掃**:資料表那頁的欄位標籤常被大紅章整片蓋住,原圖直送 Tesseract
-    會一個 FORM 標籤都讀不到 → 該頁 0 分,輸給只有 prose 的次頁,契約頁選錯
-    (32426/32427 教訓:image2 資料表 0 分敗給 image3 次頁 2 分,結果雇主欄位
-    抽到合約條文,且因「契約頁被判成最後一張」連次頁台仲都完全沒掃)。
-    去紅章後同樣兩張 image2 由 0 → 6/7 分穩定勝出。此舉也讓評分與後續各階段
-    (雇主 ROI、次頁台仲)一致都在去紅章後的影像上做。
-    前處理失敗則退回原圖,維持原行為,不讓評分因此中斷。
-    """
-    return _page_marks(image_bytes)[0]
-
-
-def _page_marks(image_bytes: bytes) -> tuple[int, bool]:
-    """一次上緣掃描,同時得出契約頁分數與「這頁是不是切結書第一頁」。
-
-    兩件事共用同一段文字。分開跑會讓每份 docx 的 Tesseract 次數翻倍,而它們要的
-    輸入完全一樣(去紅章後的上緣裁切),沒有理由掃兩次。
-    """
-    try:
-        image_bytes = deink_red_stamp(image_bytes)
-    except Exception:
-        pass
-    text = _tesseract_top_text(image_bytes)
-    score = 2 * len(_FORM_LABELS.findall(text)) + len(_PROSE_MARKERS.findall(text))
-    return score, bool(_PLEDGE_FRONT.search(text))
-
-
-# 認定為契約頁的最低分。低於此值視為「頁面身分不明」,呼叫端各自決定退路。
-MIN_CONTRACT_SCORE = 2
-
-
-# docx → {圖檔名: 契約頁分數}。評分含 Tesseract(每份 docx 數秒),而同一份 docx
-# 在一次 pipeline 中會被評兩次:雇主擷取一次、次頁台仲反查再一次。兩者要的是
-# 「同一個契約頁判定」,重算既慢又有不一致的風險,故在此共用。
-# 只快取分數不快取影像 bytes:一份 docx 的圖動輒數 MB,整批快取會吃掉大量記憶體。
-# 鍵含 (mtime_ns, size),檔案被換掉會自動失效。
-_page_score_cache: dict[tuple, dict[str, tuple[int, bool]]] = {}
-
-
-def _score_cache_key(docx_path: str) -> tuple:
-    from pathlib import Path
-    try:
-        st = Path(docx_path).stat()
-        return (str(Path(docx_path).resolve()), st.st_mtime_ns, st.st_size)
-    except OSError:
-        return (str(docx_path), None, None)
-
-
-def _scored_pages(docx_path: str) -> list[tuple[int, str, bytes]]:
-    """docx 各內嵌圖的 (契約頁分數, 檔名, bytes),依自然排序。
-
-    分數取自 _page_score_cache,同一份 docx 只實際評一次;bytes 每次重讀
-    (zip 解壓遠比 Tesseract 便宜,且不必把影像長期留在記憶體)。
-    """
-    images = _sorted_images(docx_path)
-    if not images:
-        return []
-    marks = _cached_marks(docx_path, images)
-    return [(marks[n][0], n, b) for n, b in images]
-
-
-def _sorted_images(docx_path: str) -> list[tuple[str, bytes]]:
-    """docx 內嵌圖,依圖序。與許可證掃描看到的是同一組(docx_images.read_images)。"""
-    return read_images(docx_path)
-
-
-def _cached_marks(docx_path: str, images: list[tuple[str, bytes]]
-                  ) -> dict[str, tuple[int, bool]]:
-    """{圖檔名: (契約頁分數, 是否切結書第一頁)},同一份 docx 只實際掃一輪。"""
-    key = _score_cache_key(docx_path)
-    marks = _page_score_cache.get(key)
-    if marks is None or set(marks) != {n for n, _ in images}:
-        marks = {n: _page_marks(b) for n, b in images}
-        _page_score_cache[key] = marks
-    return marks
-
-
-def pledge_name_pages(docx_path: str, max_pages: int = 2
-                      ) -> list[tuple[str, bytes]]:
-    """雇主姓名可能所在的頁:切結書第一頁之**後**最多 max_pages 頁。
-
-    實測 6 份(32503/32510/32538/32554/32572/32574)全部命中第一候選頁,所以實際
-    只會花一次 Vision。留第二頁是因為切結書長度 2~3 頁不定(ADR-0005),而雇主欄
-    與許可證**不一定同頁** —— 32538/32554 的許可證在 image6、雇主欄在 image5,
-    所以不能拿許可證命中的圖來當這一頁(這條假設一度成立過 4/4,是巧合)。
-    """
-    images = _sorted_images(docx_path)
-    if not images:
-        return []
-    marks = _cached_marks(docx_path, images)
-    for i, (name, _b) in enumerate(images):
-        if marks[name][1]:
-            return images[i + 1:i + 1 + max_pages]
-    return []
-
-
-def _best_scored_page(scored: list[tuple[int, str, bytes]]
-                      ) -> tuple[int, str, bytes] | None:
-    """在 _scored_pages() 結果中取最高分頁;同分取自然排序在前者(max 的預設行為)。"""
-    return max(scored, key=lambda t: t[0]) if scored else None
 
 
 class EmployerBlock(NamedTuple):
@@ -652,8 +501,8 @@ def _pledge_name(text: str) -> str:
     return val if CJK.search(val) and _is_name_like(val) else ""
 
 
-def rescue_name_from_pledge(docx_path: str, vision: VisionReader,
-                            max_pages: int = 2) -> tuple[str, str]:
+def rescue_name_from_pledge(pages: PageIdentification, vision: VisionReader
+                            ) -> tuple[str, str]:
     """契約頁抽不到中文名時,改從切結書頁取。回傳 (名字, 圖檔名),救不回回 ("", "");
     Vision 呼叫失敗往上拋(VisionCallFailed),由 _apply_pledge_rescue 寫進 L 欄。
 
@@ -669,19 +518,19 @@ def rescue_name_from_pledge(docx_path: str, vision: VisionReader,
     補強引擎沒有意義。代價是每次救援 +1 次 Vision,而救援只在中文名為空時觸發
     (上一批 21 份會觸發 4 次)。
     """
-    for name, raw in pledge_name_pages(docx_path, max_pages):
+    for page in pages.pledge_name_pages():
         # Vision 呼叫失敗就往上拋、不換下一頁再打:多半是服務那一端,換一張也一樣
         # (ADR-0015);沒問到要寫在 L 欄,由 _apply_pledge_rescue 接。其他例外只是
         # 少一格值,不該連契約頁讀到的 H~O 一起變成擷取失敗(ADR-0006)。
         try:
-            got = _pledge_name(vision.read_document(raw))
+            got = _pledge_name(vision.read_document(page.image_bytes))
         except (VisionCallFailed, *IDENTITY_REFUSED):
             raise
         except Exception as e:
-            logger.warning(f"  ⚠ 切結書頁讀取失敗({name}):{e!r}")
+            logger.warning(f"  ⚠ 切結書頁讀取失敗({page.name}):{e!r}")
             return "", ""
         if got:
-            return got, name
+            return got, page.name
     return "", ""
 
 
@@ -870,23 +719,19 @@ _AGENCY_LABEL_WORD = re.compile(
     r"[台臺]灣仲介公司|[台臺]灣仲介|Agen(?:cy|si)\s*Taiwan", re.I)
 
 
-def _agency_block_lines(docx_path: str, vision: VisionReader) -> list[str]:
+def _agency_block_lines(pages: PageIdentification, vision: VisionReader) -> list[str]:
     """取「契約頁次一頁」的『台灣仲介』區塊文字行(整頁 1 次 Vision,靠標籤錨定)。
 
     台印電話/名稱格式重疊,無法靠格式或幾何位置分,故以『台灣仲介』欄位標籤
     (短、非句號)錨定起點 → 到其後的仲介欄位標籤 / 印尼電話標籤(Telp)為止。
     台仲在左在右皆可;找不到契約頁/無次頁/無真台仲標籤 → 空清單(不猜、不誤抓)。
     """
-    scored = _scored_pages(docx_path)      # 分數與雇主擷取共用,不重評
-    best = _best_scored_page(scored)
-    if best is None or best[0] < MIN_CONTRACT_SCORE:
-        return []                          # 找不到契約頁 → 不猜(次頁是哪張也無從談起)
-    ci = [n for _s, n, _b in scored].index(best[1])
-    if ci + 1 >= len(scored):
-        return []                          # 契約頁是最後一張,無次頁
+    next_page = pages.next_page()
+    if next_page is None:
+        return []                          # 找不到契約頁(不猜)或契約頁是最後一張
     # 次頁前處理後整頁送 Vision(仍只 1 次;台仲可能在右半,不裁切)。
     # 設定與契約頁不同(放大+中值、不抹白),理由見 pixels.NEXT_PAGE_DEINK。
-    png = to_png(preprocess(scored[ci + 1][2], NEXT_PAGE_DEINK))
+    png = to_png(preprocess(next_page.image_bytes, NEXT_PAGE_DEINK))
     lines = [l.strip() for l in vision.read_document(png).splitlines() if l.strip()]
 
     start = next((i for i, l in enumerate(lines)
@@ -966,10 +811,10 @@ def _address_in_block(block: list[str]) -> str:
     return ""
 
 
-def agency_block_from_next_page(docx_path: str, vision: VisionReader) -> dict:
+def agency_block_from_next_page(pages: PageIdentification, vision: VisionReader) -> dict:
     """電話備援用:回契約次頁台仲區塊的 {phones, name, address}(整頁 1 次 Vision)。
     找不到區塊 → 皆空。名稱/地址供名冊相似度反查(電話查無時的後備管道)。"""
-    block = _agency_block_lines(docx_path, vision)
+    block = _agency_block_lines(pages, vision)
     if not block:
         return {"phones": [], "name": "", "address": ""}
     return {
@@ -979,29 +824,11 @@ def agency_block_from_next_page(docx_path: str, vision: VisionReader) -> dict:
     }
 
 
-def pick_contract_page(scored: list[tuple[int, str, bytes]]
-                       ) -> tuple[int, str, bytes, bool] | None:
-    """正式流程選哪張當契約頁:(分數, 檔名, bytes, 是否找到)。
-
-    最高分頁;未達 MIN_CONTRACT_SCORE 時仍回它當候選(找到=False,呼叫端不送
-    Vision、只留截圖);全零分則退 image2(實測慣例上契約頁多在第 2 張),沒有
-    image2 就用第一張。雇主擷取與真實素材錄製(snapshots.py)共用這一套規則。
-    """
-    best = _best_scored_page(scored)
-    if best is None:
-        return None
-    best_s, name, raw = best
-    found = best_s >= MIN_CONTRACT_SCORE
-    if not found and best_s == 0:
-        name, raw = next(((n, b) for _s, n, b in scored
-                          if n.startswith("image2.")), (name, raw))
-    return best_s, name, raw, found
-
-
-def extract_employer_from_docx(docx_path: str, vision: VisionReader, deink: bool = True,
+def extract_employer_from_docx(pages: PageIdentification, vision: VisionReader,
+                               deink: bool = True,
                                roi: tuple | None = EMPLOYER_ROI,
                                crop_dir: str = "") -> EmployerExtraction:
-    """端到端:從 docx 找出契約頁 → ROI 裁切 → 去紅章 → Vision → 擷取雇主欄位。
+    """端到端:認頁結果的契約頁 → ROI 裁切 → 去紅章 → Vision → 擷取雇主欄位。
 
     crop_dir:非空時,把「去紅章前」的 ROI 裁切圖存到該資料夾
       ({docx主檔名}_{圖檔名}),保留紅章原貌供人工複查 H~O 欄位值。
@@ -1013,21 +840,19 @@ def extract_employer_from_docx(docx_path: str, vision: VisionReader, deink: bool
     """
     from pathlib import Path
 
-    # 各圖分數與次頁台仲反查共用(_scored_pages 有快取),同一份 docx 不重評
-    scored = _scored_pages(docx_path)
-    if not scored:
+    contract = pages.contract_page()
+    if contract is None:
         return EmployerExtraction(ExtractionStatus.docx無內嵌圖)
+    name, found = contract.page.name, contract.found
 
-    best_s, name, raw, found = pick_contract_page(scored)
-
-    content = raw
+    content = contract.page.image_bytes
     if roi:
         content = crop_png(content, roi)
     crop_name = ""
     if crop_dir:
         d = Path(crop_dir)
         d.mkdir(parents=True, exist_ok=True)
-        crop_name = f"{Path(docx_path).stem}_{name}"
+        crop_name = f"{Path(pages.docx_path).stem}_{name}"
         (d / crop_name).write_bytes(content)
 
     if not found:
@@ -1035,7 +860,8 @@ def extract_employer_from_docx(docx_path: str, vision: VisionReader, deink: bool
         # 備援照跑:它讀另一頁、靠自己的標籤,契約頁找不到碰不到它。
         return _apply_pledge_rescue(EmployerExtraction(
             ExtractionStatus.找不到契約頁, source=Source(image=name, crop=crop_name),
-            detail=f"特徵字命中不足,最高分 {best_s};已存候選頁截圖"), docx_path, vision)
+            detail=f"特徵字命中不足,最高分 {contract.page.contract_score};已存候選頁截圖"),
+            pages, vision)
 
     if deink:
         content = deink_red_stamp(content)
@@ -1045,16 +871,16 @@ def extract_employer_from_docx(docx_path: str, vision: VisionReader, deink: bool
         text = vision.read_document(content)
     except VisionCallFailed as e:
         # 沒問到 ≠ 擷取失敗(程式或檔案的問題):自己一種狀況,切結書頁也不跑(ADR-0015)。
-        logger.warning(f"  ⚠ {Path(docx_path).name} 契約頁 {e}")
+        logger.warning(f"  ⚠ {Path(pages.docx_path).name} 契約頁 {e}")
         return EmployerExtraction(ExtractionStatus.契約頁Vision呼叫失敗,
                                   source=Source(image=name, crop=crop_name), detail=str(e))
     result = extract_employer_fields(text)
     if not result.values.雇主名稱_中:
-        result = _apply_pledge_rescue(result, docx_path, vision)
+        result = _apply_pledge_rescue(result, pages, vision)
     return replace(result, source=replace(result.source, image=name, crop=crop_name, text=text))
 
 
-def _apply_pledge_rescue(result: EmployerExtraction, docx_path: str,
+def _apply_pledge_rescue(result: EmployerExtraction, pages: PageIdentification,
                          vision: VisionReader) -> EmployerExtraction:
     """切結書頁救回中文名 → 回傳填了中文名、名稱疑慮換過的結果;救不回來原樣回傳。
 
@@ -1069,9 +895,9 @@ def _apply_pledge_rescue(result: EmployerExtraction, docx_path: str,
     from pathlib import Path
 
     try:
-        got, page = rescue_name_from_pledge(docx_path, vision)
+        got, page = rescue_name_from_pledge(pages, vision)
     except VisionCallFailed as e:
-        logger.warning(f"  ⚠ 切結書頁 {e}({Path(docx_path).name})")
+        logger.warning(f"  ⚠ 切結書頁 {e}({Path(pages.docx_path).name})")
         # 「未擷取到中文名」仍然是真的:保留,緊接著並列「沒問到」;沒有那一條
         # (整份沒擷取)就只加「沒問到」。
         doubts = result.doubts
@@ -1082,13 +908,13 @@ def _apply_pledge_rescue(result: EmployerExtraction, docx_path: str,
             doubts += (_PLEDGE_VISION_FAILED,)
         return replace(result, doubts=doubts)
     if not got:
-        logger.info(f"  切結書頁未取得中文名:{Path(docx_path).name}")
+        logger.info(f"  切結書頁未取得中文名:{Path(pages.docx_path).name}")
         return result
     count = _name_doubt(got, result.values.雇主名稱_英, result.source.template)
     rescued = (*_doubts(_NAME_CN, f"中文名取自切結書頁({page})"), *_doubts(_NAME_CN, count))
     # 「未擷取到中文名」已經變成假的:原位換成救援這兩條,其他疑慮不動。
     doubts = _at_missing_name(result.doubts, rescued)
-    logger.info(f"  ★ 切結書頁救回中文名:{got}({Path(docx_path).name}/{page})")
+    logger.info(f"  ★ 切結書頁救回中文名:{got}({Path(pages.docx_path).name}/{page})")
     return replace(result, values=replace(result.values, 雇主名稱_中=got), doubts=doubts)
 
 
@@ -1110,9 +936,11 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     # 自動找契約頁 → ROI → 去紅章 → Vision
+    from page_identification import PageIdentifier
     from vision_reader import GoogleVisionReader
 
-    res = extract_employer_from_docx(args.path, GoogleVisionReader(), deink=True,
+    res = extract_employer_from_docx(PageIdentifier().identify(args.path), GoogleVisionReader(),
+                                     deink=True,
                                      roi=None if args.full else EMPLOYER_ROI)
     print(f"採用契約頁:{res.source.image or '(無)'}  {res.status.value} {res.detail}")
     for k in (*VALUE_KEYS, "疑慮標示"):

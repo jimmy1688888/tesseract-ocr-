@@ -12,6 +12,7 @@ from pathlib import Path
 # 測試在外部邊界換掉的是 employer_extract 上的那個名字。
 import employer_extract
 from batch import Batch
+from page_identification import PageIdentifier
 from permit_lookup import PermitLookup, pick_agency
 from sheet_row import SheetRow
 from vision_reader import IDENTITY_REFUSED, VisionCallFailed, VisionReader
@@ -24,11 +25,12 @@ RESCUE_NOT_DONE = "反查救援未完成:次頁 Vision 呼叫失敗"
 _NO_BLOCK = {"phones": [], "name": "", "address": ""}
 
 
-def _next_page_block(docx_path: Path, vision: VisionReader) -> dict | None:
-    """一份 docx 的次頁台仲區塊;Vision 呼叫失敗回 None,其他失敗當作沒有區塊。
-    身分或權限被拒往上拋(整批中止)。"""
+def _next_page_block(docx_path: Path, vision: VisionReader,
+                     identifier: PageIdentifier) -> dict | None:
+    """一份 docx 的次頁台仲區塊;Vision 呼叫失敗回 None,其他失敗(含 docx 讀不開)當作
+    沒有區塊。身分或權限被拒往上拋(整批中止)。"""
     try:
-        return employer_extract.agency_block_from_next_page(str(docx_path), vision)
+        return employer_extract.agency_block_from_next_page(identifier.identify(docx_path), vision)
     except IDENTITY_REFUSED:
         raise
     except VisionCallFailed as e:
@@ -40,7 +42,7 @@ def _next_page_block(docx_path: Path, vision: VisionReader) -> dict | None:
 
 
 def rescue_from_next_page(batch: Batch, seeds: list[SheetRow], roster: PermitLookup | None,
-                          vision: VisionReader) -> list[SheetRow]:
+                          vision: VisionReader, identifier: PageIdentifier) -> list[SheetRow]:
     """整頁 OCR 契約次一頁(1 次 Vision),以『台灣仲介』欄位標籤錨定區塊(台仲在左在右
     皆可,靠標籤非位置),取其「電話／名稱／地址」反查名冊回推許可證。
 
@@ -49,7 +51,8 @@ def rescue_from_next_page(batch: Batch, seeds: list[SheetRow], roster: PermitLoo
 
     種子列是送審決策判成反查救援的 docx:B 欄是候選值(單一判讀低信心)或空(全無命中)。
     名冊降級(None)時整段跳過、不花 Vision。要開的 docx 跟 batch 查完整路徑(列只帶檔名)。
-    同一 docx 的次頁只送一次 Vision(block_cache),多列共用不重複計費。"""
+    同一 docx 的次頁只送一次 Vision(block_cache),多列共用不重複計費。
+    identifier 是一批共用的認頁來源(main 建,之後雇主擷取沿用同一份認頁結果)。"""
     if roster is None or not seeds:
         return list(seeds)
     out: list[SheetRow] = []
@@ -63,7 +66,7 @@ def rescue_from_next_page(batch: Batch, seeds: list[SheetRow], roster: PermitLoo
             out.append(row)
             continue
         if docx_name not in block_cache:
-            block_cache[docx_name] = _next_page_block(docx_path, vision)
+            block_cache[docx_name] = _next_page_block(docx_path, vision, identifier)
         if block_cache[docx_name] is None:
             # 沒救 ≠ 救不回:救不回不註明,沒問到要說(CONTEXT「反查救援」、ADR-0015)
             out.append(replace(row, reason=appended(row.reason, RESCUE_NOT_DONE)))

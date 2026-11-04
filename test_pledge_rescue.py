@@ -14,11 +14,9 @@
       32538/32554 的那一頁,Tesseract 在 35%/55%/70% 任何裁切範圍都讀不出
       Majikan R.O.C。認頁只能靠 Tesseract 讀得穩的印刷體大標題。
 """
-import zipfile
-
 import pytest
 
-from conftest import FakeVision
+from conftest import FakeVision, pages_of
 import employer_extract as ee
 from contract_template import Template
 from employer_extract import _pledge_name
@@ -66,89 +64,52 @@ class TestPledgeNameExtraction:
         assert _pledge_name("負責人或代表人簽章/ Tanda tangan ... 信安") == ""
 
 
-def _make_docx(path, names):
-    with zipfile.ZipFile(path, "w") as z:
-        for n in names:
-            z.writestr(f"word/media/{n}", n.encode())
-    return str(path)
+def _pledge_pages(front: str = "image4.jpeg", count: int = 7):
+    """image1~imageN 的認頁結果,front 那張是切結書第一頁;bytes 就是檔名。"""
+    return pages_of(*[(0, f"image{n}.jpeg", f"image{n}.jpeg".encode(), f"image{n}.jpeg" == front)
+                      for n in range(1, count + 1)])
 
 
-@pytest.fixture(autouse=True)
-def _clear_cache():
-    ee._page_score_cache.clear()
-    yield
-    ee._page_score_cache.clear()
+def _rescuing(pledge_text: str = _SLASHED) -> FakeVision:
+    """切結書頁(image5)的 Vision 全文;其他頁讀到無關文字。"""
+    return FakeVision(document=lambda b: pledge_text if b == b"image5.jpeg" else "無關文字")
 
 
-@pytest.fixture
-def pledge_front(monkeypatch):
-    """把指定圖檔標成切結書第一頁,其餘 0 分。"""
-    def _use(front: str):
-        monkeypatch.setattr(ee, "_page_marks",
-                            lambda b, **kw: (0, b.decode() == front))
-    return _use
+def _failing_vision() -> FakeVision:
+    def _failed(image):
+        raise VisionCallFailed("503")
+    return FakeVision(document=_failed)
 
 
 class TestPledgeNamePages:
     """候選頁 = 切結書第一頁之**後**最多兩頁。"""
 
-    def test_returns_the_two_pages_after_the_front(self, tmp_path, pledge_front):
-        pledge_front("image4.jpeg")
-        p = _make_docx(tmp_path / "a.docx",
-                       [f"image{n}.jpeg" for n in range(1, 8)])
-        assert [n for n, _ in ee.pledge_name_pages(p)] == ["image5.jpeg",
-                                                           "image6.jpeg"]
-
-    def test_no_front_page_means_no_candidates(self, tmp_path, pledge_front):
-        pledge_front("nothing.jpeg")
-        p = _make_docx(tmp_path / "b.docx", ["image1.jpeg", "image2.jpeg"])
-        assert ee.pledge_name_pages(p) == []
-
-    def test_front_page_is_last_means_no_candidates(self, tmp_path, pledge_front):
-        pledge_front("image2.jpeg")
-        p = _make_docx(tmp_path / "c.docx", ["image1.jpeg", "image2.jpeg"])
-        assert ee.pledge_name_pages(p) == []
-
-    def test_permit_page_is_not_used_to_locate_the_field(self, tmp_path,
-                                                         pledge_front):
+    def test_permit_page_is_not_used_to_locate_the_field(self):
         """雇主欄與許可證不一定同頁:32538/32554 的許可證在 image6、雇主欄在
         image5。曾經 4/4 成立的「同一頁」是巧合,不能拿來認頁。"""
-        pledge_front("image4.jpeg")
-        p = _make_docx(tmp_path / "d.docx",
-                       [f"image{n}.jpeg" for n in range(1, 8)])
-        assert [n for n, _ in ee.pledge_name_pages(p)][0] == "image5.jpeg"
+        assert _pledge_pages().pledge_name_pages()[0].name == "image5.jpeg"
 
 
 class TestRescueFromPledge:
 
-    def test_second_candidate_page_is_tried(self, tmp_path, pledge_front,
-                                            monkeypatch):
-        pledge_front("image4.jpeg")
-        p = _make_docx(tmp_path / "e.docx",
-                       [f"image{n}.jpeg" for n in range(1, 8)])
+    def test_second_candidate_page_is_tried(self):
         vision = FakeVision(document=lambda b: _SLASHED if b == b"image6.jpeg" else "無關文字")
-        assert ee.rescue_name_from_pledge(p, vision) == ("姜信安", "image6.jpeg")
+        assert ee.rescue_name_from_pledge(_pledge_pages(), vision) == ("姜信安", "image6.jpeg")
 
-    def test_stops_at_the_first_hit(self, tmp_path, pledge_front, monkeypatch):
-        pledge_front("image4.jpeg")
-        p = _make_docx(tmp_path / "f.docx",
-                       [f"image{n}.jpeg" for n in range(1, 8)])
+    def test_stops_at_the_first_hit(self):
         vision = FakeVision(document=lambda b: _TWO_LINE)
-        ee.rescue_name_from_pledge(p, vision)
+        ee.rescue_name_from_pledge(_pledge_pages(), vision)
         assert vision.document_reads == [b"image5.jpeg"]          # 命中就停,不白花第二次
 
-    def test_vision_call_failure_stops_without_trying_the_next_page(self, tmp_path,
-                                                                    pledge_front):
+    def test_vision_call_failure_stops_without_trying_the_next_page(self):
         """Vision 呼叫失敗多半是服務那一端,換一張再打多半一樣;交給呼叫端寫疑慮(#66)。"""
-        pledge_front("image4.jpeg")
-        p = _make_docx(tmp_path / "g.docx", [f"image{n}.jpeg" for n in range(1, 8)])
 
         def _boom(b):
             raise VisionCallFailed("503")
 
         vision = FakeVision(document=_boom)
         with pytest.raises(VisionCallFailed):
-            ee.rescue_name_from_pledge(p, vision)
+            ee.rescue_name_from_pledge(_pledge_pages(), vision)
         assert vision.document_reads == [b"image5.jpeg"]
 
 
@@ -160,95 +121,73 @@ class TestApplyRescue:
             ExtractionStatus.擷取成功, EmployerValues(雇主名稱_中=cn, 雇主名稱_英=en),
             ee._doubts("雇主名稱_中", ee._name_doubt(cn, en)), Source(template))
 
-    def test_rescued_name_is_written_and_flagged(self, monkeypatch):
-        monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, vision: ("姜信安", "image5.jpeg"))
+    def test_rescued_name_is_written_and_flagged(self):
         f = self._fields()
         assert f.疑慮標示 == "H:未擷取到中文名"
-        f = ee._apply_pledge_rescue(f, "x.docx", FakeVision())
+        f = ee._apply_pledge_rescue(f, _pledge_pages(), _rescuing())
         assert f.values.雇主名稱_中 == "姜信安"
         assert "H:中文名取自切結書頁(image5.jpeg)" in f.疑慮標示
         assert "未擷取到" not in f.疑慮標示      # 已經擷取到了,那句話變成假的
 
-    def test_count_check_still_runs_on_the_rescued_name(self, monkeypatch):
+    def test_count_check_still_runs_on_the_rescued_name(self):
         """救回來的名字仍要過字數/音節數檢查——換來源不等於免檢。"""
-        monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, vision: ("信安", "image5.jpeg"))
         f = self._fields()
-        f = ee._apply_pledge_rescue(f, "x.docx", FakeVision())
+        f = ee._apply_pledge_rescue(f, _pledge_pages(),
+                                    _rescuing("中華民國雇主:信安 Majikan R.O.C: JIANG SIN AN"))
         assert "取自切結書頁" in f.疑慮標示
         assert "2 字與英譯 3 音節不符" in f.疑慮標示
 
-    def test_rescued_company_name_skips_count_check_on_factory_template(self, monkeypatch):
+    def test_rescued_company_name_skips_count_check_on_factory_template(self):
         """工廠類樣板救回的是公司名:跟契約頁一樣看樣板跳過檢查(ADR-0010)。"""
-        monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, vision: ("大明金屬股份有限公司", "image5.jpeg"))
         f = self._fields(en="DA MING METAL CORPORATION (WANG, DA-MING)",
                          template=Template.工廠類)
-        f = ee._apply_pledge_rescue(f, "x.docx", FakeVision())
+        f = ee._apply_pledge_rescue(f, _pledge_pages(), _rescuing(
+            "中華民國雇主:大明金屬股份有限公司 Majikan R.O.C: DA MING METAL"))
         assert "取自切結書頁" in f.疑慮標示
         assert "音節" not in f.疑慮標示
 
-    def test_vision_call_failure_is_stated_beside_the_missing_name(self, monkeypatch):
+    def test_vision_call_failure_is_stated_beside_the_missing_name(self):
         """沒問到 ≠ 救不回:H 欄維持空,L 欄另加一條,兩條並列(#66、ADR-0015)。"""
-        def _failed(p, vision):
-            raise VisionCallFailed("503")
-        monkeypatch.setattr(ee, "rescue_name_from_pledge", _failed)
-        f = ee._apply_pledge_rescue(self._fields(), "x.docx", FakeVision())
+        f = ee._apply_pledge_rescue(self._fields(), _pledge_pages(), _failing_vision())
         assert f.values.雇主名稱_中 == ""
         assert f.status is ExtractionStatus.擷取成功
         assert f.疑慮標示 == "H:未擷取到中文名；H:切結書頁 Vision 呼叫失敗"
 
-    def test_failed_rescue_changes_nothing(self, monkeypatch):
+    def test_failed_rescue_changes_nothing(self):
         """救不回來時 H 欄維持空、L 欄維持「未擷取到」。
 
         兩種空值成因(紅章壓死 vs 契約只填拼音)從文字上仍分不出來,ADR-0004
         那條「不猜原因」不因為多了一條管道而改變——32503 正是救不回的那一半。
         """
-        monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, vision: ("", ""))
         f = self._fields()
-        f = ee._apply_pledge_rescue(f, "x.docx", FakeVision())
+        f = ee._apply_pledge_rescue(f, _pledge_pages(), _rescuing("無關文字"))
         assert f.values.雇主名稱_中 == ""
         assert f.疑慮標示 == "H:未擷取到中文名"
 
-    def test_english_name_is_never_overwritten(self, monkeypatch):
+    def test_english_name_is_never_overwritten(self):
         """只救中文名。切結書頁的英文反而讀壞過(32503 讀成 FU BIN ANI FU),
         而英文名本來就是可靠的那一欄,覆蓋它是負向交換。"""
-        monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, vision: ("姜信安", "image5.jpeg"))
         f = self._fields(en="JIANG SIN AN")
-        f = ee._apply_pledge_rescue(f, "x.docx", FakeVision())
+        f = ee._apply_pledge_rescue(f, _pledge_pages(), _rescuing())
         assert f.values.雇主名稱_英 == "JIANG SIN AN"
 
-    def test_rescue_only_fires_when_chinese_name_is_missing(self, monkeypatch,
-                                                            tmp_path):
-        """契約頁已有中文名就不該多花一次 Vision。"""
-        calls: list[str] = []
-        monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, vision: calls.append(p) or ("", ""))
-        monkeypatch.setattr(ee, "_scored_pages", lambda p: [])
-        ee.extract_employer_from_docx(str(tmp_path / "h.docx"), FakeVision(), roi=None)
-        assert calls == []                       # 無內嵌圖就提早返回,更不會救援
+    def test_no_images_does_not_rescue(self):
+        """無內嵌圖就提早返回,更不會救援(FakeVision 沒給讀整頁,被呼叫就會紅)。"""
+        ee.extract_employer_from_docx(pages_of(), FakeVision(), roi=None)
 
 
 class TestPledgeVisionFailureShape:
     """#66 review:沒問到只加自己那一條;非 Vision 的例外照舊不拖垮契約頁的值。"""
 
-    def test_not_extracted_status_gets_only_the_failure_line(self, monkeypatch):
+    def test_not_extracted_status_gets_only_the_failure_line(self):
         """找不到契約頁時本來就沒有「未擷取到中文名」,不該被補上。"""
-        def _failed(p, vision):
-            raise VisionCallFailed("503")
-        monkeypatch.setattr(ee, "rescue_name_from_pledge", _failed)
         f = ee._apply_pledge_rescue(EmployerExtraction(ExtractionStatus.找不到契約頁),
-                                    "x.docx", FakeVision())
+                                    _pledge_pages(), _failing_vision())
         assert f.疑慮標示 == "H~O:找不到契約頁,未擷取；H:切結書頁 Vision 呼叫失敗"
 
-    def test_other_errors_still_give_up_quietly(self, tmp_path, pledge_front):
-        pledge_front("image4.jpeg")
-        p = _make_docx(tmp_path / "k.docx", ["image4.jpeg", "image5.jpeg"])
+    def test_other_errors_still_give_up_quietly(self):
 
         def _boom(b):
             raise RuntimeError("讀圖壞了")
 
-        assert ee.rescue_name_from_pledge(p, FakeVision(document=_boom)) == ("", "")
+        assert ee.rescue_name_from_pledge(_pledge_pages(), FakeVision(document=_boom)) == ("", "")

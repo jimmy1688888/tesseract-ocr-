@@ -117,7 +117,8 @@ L 欄維持 `H:未擷取到中文名`。ADR-0004 那條規矩不因為多了一�
 - 成本:每次救援 +1 次 Vision。上一批 21 份會觸發 4 次(約 +19% 的雇主擷取 Vision 量)。
 - 契約頁評分的快取從 `{圖檔名: 分數}` 變成 `{圖檔名: (分數, 是否切結書第一頁)}`,
   兩件事共用同一次上緣掃描。`test_contract_page.py` 的計次接縫隨之從
-  `score_contract_page` 移到 `_page_marks`。
+  `score_contract_page` 移到 `_page_marks`。(#77 起評分與快取都在 `page_identification`:
+  快取改成一批共用、注入的 `PageIdentifier`,計次換成假的上緣讀字器。)
 - Vision 失敗(憑證/額度/網路)只記 warning,救援放棄,不讓整批掛掉。
   **2026-10-30 起由 ADR-0015 取代**:Vision 呼叫失敗救援停在那一頁,L 欄另加
   「H:切結書頁 Vision 呼叫失敗」;身分或權限被拒(403/401)整批中止。

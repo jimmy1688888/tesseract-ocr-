@@ -17,6 +17,7 @@ preflight 的憑證檢查會在掃描前先攔下來,這裡是 --skip-preflight 
 最後一道。救援以前自己建 reader、建不起來就降級成救回 0 筆 —— 在 main 裡那條路
 走不到(送 Vision 那步先建 reader、先中止),#71 刪掉。
 """
+from conftest import FakeIdentifier
 import argparse
 
 import pytest
@@ -58,7 +59,7 @@ def test_permit_reading_aborts_the_run(tmp_path):
 
 def test_employer_fields_abort_the_run(tmp_path):
     with pytest.raises(NoCredentials):
-        P.collect_employer_fields(Batch.from_dir(tmp_path))
+        P.collect_employer_fields(Batch.from_dir(tmp_path), identifier=FakeIdentifier())
 
 
 def test_run_aborts_before_writing_sheets(tmp_path, monkeypatch):

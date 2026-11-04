@@ -5,7 +5,7 @@
 字母;組 L 欄的知識住兩處 —— 切結書頁備援用不了 `_compose_doubt`,只好自己再
 手寫一次 join。資料全部捏造。
 """
-from conftest import FakeVision
+from conftest import FakeVision, pages_of
 import employer_extract as ee
 from employer_extract import extract_employer_fields
 from employer_result import (VALUE_KEYS, Doubt, EmployerExtraction, EmployerValues,
@@ -84,14 +84,14 @@ class TestEnglishHintAnchorsTheAddress:
 
 class TestPledgeRescueAddsToTheList:
 
-    def test_rescue_replaces_the_missing_name_doubt_in_place(self, monkeypatch):
-        monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, vision: ("姜信安", "image5.jpeg"))
+    def test_rescue_replaces_the_missing_name_doubt_in_place(self):
+        pages = pages_of((0, "image4.jpeg", b"front", True), (0, "image5.jpeg", b"name"))
+        vision = FakeVision(document=lambda b: "中華民國雇主/Majikan R.O.C: 姜信安/JIANG SIN AN")
         doubts = (Doubt("雇主名稱_中", "未擷取到中文名"),
                   Doubt("地址_中_標準", "中文地址未擷取到"))
         f = EmployerExtraction(ExtractionStatus.擷取成功,
                                EmployerValues(雇主名稱_英="JIANG SIN AN"), doubts)
-        f = ee._apply_pledge_rescue(f, "x.docx", FakeVision())
+        f = ee._apply_pledge_rescue(f, pages, vision)
         assert f.doubts == (Doubt("雇主名稱_中", "中文名取自切結書頁(image5.jpeg)"),
                             Doubt("地址_中_標準", "中文地址未擷取到"))
         assert f.疑慮標示 == "H:中文名取自切結書頁(image5.jpeg)；J:中文地址未擷取到"

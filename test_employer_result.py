@@ -4,7 +4,7 @@
 舊做法是一個扁平 dict,混著輸出欄、內部疑慮、流程中介(`_image`、`_note`…);
 擷取拋例外的那份 docx 甚至不在結果裡。資料全部捏造。
 """
-from conftest import FakeVision
+from conftest import FakeIdentifier, FakeVision, pages_of
 import employer_extract as ee
 from employer_result import (DOUBT_KEY, EMPLOYER_COLUMNS, VALUE_KEYS, Doubt, EmployerExtraction,
                              EmployerValues, ExtractionStatus)
@@ -17,23 +17,21 @@ _TEXT = "\n".join(["甲方名稱: 王小明", "Nama Majikan: WANG XIAO MING",
 class TestStatusFromDocx:
     """extract_employer_from_docx 的每條路都回一個擷取結果,狀況講明走了哪條。"""
 
-    def test_no_images(self, monkeypatch):
-        monkeypatch.setattr(ee, "_scored_pages", lambda p: [])
-        r = ee.extract_employer_from_docx("x.docx", FakeVision(), roi=None)
+    def test_no_images(self):
+        r = ee.extract_employer_from_docx(pages_of(), FakeVision(), roi=None)
         assert r.status is ExtractionStatus.docx無內嵌圖
         assert r.values == EmployerValues() and r.doubts == ()
 
-    def test_contract_page_not_found_keeps_the_candidate_page(self, monkeypatch):
-        monkeypatch.setattr(ee, "_scored_pages", lambda p: [(0, "image2.jpeg", b"x")])
-        monkeypatch.setattr(ee, "rescue_name_from_pledge", lambda p, vision: ("", ""))
-        r = ee.extract_employer_from_docx("x.docx", FakeVision(), roi=None)
+    def test_contract_page_not_found_keeps_the_candidate_page(self):
+        r = ee.extract_employer_from_docx(pages_of((0, "image2.jpeg", b"x")), FakeVision(),
+                                          roi=None)       # 沒有切結書頁:救援不讀 Vision
         assert r.status is ExtractionStatus.找不到契約頁
         assert r.source.image == "image2.jpeg"
         assert r.values == EmployerValues()
 
-    def test_success_carries_the_source(self, monkeypatch):
-        monkeypatch.setattr(ee, "_scored_pages", lambda p: [(99, "image2.jpeg", b"x")])
-        r = ee.extract_employer_from_docx("x.docx", FakeVision(document=lambda b: _TEXT),
+    def test_success_carries_the_source(self):
+        r = ee.extract_employer_from_docx(pages_of((99, "image2.jpeg", b"x")),
+                                          FakeVision(document=lambda b: _TEXT),
                                           roi=None, deink=False)
         assert r.status is ExtractionStatus.擷取成功
         assert (r.source.image, r.source.text) == ("image2.jpeg", _TEXT)
@@ -57,7 +55,8 @@ class TestExtractionFailureIsAResult:
 
         monkeypatch.setattr("employer_extract.extract_employer_from_docx", boom)
         got = pipeline.collect_employer_fields(
-            Batch.from_file(tmp_path / "99997.docx", output_dir=tmp_path))
+            Batch.from_file(tmp_path / "99997.docx", output_dir=tmp_path), FakeVision(),
+            identifier=FakeIdentifier())
         r = got["99997.docx"]
         assert r.status is ExtractionStatus.擷取失敗
         row = pipeline._row_to_sheet_values(

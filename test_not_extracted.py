@@ -11,7 +11,7 @@ import logging
 import pytest
 from PIL import Image
 
-from conftest import FakeVision
+from conftest import FakeIdentifier, FakeVision, pages_of
 import employer_extract as ee
 from contract_template import Template
 from employer_result import EmployerExtraction, EmployerValues, ExtractionStatus
@@ -20,8 +20,19 @@ from vision_reader import VisionCallFailed
 _NO_ANCHOR = "勞動契約 監護工\n仲介公司 某某人力"
 
 
-def _rescue(name="姜信安", page="image5.jpeg"):
-    return lambda p, vision: (name, page)
+# 切結書頁:image4 是切結書第一頁,雇主姓名在 image5(ADR-0006)。
+_PLEDGE = ((0, "image4.jpeg", b"image4.jpeg", True), (0, "image5.jpeg", b"image5.jpeg"))
+_PLEDGE_TEXT = "中華民國雇主/Majikan R.O.C: 姜信安/JIANG SIN AN"
+
+
+def _contract(score: int, image: bytes = b"x"):
+    """契約頁 image2(score 分),後面接切結書頁。"""
+    return pages_of((score, "image2.jpeg", image), *_PLEDGE)
+
+
+def _vision(contract_text: str = "", pledge_text: str = _PLEDGE_TEXT) -> FakeVision:
+    """契約頁讀到 contract_text、切結書頁讀到 pledge_text。"""
+    return FakeVision(document=lambda b: pledge_text if b == b"image5.jpeg" else contract_text)
 
 
 class TestReasonInLColumn:
@@ -47,48 +58,36 @@ class TestReasonInLColumn:
 class TestRescueAlongsideTheReason:
 
     def test_anchor_failure_then_rescue(self, monkeypatch):
-        monkeypatch.setattr(ee, "_scored_pages", lambda p: [(99, "image2.jpeg", b"x")])
-        monkeypatch.setattr(ee, "rescue_name_from_pledge", _rescue())
-        r = ee.extract_employer_from_docx("x.docx", FakeVision(document=lambda b: _NO_ANCHOR),
+        r = ee.extract_employer_from_docx(_contract(99), _vision(_NO_ANCHOR),
                                           roi=None, deink=False)
         assert r.status is ExtractionStatus.雇主區塊未錨定
         assert r.values.雇主名稱_中 == "姜信安"
         assert r.疑慮標示 == "H~O:契約頁雇主區塊未錨定,未擷取；H:中文名取自切結書頁(image5.jpeg)"
 
     def test_contract_page_not_found_then_rescue(self, monkeypatch):
-        monkeypatch.setattr(ee, "_scored_pages", lambda p: [(0, "image2.jpeg", b"x")])
-        monkeypatch.setattr(ee, "rescue_name_from_pledge", _rescue())
-        r = ee.extract_employer_from_docx("x.docx", FakeVision(), roi=None)
+        r = ee.extract_employer_from_docx(_contract(0), _vision(), roi=None)
         assert r.status is ExtractionStatus.找不到契約頁
         assert r.values.雇主名稱_中 == "姜信安"
         assert r.疑慮標示 == "H~O:找不到契約頁,未擷取；H:中文名取自切結書頁(image5.jpeg)"
 
     def test_failed_rescue_leaves_only_the_reason(self, monkeypatch):
-        monkeypatch.setattr(ee, "_scored_pages", lambda p: [(0, "image2.jpeg", b"x")])
-        monkeypatch.setattr(ee, "rescue_name_from_pledge", _rescue("", ""))
-        r = ee.extract_employer_from_docx("x.docx", FakeVision(), roi=None)
+        r = ee.extract_employer_from_docx(_contract(0), _vision(pledge_text="無關文字"), roi=None)
         assert r.values.雇主名稱_中 == ""
         assert r.疑慮標示 == "H~O:找不到契約頁,未擷取"
 
-    def test_no_images_does_not_rescue(self, monkeypatch):
-        calls = []
-        monkeypatch.setattr(ee, "_scored_pages", lambda p: [])
-        monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, vision: calls.append(p) or ("姜信安", "image5.jpeg"))
-        r = ee.extract_employer_from_docx("x.docx", FakeVision(), roi=None)
-        assert calls == [] and r.疑慮標示 == "H~O:docx 無內嵌圖,未擷取"
+    def test_no_images_does_not_rescue(self):
+        r = ee.extract_employer_from_docx(pages_of(), FakeVision(), roi=None)   # 讀整頁就會紅
+        assert r.疑慮標示 == "H~O:docx 無內嵌圖,未擷取"
 
-    def test_extraction_failure_does_not_rescue(self, tmp_path, monkeypatch, offline_identity):
+    def test_extraction_failure_does_not_rescue(self, tmp_path, monkeypatch):
         import pipeline
         from batch import Batch
-        calls = []
-        monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, vision: calls.append(p) or ("姜信安", "image5.jpeg"))
         monkeypatch.setattr("employer_extract.extract_employer_from_docx",
                             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("壞掉")))
+        vision = FakeVision()                   # 沒給讀整頁:救援一跑就紅
         got = pipeline.collect_employer_fields(
-            Batch.from_file(tmp_path / "99996.docx", output_dir=tmp_path))
-        assert calls == []
+            Batch.from_file(tmp_path / "99996.docx", output_dir=tmp_path), vision,
+            identifier=FakeIdentifier(*_PLEDGE))
         assert got["99996.docx"].疑慮標示 == "H~O:雇主擷取失敗(例外),未擷取"
 
 
@@ -99,33 +98,26 @@ class TestContractPageVisionCallFailed:
     def _failing(image):
         raise VisionCallFailed("503")
 
-    def test_has_its_own_status_and_keeps_the_page(self, monkeypatch):
-        monkeypatch.setattr(ee, "_scored_pages", lambda p: [(99, "image2.jpeg", b"x")])
-        r = ee.extract_employer_from_docx("x.docx", FakeVision(document=self._failing),
+    def test_has_its_own_status_and_keeps_the_page(self):
+        r = ee.extract_employer_from_docx(_contract(99), FakeVision(document=self._failing),
                                           roi=None, deink=False)
         assert r.status is ExtractionStatus.契約頁Vision呼叫失敗
         assert r.values == EmployerValues()
         assert r.source.image == "image2.jpeg"        # 截圖照樣留著,人工看得到
         assert r.疑慮標示 == "H~O:契約頁 Vision 呼叫失敗,未擷取"
 
-    def test_pledge_rescue_does_not_run(self, monkeypatch):
-        calls = []
-        monkeypatch.setattr(ee, "_scored_pages", lambda p: [(99, "image2.jpeg", b"x")])
-        monkeypatch.setattr(ee, "rescue_name_from_pledge",
-                            lambda p, vision: calls.append(p) or ("姜信安", "image5.jpeg"))
-        ee.extract_employer_from_docx("x.docx", FakeVision(document=self._failing),
-                                      roi=None, deink=False)
-        assert calls == []
+    def test_pledge_rescue_does_not_run(self):
+        vision = FakeVision(document=self._failing)
+        ee.extract_employer_from_docx(_contract(99), vision, roi=None, deink=False)
+        assert vision.document_reads == [b"x"]          # 只有契約頁,沒去讀切結書頁
 
-    def test_one_failure_does_not_touch_the_others(self, tmp_path, monkeypatch):
+    def test_one_failure_does_not_touch_the_others(self, tmp_path):
         import pipeline
         from batch import Batch
         (tmp_path / "bad.docx").write_bytes(b"")
         (tmp_path / "ok.docx").write_bytes(b"")
         page = io.BytesIO()
         Image.new("RGB", (40, 40), "white").save(page, format="PNG")
-        monkeypatch.setattr(ee, "_scored_pages",
-                            lambda p: [(99, "image2.jpeg", page.getvalue())])
         text = "\n".join(["甲方名稱: 王小明", "Nama Majikan: WANG XIAO MING",
                           "SELANJUTNYA DISEBUT PIHAK PERTAMA"])
         reads = []
@@ -136,7 +128,8 @@ class TestContractPageVisionCallFailed:
                 raise VisionCallFailed("503")
             return text
         got = pipeline.collect_employer_fields(
-            Batch.from_dir(tmp_path, output_dir=tmp_path / "out"), FakeVision(document=read))
+            Batch.from_dir(tmp_path, output_dir=tmp_path / "out"), FakeVision(document=read),
+            identifier=FakeIdentifier((99, "image2.jpeg", page.getvalue())))
         assert got["bad.docx"].status is ExtractionStatus.契約頁Vision呼叫失敗
         assert got["ok.docx"].values.雇主名稱_中 == "王小明"
 
@@ -151,7 +144,8 @@ class TestContractPageVisionCallFailed:
         monkeypatch.setattr("employer_extract.extract_employer_from_docx", refused)
         with pytest.raises(PermissionDenied):
             pipeline.collect_employer_fields(
-                Batch.from_file(tmp_path / "99994.docx", output_dir=tmp_path), FakeVision())
+                Batch.from_file(tmp_path / "99994.docx", output_dir=tmp_path), FakeVision(),
+                identifier=FakeIdentifier())
 
 
 class TestTemplateDoubtIsAboutTheWholeDocx:
@@ -170,7 +164,8 @@ class TestLogMatchesSheets:
         from batch import Batch
         monkeypatch.setattr("employer_extract.extract_employer_from_docx", lambda *a, **k: result)
         pipeline.collect_employer_fields(Batch.from_file(tmp_path / "99995.docx",
-                                                         output_dir=tmp_path))
+                                                         output_dir=tmp_path),
+                                         FakeVision(), identifier=FakeIdentifier())
 
     def test_rescued_row_does_not_claim_h_to_o_empty(self, tmp_path, monkeypatch, caplog,
                                                      offline_identity):

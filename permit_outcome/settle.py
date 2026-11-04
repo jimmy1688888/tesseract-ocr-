@@ -14,6 +14,7 @@ import logging
 from dataclasses import dataclass
 
 from batch import Batch
+from page_identification import PageIdentifier
 from permit_lookup import PermitLookup
 from sheet_row import SheetRow, SheetStatus
 from submission_decision import Decision, Destination
@@ -66,11 +67,12 @@ class PermitOutcomes:
 
 
 def settle(decisions: list[Decision], batch: Batch, vision: VisionReader,
-           roster: PermitLookup | None) -> PermitOutcomes:
+           roster: PermitLookup | None, identifier: PageIdentifier) -> PermitOutcomes:
     """一批送審決策(一份 docx 一個)→ 它們的許可證判讀結果。
 
     vision 讀截圖(Vision 驗證)與次頁(反查救援);roster 是反查救援要查的名冊,
-    降級為 None 時救援跳過、種子列原樣。身分或權限被拒往上拋(整批中止)。
+    降級為 None 時救援跳過、種子列原樣;identifier 是反查救援找次頁用的認頁來源。
+    身分或權限被拒往上拋(整批中止)。
     """
     by_destination = _by_destination(decisions)
     _log_destinations(by_destination)
@@ -84,7 +86,7 @@ def settle(decisions: list[Decision], batch: Batch, vision: VisionReader,
              for d in by_destination[Destination.反查救援]]
     if seeds:
         logger.info("── 步驟 4b：反查救援 → 次頁台仲區塊反查名冊 ──")
-    rescued = rescue_from_next_page(batch, seeds, roster, vision)
+    rescued = rescue_from_next_page(batch, seeds, roster, vision, identifier)
 
     return PermitOutcomes(
         tesseract_keyin=[_decision_row(d, d.candidate_value, SheetStatus.KEYED_IN)

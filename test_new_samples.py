@@ -12,12 +12,12 @@ import pytest
 import employer_extract as ee
 import real_samples as rs
 import snapshots as snap
-
-M = ee.MIN_CONTRACT_SCORE
+from conftest import pages_of
+from page_identification import MIN_CONTRACT_SCORE as M
 
 PAGES = {
-    "33711": [(1, "image1.png", b"p1"), (M + 3, "image2.png", b"p2"), (M - 1, "image3.png", b"p3")],
-    "33712": [(0, "image1.png", b"q1"), (1, "image2.jpeg", b"q2")],      # 未達門檻
+    "33711": pages_of((1, "image1.png", b"p1"), (M + 3, "image2.png", b"p2"), (M - 1, "image3.png", b"p3")),
+    "33712": pages_of((0, "image1.png", b"q1"), (1, "image2.jpeg", b"q2")),      # 未達門檻
 }
 
 
@@ -56,7 +56,7 @@ class Fake:
         return snap.fill_missing_vision(
             ask=self.ask, out=self.lines.append, vision_ok=self.vision_ok,
             fetch_text=self.fetch_text,
-            score_pages=lambda p: PAGES[p.stem], prepare=lambda raw: raw)
+            identify=lambda p: PAGES[p.stem], prepare=lambda raw: raw)
 
 
 def test_confirmed_page_becomes_checked_value_and_is_sent(corpus):

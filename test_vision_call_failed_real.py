@@ -9,6 +9,7 @@ import pytest
 from conftest import FakeVision
 import real_samples as rs
 from employer_extract import extract_employer_from_docx
+from page_identification import PageIdentifier
 from employer_result import ExtractionStatus
 from vision_reader import VisionCallFailed
 
@@ -21,7 +22,8 @@ def _fail(image):
 
 
 def test_33703_contract_page_failure(real_ocr):
-    result = extract_employer_from_docx(str(rs.sample("33703.docx")), FakeVision(document=_fail))
+    result = extract_employer_from_docx(PageIdentifier().identify(rs.sample("33703.docx")),
+                                        FakeVision(document=_fail))
 
     assert result.status is ExtractionStatus.契約頁Vision呼叫失敗
     assert result.source.image == rs.checked_contract_page("33703.docx")
@@ -38,7 +40,8 @@ def test_30766_pledge_page_failure_stops_at_the_first_page(real_ocr):
             return _NO_CHINESE_NAME            # 契約頁
         raise VisionCallFailed("503")          # 切結書頁
 
-    result = extract_employer_from_docx(str(rs.sample("30766.docx")), FakeVision(document=read))
+    result = extract_employer_from_docx(PageIdentifier().identify(rs.sample("30766.docx")),
+                                        FakeVision(document=read))
 
     assert len(reads) == 2
     assert result.values.雇主名稱_中 == ""
@@ -55,7 +58,8 @@ def test_33703_next_page_failure_is_stated_in_d(real_ocr, monkeypatch):
     seed = SheetRow("33703.docx", "", SheetStatus.MANUAL_REVIEW, "large:全無命中")
 
     [row] = rescue_from_next_page(
-        Batch.from_file(rs.sample("33703.docx")), [seed], object(), vision)   # 名冊在,才走得到次頁
+        Batch.from_file(rs.sample("33703.docx")), [seed], object(), vision,   # 名冊在,才走得到次頁
+        PageIdentifier())
 
     assert len(vision.document_reads) == 1                       # 真的走到次頁那一次
     assert (row.permit, row.status) == ("", SheetStatus.MANUAL_REVIEW)

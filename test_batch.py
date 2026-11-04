@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import FakeIdentifier
+
 import employer_extract
 import docx_images
 import pipeline
@@ -121,8 +123,8 @@ class TestRescueOpensTheBatchFile:
         """記下救援真正送去讀次頁的路徑。替身只放在外部邊界:名冊、次頁擷取。"""
         paths: list[Path] = []
 
-        def fake_next_page(path, vision):
-            paths.append(Path(path))
+        def fake_next_page(pages, vision):
+            paths.append(Path(pages.docx_path))
             return {"phones": ["02-1234-5678"], "name": "", "address": ""}
 
         monkeypatch.setattr(employer_extract, "agency_block_from_next_page", fake_next_page)
@@ -144,7 +146,8 @@ class TestRescueOpensTheBatchFile:
 
     def test_opens_the_file_given_by_path(self, opened, elsewhere):
         [row] = rescue_from_next_page(
-            Batch.from_file(elsewhere), self._seed(), _OneAgencyRoster(), object())
+            Batch.from_file(elsewhere), self._seed(), _OneAgencyRoster(), object(),
+            FakeIdentifier())
         assert opened == [elsewhere]
         assert row.permit == "2340"
 
@@ -152,7 +155,8 @@ class TestRescueOpensTheBatchFile:
         """修好前:./docs 沒有同名檔就靜默跳過。"""
         (elsewhere.parent.parent / "docs" / "32417.docx").unlink()
         [row] = rescue_from_next_page(
-            Batch.from_file(elsewhere), self._seed(), _OneAgencyRoster(), object())
+            Batch.from_file(elsewhere), self._seed(), _OneAgencyRoster(), object(),
+            FakeIdentifier())
         assert row.permit == "2340"
         assert opened == [elsewhere]
 
