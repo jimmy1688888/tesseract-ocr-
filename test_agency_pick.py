@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from agency_block import AgencyBlock
 from conftest import FakeIdentifier
 
 from permit_lookup import AgencyPick, pick_agency
@@ -53,7 +54,7 @@ class Roster:
 
 
 def _block(phones=(), name="", address=""):
-    return {"phones": list(phones), "name": name, "address": address}
+    return AgencyBlock(tuple(phones), name, address)
 
 
 class TestPhoneExact:
@@ -161,7 +162,7 @@ class TestRescueReturnsNewRows:
 
     @staticmethod
     def _run(monkeypatch, tmp_path, blocks, seeds, with_reads=False):
-        import employer_extract
+        import agency_block
         from batch import Batch
 
         for s in seeds:
@@ -175,7 +176,7 @@ class TestRescueReturnsNewRows:
             if isinstance(blocks[name], Exception):
                 raise blocks[name]
             return blocks[name]
-        monkeypatch.setattr(employer_extract, "agency_block_from_next_page", next_page)
+        monkeypatch.setattr(agency_block, "agency_block_from_next_page", next_page)
         got = rescue_from_next_page(Batch.from_dir(tmp_path), seeds, roster, object(),
                                     FakeIdentifier())
         return (got, reads) if with_reads else got

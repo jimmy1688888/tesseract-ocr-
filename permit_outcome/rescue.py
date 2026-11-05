@@ -8,9 +8,10 @@ import logging
 from dataclasses import replace
 from pathlib import Path
 
-# 讀次頁走模組屬性(employer_extract.agency_block_from_next_page),不 from-import:
-# 測試在外部邊界換掉的是 employer_extract 上的那個名字。
-import employer_extract
+# 讀次頁走模組屬性(agency_block.agency_block_from_next_page),不 from-import:
+# 測試在外部邊界換掉的是 agency_block 上的那個名字。
+import agency_block
+from agency_block import AgencyBlock
 from batch import Batch
 from page_identification import PageIdentifier
 from permit_lookup import PermitLookup, pick_agency
@@ -22,23 +23,22 @@ from .reason import appended
 logger = logging.getLogger(__name__)
 
 RESCUE_NOT_DONE = "反查救援未完成:次頁 Vision 呼叫失敗"
-_NO_BLOCK = {"phones": [], "name": "", "address": ""}
 
 
 def _next_page_block(docx_path: Path, vision: VisionReader,
-                     identifier: PageIdentifier) -> dict | None:
+                     identifier: PageIdentifier) -> AgencyBlock | None:
     """一份 docx 的次頁台仲區塊;Vision 呼叫失敗回 None,其他失敗(含 docx 讀不開)當作
     沒有區塊。身分或權限被拒往上拋(整批中止)。"""
     try:
-        return employer_extract.agency_block_from_next_page(identifier.identify(docx_path), vision)
+        return agency_block.agency_block_from_next_page(identifier.identify(docx_path), vision)
     except IDENTITY_REFUSED:
         raise
     except VisionCallFailed as e:
         logger.warning(f"  ⚠ {docx_path.name} 次頁 {e}")
         return None
     except Exception as e:
-        logger.warning(f"  ⚠ {docx_path.name} 次頁仲介區塊擷取失敗:{e!r}")
-        return dict(_NO_BLOCK)
+        logger.warning(f"  ⚠ {docx_path.name} 次頁台仲區塊擷取失敗:{e!r}")
+        return AgencyBlock()
 
 
 def rescue_from_next_page(batch: Batch, seeds: list[SheetRow], roster: PermitLookup | None,
@@ -57,8 +57,8 @@ def rescue_from_next_page(batch: Batch, seeds: list[SheetRow], roster: PermitLoo
         return list(seeds)
     out: list[SheetRow] = []
     rescued = 0
-    # source_docx → {phones,name,address};None = 次頁 Vision 呼叫失敗(避免重複送 Vision)
-    block_cache: dict[str, dict | None] = {}
+    # source_docx → 台仲區塊;None = 次頁 Vision 呼叫失敗(避免重複送 Vision)
+    block_cache: dict[str, AgencyBlock | None] = {}
     for row in seeds:
         docx_name = row.source_docx
         docx_path = batch.path_of(docx_name)

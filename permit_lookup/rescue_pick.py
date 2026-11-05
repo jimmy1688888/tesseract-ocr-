@@ -5,8 +5,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .lookup import PermitLookup
+
+if TYPE_CHECKING:
+    # 只取型別:名冊 package 不因此在執行時拖進像素、Vision 那一串。
+    from agency_block import AgencyBlock
 
 
 @dataclass(frozen=True)
@@ -20,8 +25,8 @@ class AgencyPick:
     note: str = ""
 
 
-def pick_agency(block: dict, roster: PermitLookup) -> AgencyPick:
-    """次頁台仲區塊({phones, name, address})→ 名冊挑一家。純函式:不開檔、不打 Vision。
+def pick_agency(block: AgencyBlock, roster: PermitLookup) -> AgencyPick:
+    """次頁台仲區塊 → 名冊挑一家。純函式:不開檔、不打 Vision。
 
     roster 只用到 agencies_by_phone / agencies_by_phone_prefix / best_by_name /
     best_by_address 四種查法(測試替身照這四個寫)。
@@ -33,7 +38,7 @@ def pick_agency(block: dict, roster: PermitLookup) -> AgencyPick:
     """
     # ── 電話反查(最可靠):唯一命中優先,多家暫記待人工 ──
     ambiguous = None    # (matches, ph):第一支命中多家的電話
-    for ph in block["phones"]:
+    for ph in block.phones:
         matches = roster.agencies_by_phone(ph)
         if len(matches) == 1:
             # ① 電話精確唯一命中
@@ -45,7 +50,7 @@ def pick_agency(block: dict, roster: PermitLookup) -> AgencyPick:
             ambiguous = (matches, ph)
 
     # ② 電話『前綴』唯一命中(OCR 少 1~2 碼容錯;比通用後段名稱可靠,故排在名稱前)
-    for ph in block["phones"]:
+    for ph in block.phones:
         mp = roster.agencies_by_phone_prefix(ph)
         if len(mp) == 1:
             info = mp[0]
@@ -54,8 +59,8 @@ def pick_agency(block: dict, roster: PermitLookup) -> AgencyPick:
                 f"前綴唯一命中 → 許可證 {info['許可證']}／{info['機構名稱']}(仍請人工核對)"))
 
     # ③ 電話後備:名稱、地址各與名冊比相似度,取「相似度(CONF)高者」填 B
-    cand_n = roster.best_by_name(block["name"]) if block.get("name") else None
-    cand_a = roster.best_by_address(block["address"]) if block.get("address") else None
+    cand_n = roster.best_by_name(block.name) if block.name else None
+    cand_a = roster.best_by_address(block.address) if block.address else None
     picks = [(c, lbl) for c, lbl in ((cand_n, "名稱"), (cand_a, "地址")) if c]
     if picks:
         best_c, via = max(picks, key=lambda x: x[0]["_ratio"])

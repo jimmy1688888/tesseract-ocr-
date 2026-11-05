@@ -4,7 +4,7 @@
 三個呼叫端共用同一個 preprocess,差異只在設定值:
   - 許可證掃描(permit_reading,送 Tesseract):SCAN_CONFIGS / FALLBACK_CONFIGS 那幾組
   - 契約頁(employer_extract,送 Vision):CONTRACT_PAGE_DEINK
-  - 契約次頁(employer_extract,送 Vision 找台仲):NEXT_PAGE_DEINK
+  - 契約次頁(agency_block,送 Vision 找台仲區塊):NEXT_PAGE_DEINK
 以前是三份實作(其中一份從 pipeline 延遲 import),彼此的關係沒有寫在任何地方;
 換個前處理讀出的字就不一樣(ADR-0006 的滄/濃/澹),所以差異要看得見(#16)。
 

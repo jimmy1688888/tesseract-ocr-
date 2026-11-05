@@ -13,7 +13,8 @@ import pytest
 
 from conftest import FakeIdentifier
 
-import employer_extract
+import agency_block
+from agency_block import AgencyBlock
 import docx_images
 import pipeline
 from batch import Batch
@@ -125,9 +126,9 @@ class TestRescueOpensTheBatchFile:
 
         def fake_next_page(pages, vision):
             paths.append(Path(pages.docx_path))
-            return {"phones": ["02-1234-5678"], "name": "", "address": ""}
+            return AgencyBlock(("02-1234-5678",))
 
-        monkeypatch.setattr(employer_extract, "agency_block_from_next_page", fake_next_page)
+        monkeypatch.setattr(agency_block, "agency_block_from_next_page", fake_next_page)
         return paths
 
     @pytest.fixture

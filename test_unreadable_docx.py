@@ -21,7 +21,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-import employer_extract
+import agency_block
+from agency_block import AgencyBlock
 import permit_reading as R
 from matches_csv import ResultStatus, ScanResult
 import pipeline as P
@@ -211,8 +212,8 @@ def world(monkeypatch, tmp_path):
 
     monkeypatch.setattr(P, "collect_employer_fields", counting_collect)
     monkeypatch.setattr(P, "load_roster", lambda: _AnyRoster())
-    monkeypatch.setattr(employer_extract, "agency_block_from_next_page",
-                        lambda pages, vision: calls["next_page"].append(pages.docx_path))
+    monkeypatch.setattr(agency_block, "agency_block_from_next_page",
+                        lambda pages, vision: calls["next_page"].append(pages.docx_path) or AgencyBlock())
     monkeypatch.setattr(P, "_sheets_append_atomic", lambda values: calls["sheets"].extend(values))
     return calls
 

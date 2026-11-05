@@ -151,7 +151,8 @@ class TestOneIdentificationAcrossStages:
     """反查救援讀次頁、雇主擷取讀契約頁:同一個認頁來源,一份 docx 只評一次分。"""
 
     def test_rescue_then_employer_scores_once(self, tmp_path, monkeypatch):
-        import employer_extract
+        import agency_block
+        from agency_block import AgencyBlock
         import pipeline
         from batch import Batch
         from conftest import FakeVision
@@ -159,8 +160,8 @@ class TestOneIdentificationAcrossStages:
         from sheet_row import SheetRow, SheetStatus
 
         monkeypatch.setattr(pi, "deink_red_stamp", lambda b: b)
-        monkeypatch.setattr(employer_extract, "agency_block_from_next_page",   # 次頁的 Vision 那端
-                            lambda pages, vision: {"phones": [], "name": "", "address": ""})
+        monkeypatch.setattr(agency_block, "agency_block_from_next_page",   # 次頁的 Vision 那端
+                            lambda pages, vision: AgencyBlock())
         top = _CountingTopText()
         docx = _make_docx(tmp_path / "a.docx", {"image1.png": b"i1", "image2.png": b"i2"})
         batch = Batch.from_file(docx, output_dir=tmp_path / "out")

@@ -14,7 +14,8 @@ import argparse
 import pytest
 
 from conftest import FakeIdentifier, FakeVision
-import employer_extract
+import agency_block
+from agency_block import AgencyBlock
 import matches_csv
 import pipeline as P
 from batch_result import BatchResult
@@ -64,7 +65,7 @@ class FakeRoster:
 
 
 def _block(phones=(), name="", address=""):
-    return {"phones": list(phones), "name": name, "address": address}
+    return AgencyBlock(tuple(phones), name, address)
 
 
 # 次頁台仲區塊(依 docx)
@@ -142,7 +143,7 @@ def world(monkeypatch, tmp_path):
     monkeypatch.setattr(submission_decision, "decide", lambda rows: by_name[rows[0].source_docx])
     monkeypatch.setattr(P, "collect_employer_fields", lambda batch, vision, *, identifier: employer)
     monkeypatch.setattr(P, "load_roster", lambda: roster_loads.append(1) or FakeRoster())
-    monkeypatch.setattr(employer_extract, "agency_block_from_next_page",
+    monkeypatch.setattr(agency_block, "agency_block_from_next_page",
                         lambda pages, vision: BLOCKS[Path(pages.docx_path).name])
     monkeypatch.setattr(P, "_sheets_append_atomic", sheets.extend)
     return sheets, FakeVision(sparse=lambda b: texts[b]), roster_loads

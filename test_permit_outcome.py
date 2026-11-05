@@ -30,10 +30,10 @@ UNREADABLE_WHY = "docx 無法開啟(不是有效的 docx 檔)"
 
 def settle(monkeypatch, decisions, batch, vision, roster, next_page):
     """一批送審決策 → 依寫入順序的 A~D 列。次頁台仲區塊在外部邊界換掉。"""
-    import employer_extract
+    import agency_block
     import permit_outcome
 
-    monkeypatch.setattr(employer_extract, "agency_block_from_next_page", next_page)
+    monkeypatch.setattr(agency_block, "agency_block_from_next_page", next_page)
     return permit_outcome.settle(decisions, batch, vision, roster, FakeIdentifier()).rows
 
 
