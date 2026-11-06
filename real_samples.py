@@ -7,6 +7,7 @@
   samples/docs/*.docx            真實素材本體
   samples/vision/{stem}.json     打過一次 Vision 存下的全文,離線重放、不再花錢
                                  {image, roi, texts: {roi: 全文}}
+  samples/pledge/{stem}.json     切結書頁(雇主姓名那頁)整頁的 Vision 全文,格式同上,roi 為 "1.0"
   samples/checked_values.json    核對值(人看過原圖確認的值),依 stem 分:
                                  {stem: {"契約頁": 圖檔名, "契約樣板": 類別, "許可證": 號碼,
                                          "雇主欄位": {欄: 值}}}
@@ -99,6 +100,15 @@ def vision_sample(stem: str) -> dict:
 def employer_text(stem: str) -> str:
     """正式流程送 Vision 的那一段(texts[roi])的全文;不在就 skip。"""
     s = vision_sample(stem)
+    return s["texts"][s["roi"]]
+
+
+def pledge_text(stem: str) -> str:
+    """切結書頁整頁的 Vision 全文;不在就 skip。"""
+    p = ROOT / "pledge" / f"{stem}.json"
+    if not p.exists():
+        pytest.skip(f"沒有 samples/pledge/{stem}.json")
+    s = json.loads(p.read_text(encoding="utf-8"))
     return s["texts"][s["roi"]]
 
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import replace
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Callable, NamedTuple
 
 # docx 內嵌圖與圖序只有一份,與 pipeline 共用(#5);像素前處理也是(#16)。
 # 兩側不互相 import。
@@ -308,29 +308,39 @@ def pick_employer_names(seg: list[str], address: EmployerAddress,
     return EmployerNames(name_cn, name_en)
 
 
-def extract_employer_fields(text: str) -> EmployerExtraction:
+class PledgeRescue(NamedTuple):
+    """切結書頁備援的結果:救回的中文名與那一頁;沒救回兩者皆空。"""
+    name: str = ""
+    page: str = ""
+    vision_failed: bool = False    # 沒問到 ≠ 救不回(ADR-0015)
+
+
+def extract_employer_fields(text: str, pledge: Callable[[], PledgeRescue] = PledgeRescue
+                            ) -> EmployerExtraction:
     """從 Vision 全文擷取雇主欄位(缺項為空字串)。
 
     擷取狀況只會是擷取成功或雇主區塊未錨定;來源只填契約樣板(圖檔、全文由呼叫端補)。
+    pledge:契約頁沒有中文名時才呼叫的切結書頁備援 —— 中文名來源在這裡一次決定,
+    名稱疑慮依來源一次寫出,不事後回頭改(#81)。預設回空結果,即不做備援。
     """
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     # 契約樣板整份判一次(ADR-0010),下面的英文地址、英文名、字數音節數檢查都看它。
-    # 錨定失敗的早退也帶著它:之後的切結書救援要依樣板決定做不做音節檢查。
     template = contract_template(text)
 
     block = locate_employer_block(lines)
     if isinstance(block, BlockNotAnchored):
-        return EmployerExtraction(ExtractionStatus.雇主區塊未錨定, source=Source(template),
-                                  detail=block.detail)
+        return _not_extracted(ExtractionStatus.雇主區塊未錨定, pledge(), Source(template),
+                              block.detail)
     seg = lines[block.start:block.end]
     phone = pick_employer_phone(seg)
     address = pick_employer_address(seg, template)
     names = pick_employer_names(seg, address, template)
+    rescue = PledgeRescue() if names.cn else pledge()
 
     checked = _check_address(address)
     values = EmployerValues(
         # 補齊不成對括號:擷取時 strip 或 OCR 可能只留單邊,寫進 Sheets 會缺一邊。
-        雇主名稱_中=_balance_brackets(names.cn),
+        雇主名稱_中=rescue.name or _balance_brackets(names.cn),
         雇主名稱_英=_balance_brackets(names.en),
         地址_中=address.cn,
         地址_英=address.en,
@@ -342,15 +352,46 @@ def extract_employer_fields(text: str) -> EmployerExtraction:
         # 樣板決定整套擷取規則,講的是一整份,不只名稱。
         *_doubts(WHOLE, "契約樣板未辨識,以家庭類規則擷取"
                  if template is Template.認不出 else ""),
-        # 括號是補出來的就要講:斷行沒接上時(_name_continuation 只接緊鄰的下一行,
-        # 而 Vision 逐欄序列化不保證相鄰),補齊後的「…機構(王)」看起來完全正常,
-        # 而機構名又不做字數檢查 —— 不標的話就是看不見的錯值。
-        *_doubts(_NAME_CN, "中文名括號不成對,已補齊"
-                 if values.雇主名稱_中 != names.cn else ""),
-        *_doubts(_NAME_CN, _name_doubt(values.雇主名稱_中, values.雇主名稱_英, template)),
+        *_chinese_name_doubts(names.cn, values, template, rescue),
         *checked.doubts,
     )
     return EmployerExtraction(ExtractionStatus.擷取成功, values, doubts, Source(template))
+
+
+def _chinese_name_doubts(contract_cn: str, values: EmployerValues, template: Template,
+                         rescue: PledgeRescue) -> tuple[Doubt, ...]:
+    """名稱那幾條疑慮,依中文名來源:切結書頁救回的,或契約頁讀到(含沒讀到)的。
+    contract_cn 是契約頁讀到、補括號前的中文名。"""
+    name_en = values.雇主名稱_英
+    if rescue.name:
+        # 救回的名字仍要過字數音節數檢查 —— 換來源不等於免檢。
+        return (*_pledge_doubts(rescue),
+                *_doubts(_NAME_CN, _name_doubt(rescue.name, name_en, template)))
+    written = values.雇主名稱_中
+    return (
+        # 括號是補出來的就要講:斷行沒接上時(_name_continuation 只接緊鄰的下一行,
+        # 而 Vision 逐欄序列化不保證相鄰),補齊後的「…機構(王)」看起來完全正常,
+        # 而機構名又不做字數檢查 —— 不標的話就是看不見的錯值。
+        *_doubts(_NAME_CN, "中文名括號不成對,已補齊" if written != contract_cn else ""),
+        *_doubts(_NAME_CN, _name_doubt(written, name_en, template)),
+        # 沒讀到中文名那條仍然是真的;沒問到切結書頁就緊接著並列。
+        *_pledge_doubts(rescue),
+    )
+
+
+def _pledge_doubts(rescue: PledgeRescue) -> tuple[Doubt, ...]:
+    """切結書頁備援自己的那一條:名字取自哪一頁,或沒問到。"""
+    if rescue.vision_failed:
+        return (_PLEDGE_VISION_FAILED,)
+    return _doubts(_NAME_CN, f"中文名取自切結書頁({rescue.page})" if rescue.name else "")
+
+
+def _not_extracted(status: ExtractionStatus, rescue: PledgeRescue, source: Source,
+                   detail: str) -> EmployerExtraction:
+    """H~O 未擷取;切結書頁備援照跑(它讀另一頁、靠自己的標籤),救回的中文名照填。
+    沒有英文名可比,不做字數音節數檢查。"""
+    return EmployerExtraction(status, EmployerValues(雇主名稱_中=rescue.name),
+                              _pledge_doubts(rescue), source, detail=detail)
 
 
 # 中文樣板字。BOILERPLATE 從頭到尾只有印尼文與英文,且只用在英文名那條路徑——
@@ -488,10 +529,12 @@ def _pledge_name(text: str) -> str:
     return val if CJK.search(val) and _is_name_like(val) else ""
 
 
-def rescue_name_from_pledge(pages: PageIdentification, vision: VisionReader
-                            ) -> tuple[str, str]:
-    """契約頁抽不到中文名時,改從切結書頁取。回傳 (名字, 圖檔名),救不回回 ("", "");
-    Vision 呼叫失敗往上拋(VisionCallFailed),由 _apply_pledge_rescue 寫進 L 欄。
+def rescue_name_from_pledge(pages: PageIdentification, vision: VisionReader) -> PledgeRescue:
+    """切結書頁備援:契約頁抽不到中文名時,改從切結書頁取。救不回回空的結果;
+    Vision 呼叫失敗不往上拋,記成 vision_failed,由組裝寫進 L 欄(ADR-0015)。
+
+    只救中文名,不動英文名:英文名本來就是可靠的那一欄(ADR-0004,紅章蓋的是中文
+    那一欄),而切結書頁的英文反而讀壞過 —— 32503 讀成 `FU BIN ANI FU`。
 
     **用 Vision 而不是本機 Tesseract**,這是這條管道能不能用的關鍵。同一格實測:
 
@@ -505,20 +548,27 @@ def rescue_name_from_pledge(pages: PageIdentification, vision: VisionReader
     補強引擎沒有意義。代價是每次救援 +1 次 Vision,而救援只在中文名為空時觸發
     (上一批 21 份會觸發 4 次)。
     """
+    from pathlib import Path
+
+    docx = Path(pages.docx_path).name
     for page in pages.pledge_name_pages():
-        # Vision 呼叫失敗就往上拋、不換下一頁再打:多半是服務那一端,換一張也一樣
-        # (ADR-0015);沒問到要寫在 L 欄,由 _apply_pledge_rescue 接。其他例外只是
-        # 少一格值,不該連契約頁讀到的 H~O 一起變成擷取失敗(ADR-0006)。
+        # Vision 呼叫失敗就停、不換下一頁再打:多半是服務那一端(ADR-0015)。其他例外
+        # 只是少一格值,不該連契約頁讀到的 H~O 一起變成擷取失敗(ADR-0006)。
         try:
             got = _pledge_name(vision.read_document(page.image_bytes))
-        except (VisionCallFailed, *IDENTITY_REFUSED):
+        except VisionCallFailed as e:
+            logger.warning(f"  ⚠ 切結書頁 {e}({docx})")
+            return PledgeRescue(vision_failed=True)
+        except IDENTITY_REFUSED:
             raise
         except Exception as e:
             logger.warning(f"  ⚠ 切結書頁讀取失敗({page.name}):{e!r}")
-            return "", ""
+            return PledgeRescue()
         if got:
-            return got, page.name
-    return "", ""
+            logger.info(f"  ★ 切結書頁救回中文名:{got}({docx}/{page.name})")
+            return PledgeRescue(got, page.name)
+    logger.info(f"  切結書頁未取得中文名:{docx}")
+    return PledgeRescue()
 
 
 # 門牌號:中文取「N號」(含「N之M號」,以及直接寫成「N-M號」的,如 33703),
@@ -553,7 +603,6 @@ _NAME_CN = "雇主名稱_中"
 _ADDR_CN = "地址_中"
 # 郵遞區號留空的成因冠這一格(#29、#78)。
 _ZIP = "郵遞區號"
-_NAME_MISSING = Doubt(_NAME_CN, "未擷取到中文名")
 # 沒問到 ≠ 救不回:兩條並列,審查的人知道重跑也許能補回來(ADR-0015)。
 _PLEDGE_VISION_FAILED = Doubt(_NAME_CN, "切結書頁 Vision 呼叫失敗")
 
@@ -619,10 +668,10 @@ def extract_employer_from_docx(pages: PageIdentification, vision: VisionReader,
     if not found:
         # 特徵不足不送 Vision(頁面身分不明,抽出的欄位不可信),只留截圖。切結書頁
         # 備援照跑:它讀另一頁、靠自己的標籤,契約頁找不到碰不到它。
-        return _apply_pledge_rescue(EmployerExtraction(
-            ExtractionStatus.找不到契約頁, source=Source(image=name, crop=crop_name),
-            detail=f"特徵字命中不足,最高分 {contract.page.contract_score};已存候選頁截圖"),
-            pages, vision)
+        return _not_extracted(
+            ExtractionStatus.找不到契約頁, rescue_name_from_pledge(pages, vision),
+            Source(image=name, crop=crop_name),
+            f"特徵字命中不足,最高分 {contract.page.contract_score};已存候選頁截圖")
 
     if deink:
         content = deink_red_stamp(content)
@@ -635,57 +684,8 @@ def extract_employer_from_docx(pages: PageIdentification, vision: VisionReader,
         logger.warning(f"  ⚠ {Path(pages.docx_path).name} 契約頁 {e}")
         return EmployerExtraction(ExtractionStatus.契約頁Vision呼叫失敗,
                                   source=Source(image=name, crop=crop_name), detail=str(e))
-    result = extract_employer_fields(text)
-    if not result.values.雇主名稱_中:
-        result = _apply_pledge_rescue(result, pages, vision)
+    result = extract_employer_fields(text, pledge=lambda: rescue_name_from_pledge(pages, vision))
     return replace(result, source=replace(result.source, image=name, crop=crop_name, text=text))
-
-
-def _apply_pledge_rescue(result: EmployerExtraction, pages: PageIdentification,
-                         vision: VisionReader) -> EmployerExtraction:
-    """切結書頁救回中文名 → 回傳填了中文名、名稱疑慮換過的結果;救不回來原樣回傳。
-
-    只救中文名,不動英文名:英文名本來就是可靠的那一欄(ADR-0004,紅章蓋的是中文
-    那一欄),而切結書頁的英文反而讀壞過 —— 32503 讀成 `FU BIN ANI FU`。拿它去
-    覆蓋契約頁的英文名是負向交換。
-
-    救不回來時什麼都不改:H 欄維持空、L 欄維持「H:未擷取到中文名」。這一格的
-    兩種空值成因(紅章壓死 vs 契約本身只填拼音)從文字上仍然分不出來,ADR-0004
-    那條「不猜原因」不因為多了一條管道而改變 —— 32503 正是救不回來的那一半。
-    """
-    from pathlib import Path
-
-    try:
-        got, page = rescue_name_from_pledge(pages, vision)
-    except VisionCallFailed as e:
-        logger.warning(f"  ⚠ 切結書頁 {e}({Path(pages.docx_path).name})")
-        # 「未擷取到中文名」仍然是真的:保留,緊接著並列「沒問到」;沒有那一條
-        # (整份沒擷取)就只加「沒問到」。
-        doubts = result.doubts
-        if _NAME_MISSING in doubts:
-            i = doubts.index(_NAME_MISSING) + 1
-            doubts = doubts[:i] + (_PLEDGE_VISION_FAILED,) + doubts[i:]
-        else:
-            doubts += (_PLEDGE_VISION_FAILED,)
-        return replace(result, doubts=doubts)
-    if not got:
-        logger.info(f"  切結書頁未取得中文名:{Path(pages.docx_path).name}")
-        return result
-    count = _name_doubt(got, result.values.雇主名稱_英, result.source.template)
-    rescued = (*_doubts(_NAME_CN, f"中文名取自切結書頁({page})"), *_doubts(_NAME_CN, count))
-    # 「未擷取到中文名」已經變成假的:原位換成救援這兩條,其他疑慮不動。
-    doubts = _at_missing_name(result.doubts, rescued)
-    logger.info(f"  ★ 切結書頁救回中文名:{got}({Path(pages.docx_path).name}/{page})")
-    return replace(result, values=replace(result.values, 雇主名稱_中=got), doubts=doubts)
-
-
-def _at_missing_name(doubts: tuple[Doubt, ...],
-                     replacement: tuple[Doubt, ...]) -> tuple[Doubt, ...]:
-    """「未擷取到中文名」那一條原位換成 replacement;沒有那一條就接在最後。"""
-    if _NAME_MISSING not in doubts:
-        return doubts + replacement
-    i = doubts.index(_NAME_MISSING)
-    return doubts[:i] + replacement + doubts[i + 1:]
 
 
 if __name__ == "__main__":
